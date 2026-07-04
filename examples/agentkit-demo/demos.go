@@ -75,14 +75,15 @@ func runTools(ctx context.Context, cfg config) error {
 		OnAssistantToken: func(s string) { fmt.Print(s) },
 	}
 	fmt.Print("\nassistant: ")
-	reply, err := sess.Turn(ctx)
+	res, err := sess.Turn(ctx)
 	fmt.Println()
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(reply) == "" {
+	if strings.TrimSpace(res.Reply) == "" {
 		fmt.Println("(model ended on tool calls with no final text)")
 	}
+	fmt.Printf("\n[tokens — total billed=%d · active window=%d]\n", res.Usage.Total, res.Usage.Active)
 	return nil
 }
 
@@ -418,37 +419,70 @@ func runCompact(ctx context.Context, cfg config) error {
 		fmt.Printf("  %-9s %s\n", m.Role, oneLine(m.Content))
 	}
 
-	// COMPACTION: with a budget too small for even the LOD stubs, the Shaper
-	// summarizes the oldest prefix into a compaction marker via Store.Compact.
-	// Summarize calls the Runner — here a stub so the demo is deterministic; in
-	// production it's the real client.
+	// COMPACTION SURFACED — run it through a Session.Turn so the compaction is
+	// reported (OnCompaction + TurnResult.Compactions) and token usage is
+	// tallied. Summarizer + chat are canned here so the demo stays deterministic;
+	// in production both are the real client.
 	compStore := newDemoStore()
 	for i := range 4 {
 		compStore.publish(entry(agent.KindAssistant, fmt.Sprintf("event %d: %s", i, big), clk.next()))
 	}
 	compStore.publish(entry(agent.KindUser, "What did we decide?", clk.next()))
+
 	compShaper := &agent.Shaper{
-		Store: compStore, Runner: stubRunner{summary: "Summary: 4 setup events occurred; the open question is what we decided."},
-		Policy: agent.ShaperPolicy{BudgetTokens: 120, PreserveLastMessages: 1, LODTruncateAboveChars: 100},
+		Store:  compStore,
+		Runner: stubRunner{summary: "Summary: 4 setup events occurred; the open question is what we decided."},
+		// Tiny budget for the demo; LODHeadroomTokens:-1 disables the runway
+		// margin. In production leave it 0 (→ ~10k) so reshaping keeps headroom
+		// and doesn't re-invalidate the KV cache every turn.
+		Policy: agent.ShaperPolicy{BudgetTokens: 120, PreserveLastMessages: 1, LODTruncateAboveChars: 100, LODHeadroomTokens: -1},
 	}
-	msgs, err = compShaper.Build(ctx, "demo", "You are an assistant.")
+	sess := &agent.Session{
+		SessionID: "demo", Store: compStore, Build: compShaper.Build,
+		Runner: cannedRunner{reply: "We decided to ship the compaction feature.", prompt: 42, completion: 9},
+		Now:    clk.next, MaxTurns: 3, Tracer: cfg.tracer(),
+		OnCompaction: func(ci agent.CompactionInfo) {
+			fmt.Printf("\n  ⟐ COMPACTION: %d entries folded, %d→%d tokens\n     summary (a hidden field on the turn): %s\n",
+				ci.SubsumedCount, ci.TokensBefore, ci.TokensAfter, oneLine(ci.Summary))
+		},
+	}
+	fmt.Println("\nRunning a Turn that overflows budget → the Shaper compacts transparently:")
+	res, err := sess.Turn(ctx)
 	if err != nil {
 		return err
 	}
-	fmt.Println("\nCompacted context (oldest prefix folded into a [compacted] marker):")
-	for _, m := range msgs {
-		fmt.Printf("  %-9s %s\n", m.Role, oneLine(m.Content))
-	}
+	fmt.Printf("\nassistant: %s\n", res.Reply)
+	fmt.Printf("tokens — total billed=%d · active window=%d\n", res.Usage.Total, res.Usage.Active)
+	fmt.Println("\nThe compaction surfaced (summary + meta) and the SAME turn continued to the")
+	fmt.Println("reply — the session never restarted. total = what you paid; active = the")
+	fmt.Println("compacted window the model sees now.")
 	return nil
 }
 
-// stubRunner is a canned agent.LLMRunner returning a fixed summary, so the
-// compaction demo is deterministic without depending on the (busy) model.
+// stubRunner is a canned agent.LLMRunner returning a fixed summary (for the
+// Shaper's summarize step), so the compaction demo is deterministic.
 type stubRunner struct{ summary string }
 
 func (s stubRunner) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
 	ch := make(chan llm.StreamChunk, 2)
 	ch <- llm.StreamChunk{Content: s.summary}
+	ch <- llm.StreamChunk{Done: true}
+	close(ch)
+	return ch, nil
+}
+
+// cannedRunner is a canned LLMRunner returning a fixed reply + usage (for the
+// Session's chat step), so the compaction demo stays deterministic + shows the
+// token tally without the live model.
+type cannedRunner struct {
+	reply              string
+	prompt, completion int
+}
+
+func (c cannedRunner) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolDef, _ *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk, 3)
+	ch <- llm.StreamChunk{Content: c.reply}
+	ch <- llm.StreamChunk{Usage: &llm.Usage{PromptTokens: c.prompt, CompletionTokens: c.completion, TotalTokens: c.prompt + c.completion}}
 	ch <- llm.StreamChunk{Done: true}
 	close(ch)
 	return ch, nil
@@ -524,10 +558,12 @@ func runConverge(ctx context.Context, cfg config) error {
 
 	// Turn 2: the model addresses the whole merged context in one pass.
 	fmt.Print("\n── Turn 2: resolved + addressed together ──\nassistant: ")
-	if _, err := sess.Turn(ctx); err != nil {
+	res, err := sess.Turn(ctx)
+	if err != nil {
 		return err
 	}
-	fmt.Println("\n\nOne turn boundary coalesced a lifted tool result, a queued user message,")
+	fmt.Printf("\n\n[tokens — total billed=%d · active window=%d]\n", res.Usage.Total, res.Usage.Active)
+	fmt.Println("\nOne turn boundary coalesced a lifted tool result, a queued user message,")
 	fmt.Println("and a notification — batching + injection + lifting through one seam.")
 	return nil
 }

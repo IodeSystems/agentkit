@@ -113,3 +113,53 @@ type ContextBuilder func(ctx context.Context, sessionID string, system string) (
 // ErrSessionClosed is the sentinel a terminal-tool dispatcher returns to tell
 // Turn the session was closed and no further chat rounds should fire.
 var ErrSessionClosed = errors.New("agent: session closed by terminal tool")
+
+// CompactionInfo describes a compaction the Shaper performed during a Turn. It
+// is surfaced (via Turn's result and the OnCompaction callback) so the host can
+// persist the summary as a hidden field on the turn and show meta about what
+// was folded. Token counts are the active estimator's numbers.
+type CompactionInfo struct {
+	Summary       string // the tight summary that replaced the folded prefix
+	SubsumedCount int    // how many entries were folded into the summary
+	TokensBefore  int    // estimated active-window tokens before this compaction
+	TokensAfter   int    // estimated active-window tokens after
+}
+
+// TokenUsage is the session-level token accounting surfaced every Turn.
+type TokenUsage struct {
+	// Total is cumulative prompt+completion tokens billed across every chat
+	// round of this Session's lifetime (what you paid). A host that reuses one
+	// Session across a whole conversation sees the running total; one that makes
+	// a fresh Session per Turn should persist + sum these itself.
+	Total int
+	// Active is the token count of the CURRENT live window — the built
+	// (compacted + LOD) context the model sees now, INCLUDING any compaction
+	// summary. This is the underlying-session size, distinct from Total.
+	Active int
+}
+
+// TurnResult is what Turn returns: the model's final reply, whatever the loop
+// did to the context to keep it in budget, and the running token tally.
+type TurnResult struct {
+	Reply       string
+	Compactions []CompactionInfo // usually empty or one; more if a huge context folds in stages
+	Usage       TokenUsage
+}
+
+// compactionSinkKey carries a compaction reporter through the ctx, so the Shaper
+// surfaces compactions to the Session WITHOUT changing the ContextBuilder
+// signature. A plain builder simply never reports; a Session installs the sink
+// before it calls build().
+type compactionSinkKey struct{}
+
+func withCompactionSink(ctx context.Context, fn func(CompactionInfo)) context.Context {
+	return context.WithValue(ctx, compactionSinkKey{}, fn)
+}
+
+// reportCompaction delivers ci to the sink installed in ctx, if any. The Shaper
+// (or any custom builder that folds history) calls this after it compacts.
+func reportCompaction(ctx context.Context, ci CompactionInfo) {
+	if fn, ok := ctx.Value(compactionSinkKey{}).(func(CompactionInfo)); ok && fn != nil {
+		fn(ci)
+	}
+}

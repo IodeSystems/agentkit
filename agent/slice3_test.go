@@ -186,12 +186,12 @@ func TestTurn_BatchesQueuedMessages(t *testing.T) {
 		Runner:    runner,
 		Now:       func() int64 { return 100 },
 	}
-	reply, err := s.Turn(context.Background())
+	res, err := s.Turn(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "acknowledged all three" {
-		t.Fatalf("reply=%q", reply)
+	if res.Reply != "acknowledged all three" {
+		t.Fatalf("reply=%q", res.Reply)
 	}
 	// Exactly ONE chat round-trip consumed all three queued messages.
 	if len(runner.seen) != 1 {

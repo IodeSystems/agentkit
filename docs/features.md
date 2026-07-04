@@ -194,6 +194,15 @@ pristine tail → LOD truncation → compaction. LOD is pure render-time (the
 stored entry keeps its full content behind an `event_id` pointer); compaction
 folds the oldest prefix into a summary marker via `Store.Compact`.
 
+To protect the KV cache, reshaping is deferred until the context would cross
+`BudgetTokens − LODHeadroomTokens` (default ~10k), then done in one decisive
+pass with runway — not eagerly every turn. A compaction is **surfaced**
+(`OnCompaction` + `TurnResult.Compactions`) with its summary + before/after
+tokens, and the same turn continues to the reply. Every Turn also reports
+`TurnResult.Usage` — **Total** billed vs **Active** window. The `compact` demo
+shows a compaction folding `1150→28` tokens, the summary emitted as a hidden
+field, and the `total`/`active` tally.
+
 ## 9. MCP tools — `mcp`
 
 `mcpmgr.Manager` spawns stdio MCP servers, discovers their tools, and calls

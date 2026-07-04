@@ -37,6 +37,23 @@ type Session struct {
 	// SSE / live broadcast.
 	OnAssistantToken func(string)
 
+	// OnCompaction, if set, fires whenever the Shaper folds history mid-Turn —
+	// the same info Turn returns in TurnResult.Compactions. A host persists the
+	// summary as a hidden field on the turn and/or shows meta about it.
+	OnCompaction func(CompactionInfo)
+
+	// OnUsage, if set, fires after each chat round with the running token tally
+	// (cumulative Total + current Active window). Mirrors TurnResult.Usage.
+	OnUsage func(TokenUsage)
+
+	// Estimate counts tokens for the Active-window figure. Nil → Default()
+	// (chars/4). Set to the same estimator the Shaper uses for consistency.
+	Estimate TokenEstimator
+
+	// usageTotal accumulates cumulative billed tokens across this Session's
+	// Turn calls (persisted state, not set by the host).
+	usageTotal int
+
 	// MaxTurns caps the loop (default 100 — generous, since a role may chain
 	// read tool calls before its terminal output; better to pay extra
 	// round-trips than wedge the pipeline). Tests set this small.
@@ -93,14 +110,15 @@ func (s *Session) Inject(ctx context.Context, e Entry) error {
 	return s.Store.Append(ctx, s.SessionID, e)
 }
 
-// Turn runs the unified loop and returns the model's final assistant reply
-// (possibly empty if the loop ended on tool calls without text).
+// Turn runs the unified loop and returns a TurnResult: the model's final reply,
+// any compactions the Shaper performed to stay in budget, and the running token
+// tally (cumulative Total + current Active window).
 //
 // Queued-message BATCHING is inherent here: ClaimPending marks ALL pending
 // inbox arrivals shown at the top of an iteration, and build() renders every
 // non-subsumed entry — so N messages that queued between activations are seen
 // in ONE turn, not one turn each.
-func (s *Session) Turn(ctx context.Context) (lastReplyOut string, err error) {
+func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("Turn"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID)
 	defer func() {
@@ -110,6 +128,15 @@ func (s *Session) Turn(ctx context.Context) (lastReplyOut string, err error) {
 			sp.End()
 		}
 	}()
+
+	// Install the compaction sink so a Shaper's mid-Turn compaction surfaces
+	// into result.Compactions + OnCompaction, without changing ContextBuilder.
+	ctx = withCompactionSink(ctx, func(ci CompactionInfo) {
+		result.Compactions = append(result.Compactions, ci)
+		if s.OnCompaction != nil {
+			s.OnCompaction(ci)
+		}
+	})
 
 	maxTurns := s.MaxTurns
 	if maxTurns <= 0 {
@@ -126,57 +153,64 @@ func (s *Session) Turn(ctx context.Context) (lastReplyOut string, err error) {
 		}
 	}
 
-	var (
-		lastReply         string
-		sawForcedToolCall bool
-	)
+	var sawForcedToolCall bool
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
 		// this is just "mark shown".
-		if _, err := s.Store.ClaimPending(ctx, s.SessionID, now()); err != nil {
-			return lastReply, fmt.Errorf("agent: claim pending: %w", err)
+		if _, e := s.Store.ClaimPending(ctx, s.SessionID, now()); e != nil {
+			return result, fmt.Errorf("agent: claim pending: %w", e)
 		}
 
 		// prepareNotificationsBeforeSend: revalidate + clear stale notices so
 		// the model never re-validates a resolved condition.
 		if s.Preparer != nil {
-			if err := s.Preparer.PrepareNotifications(ctx, s.SessionID); err != nil {
-				return lastReply, fmt.Errorf("agent: prepare notifications: %w", err)
+			if e := s.Preparer.PrepareNotifications(ctx, s.SessionID); e != nil {
+				return result, fmt.Errorf("agent: prepare notifications: %w", e)
 			}
 		}
 
-		messages, err := build(ctx, s.SessionID, s.System)
-		if err != nil {
-			return lastReply, fmt.Errorf("agent: build context: %w", err)
+		messages, e := build(ctx, s.SessionID, s.System)
+		if e != nil {
+			return result, fmt.Errorf("agent: build context: %w", e)
 		}
+		// Active window = the tokens actually sent this round (post compaction +
+		// LOD). The last build of the Turn wins.
+		result.Usage.Active = s.estimateTokens(messages)
 
-		resp, toolCalls, err := s.streamChat(ctx, messages)
-		if err != nil {
-			return lastReply, fmt.Errorf("agent: chat: %w", err)
+		resp, toolCalls, usage, e := s.streamChat(ctx, messages)
+		if e != nil {
+			return result, fmt.Errorf("agent: chat: %w", e)
+		}
+		if usage != nil {
+			s.usageTotal += usage.PromptTokens + usage.CompletionTokens
+		}
+		result.Usage.Total = s.usageTotal
+		if s.OnUsage != nil {
+			s.OnUsage(result.Usage)
 		}
 
 		if resp != "" {
-			if err := s.Store.Append(ctx, s.SessionID, Entry{
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:        uuid.New().String(),
 				Kind:      KindAssistant,
 				Content:   resp,
 				CreatedAt: now(),
-			}); err != nil {
-				return resp, fmt.Errorf("agent: persist llm reply: %w", err)
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist llm reply: %w", e)
 			}
-			lastReply = resp
+			result.Reply = resp
 		}
 
 		if len(toolCalls) == 0 {
 			// Idle. If new events arrived between the chat call and now, loop
 			// to deliver them. Otherwise we're done.
-			pending, err := s.Store.ClaimPending(ctx, s.SessionID, now())
-			if err != nil {
-				return lastReply, fmt.Errorf("agent: re-check pending: %w", err)
+			pending, e := s.Store.ClaimPending(ctx, s.SessionID, now())
+			if e != nil {
+				return result, fmt.Errorf("agent: re-check pending: %w", e)
 			}
 			if pending == 0 {
-				return lastReply, nil
+				return result, nil
 			}
 			continue
 		}
@@ -186,47 +220,60 @@ func (s *Session) Turn(ctx context.Context) (lastReplyOut string, err error) {
 			if s.ForcedTerminalTool != "" && tc.Function.Name == s.ForcedTerminalTool {
 				sawForcedToolCall = true
 			}
-			result, err := s.Dispatch(ctx, tc)
-			if err != nil {
-				if errors.Is(err, ErrSessionClosed) {
+			toolResult, e := s.Dispatch(ctx, tc)
+			if e != nil {
+				if errors.Is(e, ErrSessionClosed) {
 					sessionClosed = true
 				} else {
-					result = fmt.Sprintf("ERROR: %v", err)
+					toolResult = fmt.Sprintf("ERROR: %v", e)
 				}
 			}
-			if err := s.Store.Append(ctx, s.SessionID, Entry{
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:         uuid.New().String(),
 				Kind:       KindToolResult,
-				Content:    result,
+				Content:    toolResult,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
 				CreatedAt:  now(),
-			}); err != nil {
-				return lastReply, fmt.Errorf("agent: persist tool result: %w", err)
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist tool result: %w", e)
 			}
 		}
 		if sessionClosed {
 			// A terminal tool fired. Don't loop into another chat round.
-			return lastReply, nil
+			return result, nil
 		}
 	}
 	if s.ForcedTerminalTool != "" && !sawForcedToolCall {
-		return lastReply, fmt.Errorf(
+		return result, fmt.Errorf(
 			"agent: max turns (%d) exceeded without ever calling forced terminal tool %q "+
 				"(the LLM provider may be ignoring tool_choice forcing — verify against a "+
 				"spec-compliant endpoint)",
 			maxTurns, s.ForcedTerminalTool)
 	}
-	return lastReply, fmt.Errorf("agent: max turns (%d) exceeded", maxTurns)
+	return result, fmt.Errorf("agent: max turns (%d) exceeded", maxTurns)
+}
+
+// estimateTokens sizes a built message list with the session's estimator (nil →
+// Default). Used for the Active-window figure.
+func (s *Session) estimateTokens(msgs []llm.Message) int {
+	est := s.Estimate
+	if est == nil {
+		est = Default()
+	}
+	t := 0
+	for _, m := range msgs {
+		t += est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name)
+	}
+	return t
 }
 
 // streamChat consumes the streaming response, accumulates content, collects
 // tool calls, captures token usage (when reported), and emits per-token
 // notifications.
-func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, err error) {
+func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("streamChat"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID).Set("n_messages", len(messages))
-	var usage *llm.Usage
 	defer func() {
 		sp.Set("n_tool_calls", len(toolCalls)).Set("response_chars", len(out))
 		if usage != nil {
@@ -256,13 +303,13 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	opts.TraceID = s.ThreadID
 	ch, err := s.Runner.ChatStream(ctx, messages, s.Tools, &opts)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	var content strings.Builder
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), toolCalls, fmt.Errorf("%s", chunk.Error)
+			return content.String(), toolCalls, usage, fmt.Errorf("%s", chunk.Error)
 		}
 		if chunk.Content != "" {
 			content.WriteString(chunk.Content)
@@ -287,5 +334,5 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 			break
 		}
 	}
-	return content.String(), toolCalls, nil
+	return content.String(), toolCalls, usage, nil
 }

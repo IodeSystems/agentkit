@@ -276,6 +276,33 @@ final though.
   confirmed against corrallm end-to-end (model was saturated — 429 the whole
   session). Confirm when the backend is idle.
 
+### ✅ Slice 7 — v0.2.0: cache-aware shaping + surfacing + token accounting
+- **User spec:** LOD should trigger on ~10k tokens *remaining* (not eager —
+  each LOD/compaction rewrites the prompt prefix + blows the KV cache), LOD
+  before compaction; emit the compaction summary as a hidden field + continue
+  the same turn with meta; emit token usage total + active(current window).
+- **Delivered (breaking — Turn signature changed):**
+  - `ShaperPolicy.LODHeadroomTokens` (0→10k default; <0 disables). `shapeTarget()`
+    = Budget−headroom; Build reshapes to the target so a restructure leaves
+    runway. Phase 0 leaves the prefix untouched (cache intact) until crossed.
+  - `CompactionInfo{Summary,SubsumedCount,TokensBefore,TokensAfter}` surfaced
+    via a **ctx compaction sink** (Shaper→Session, no ContextBuilder sig change)
+    → `TurnResult.Compactions` + `Session.OnCompaction`. Same-turn continuance
+    already inherent (compaction is inside Build).
+  - `Turn` now returns `TurnResult{Reply, Compactions, Usage}` (was `(string,
+    error)`). `TokenUsage{Total,Active}`: Total=cumulative billed this session,
+    Active=current live (compacted+LOD) window. `Session.OnUsage` callback.
+    `streamChat` now returns usage; Session accumulates `usageTotal`.
+  - Surfacing = BOTH (callbacks + TurnResult), model-ctx = host-provides (per
+    user).
+- **Tests:** `shape_v2_test.go` (shapeTarget cases + Turn surfaces compaction &
+  usage). Example: `compact` demo rebuilt to run a Session.Turn showing
+  OnCompaction (summary as hidden field, 1150→28 tokens) + total/active tally;
+  `tools`/`converge` print usage. Docs (concepts/features/README) updated.
+- **Green:** `go build/vet/test ./...` ✅. autowork3 INSULATED on v0.1.0 (not
+  bumped — its 3 Turn call sites would need updating for the new signature).
+- **Next:** tag v0.2.0; optionally bump+adapt autowork3 to it.
+
 ## Status: the whole arc (slices 1–5b) is SHIPPED + committed
 - agentkit: initial commit `e152268` (not pushed; not yet its own remote).
 - autowork3: branch `agentkit-extraction`, commits `840d37c` (extraction +

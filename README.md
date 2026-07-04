@@ -54,12 +54,13 @@ sess := &agent.Session{
     OnAssistantToken: func(s string) { fmt.Print(s) },
 }
 
-reply, err := sess.Turn(ctx)          // runs the whole loop; returns the final text
+res, err := sess.Turn(ctx)            // res.Reply + res.Compactions + res.Usage{Total, Active}
 ```
 
 That `Turn` call streams the completion, dispatches every tool the model
 requests, feeds the results back, re-prompts, and returns when the model stops
-calling tools — batching any messages that queued in the meantime.
+calling tools — batching any messages that queued in the meantime, shaping the
+context to fit the window, and reporting any compaction + the token tally.
 
 ## Runnable example
 

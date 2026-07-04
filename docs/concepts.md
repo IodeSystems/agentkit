@@ -77,11 +77,13 @@ sess := &agent.Session{
     Build:     shaper.Build,    // ContextBuilder; nil → DefaultContextBuilder (verbatim)
     Preparer:  preparer,        // pre-turn notification revalidation
     OnAssistantToken: onToken,  // streamed content for SSE / live UI
+    OnCompaction: onCompaction, // fires when the Shaper folds history mid-turn
+    OnUsage:   onUsage,         // running token tally each round
     ForcedTerminalTool: "",     // name the one tool that's the session's only exit
     MaxTurns:  100,
     Tracer:    tracer,          // optional spans
 }
-reply, err := sess.Turn(ctx)
+res, err := sess.Turn(ctx)      // res.Reply, res.Compactions, res.Usage{Total, Active}
 ```
 
 `Turn` is the loop: claim the inbox → prepare notifications → build context →
@@ -131,9 +133,8 @@ verbatim. `Shaper.Build` adds three phases on top:
    verbatim, regardless of size.
 2. **LOD truncation** — older oversized entries render as a short stub (an
    `event_id` pointer + head). Pure render-time; the stored entry is untouched.
-3. **compaction** — if LOD-truncated context still overflows, summarize the
-   oldest contiguous prefix into a `KindCompaction` marker via `Store.Compact`,
-   then re-check.
+3. **compaction** — if LOD alone can't fit, summarize the oldest contiguous
+   prefix into a `KindCompaction` marker via `Store.Compact`, then re-check.
 
 Policy is per-model:
 
@@ -143,12 +144,30 @@ type ShaperPolicy struct {
     PreserveLastMessages  int
     PreserveLastToolCalls int
     LODTruncateAboveChars int
+    LODHeadroomTokens     int // runway kept below budget (0 → ~10k)
 }
 ```
 
+**Headroom, not eagerness.** Every LOD/compaction rewrites the prompt *prefix*,
+which invalidates the server's KV cache from that point — expensive. So the
+Shaper leaves the prefix alone (just appends to the tail, cache intact) until
+the context would cross `BudgetTokens − LODHeadroomTokens`, then reshapes in one
+decisive pass *below* that line — buying `~headroom` tokens of runway before the
+next event, instead of re-truncating a little every turn. LOD is tried first (it
+fits within headroom → done); compaction is the escalation only when LOD can't.
+
+**Compaction is surfaced, transparently.** A compaction happens *inside* the
+turn — the same turn then continues straight to the model's reply, no restart.
+The event is reported as `CompactionInfo{Summary, SubsumedCount, TokensBefore,
+TokensAfter}` on `TurnResult.Compactions` and the `OnCompaction` callback, so a
+host can persist the summary (a hidden field on the turn) and show what folded.
+
 Token estimation is a pluggable `TokenEstimator` (default: a conservative
 chars/4 heuristic). `agent.Budget(contextTokens, reservePct)` computes a
-budget that leaves room for the response.
+budget that leaves room for the response. Each Turn also reports
+`TurnResult.Usage` (and fires `OnUsage`): **Total** = cumulative prompt+
+completion tokens billed this session, **Active** = the size of the current
+(compacted + LOD) window the model sees now.
 
 ## Where orchestration stops
 

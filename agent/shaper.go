@@ -17,18 +17,48 @@ type ShaperPolicy struct {
 	PreserveLastMessages  int
 	PreserveLastToolCalls int
 	LODTruncateAboveChars int
+	// LODHeadroomTokens is the runway kept below BudgetTokens. The Shaper
+	// restructures (LOD, then compaction) once the estimated context would
+	// exceed BudgetTokens-LODHeadroomTokens — NOT at the hard budget. Keeping
+	// headroom means the prompt prefix is rewritten (and the KV cache
+	// invalidated) in one decisive pass with room to spare, instead of eagerly
+	// re-truncating a little more every turn. 0 → defaultLODHeadroom (10k);
+	// negative → no headroom (restructure only at BudgetTokens).
+	LODHeadroomTokens int
+}
+
+// defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
+// unset — a rule of thumb: start reshaping with ~10k tokens to spare.
+const defaultLODHeadroom = 10_000
+
+// shapeTarget is the token ceiling the Shaper actually shapes to: the hard
+// budget minus the headroom, so a restructure leaves runway. Falls back to the
+// hard budget when the headroom would meet or exceed it (small budgets/tests).
+func (p ShaperPolicy) shapeTarget() int {
+	headroom := p.LODHeadroomTokens
+	if headroom == 0 {
+		headroom = defaultLODHeadroom
+	}
+	if headroom < 0 {
+		headroom = 0
+	}
+	target := p.BudgetTokens - headroom
+	if target <= 0 {
+		return p.BudgetTokens
+	}
+	return target
 }
 
 // Shaper builds the LLM message list with a three-step algorithm:
 //
-//	0. pristine tail: the last N text messages + M tool-call exchanges are
-//	   always included verbatim regardless of size.
-//	1. LOD render: older entries whose content exceeds the policy threshold
-//	   get truncated stubs (entry-id pointer + head). No writes — pure
-//	   render-time transformation; the source entry stays intact.
-//	2. Compaction: if LOD-truncated context still exceeds budget, summarize
-//	   the oldest contiguous prefix of "older" entries into a compaction
-//	   marker via Store.Compact. Build re-runs with the marker substituted.
+//  0. pristine tail: the last N text messages + M tool-call exchanges are
+//     always included verbatim regardless of size.
+//  1. LOD render: older entries whose content exceeds the policy threshold
+//     get truncated stubs (entry-id pointer + head). No writes — pure
+//     render-time transformation; the source entry stays intact.
+//  2. Compaction: if LOD-truncated context still exceeds budget, summarize
+//     the oldest contiguous prefix of "older" entries into a compaction
+//     marker via Store.Compact. Build re-runs with the marker substituted.
 type Shaper struct {
 	Store    Store
 	Runner   LLMRunner
@@ -74,13 +104,22 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 
 		pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
 
-		// Phase 0+1: render with pristine tail + LOD on older.
+		// Shape to BudgetTokens-headroom, not the hard budget, so a restructure
+		// leaves runway and doesn't re-fire (and re-invalidate the KV cache)
+		// next turn.
+		target := sh.Policy.shapeTarget()
+
+		// Phase 0: pristine, no LOD. If we're under target, DON'T touch the
+		// prefix — appending to the tail keeps the cached prefix intact.
 		messages := sh.render(entries, pristineCount, system, false)
-		if sh.tokens(messages) <= sh.Policy.BudgetTokens {
+		before := sh.tokens(messages)
+		if before <= target {
 			return messages, nil
 		}
+		// Phase 1: LOD. Truncate older oversized entries. If that fits the
+		// target, we're done — LOD is cheaper + lossless-ish vs compaction.
 		messages = sh.render(entries, pristineCount, system, true)
-		if sh.tokens(messages) <= sh.Policy.BudgetTokens {
+		if sh.tokens(messages) <= target {
 			return messages, nil
 		}
 
@@ -130,6 +169,24 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		}); err != nil {
 			return nil, fmt.Errorf("agent/shaper: compact: %w", err)
 		}
+
+		// Surface the compaction (summary + meta) to whoever installed a sink —
+		// the Session records it into TurnResult + fires OnCompaction. Measure
+		// the new active window by re-rendering the post-compaction entries.
+		afterEntries, aerr := sh.Store.Context(ctx, sessionID)
+		after := 0
+		if aerr == nil {
+			sortEntries(afterEntries)
+			ap := classifyPristineCount(afterEntries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+			after = sh.tokens(sh.render(afterEntries, ap, system, true))
+		}
+		reportCompaction(ctx, CompactionInfo{
+			Summary:       summary,
+			SubsumedCount: len(subsumed),
+			TokensBefore:  before,
+			TokensAfter:   after,
+		})
+
 		// Loop: Context picks up the marker in place of the subsumed rows and
 		// we re-check budget.
 	}
