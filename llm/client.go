@@ -77,6 +77,13 @@ type Client struct {
 	apiKey  string
 	model   string
 	http    *http.Client
+
+	// RetryBudget caps the total wall-clock a single request spends retrying
+	// 429/5xx before giving up (exponential backoff to retryMaxBackoff,
+	// honoring retry_after, but bounded). 0 → defaultRetryBudget (5m). The
+	// caller's ctx deadline still wins if shorter. Set it per Client for a
+	// busy endpoint.
+	RetryBudget time.Duration
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -86,6 +93,14 @@ func NewClient(baseURL, apiKey, model string) *Client {
 		model:   model,
 		http:    &http.Client{},
 	}
+}
+
+// retryBudget returns the effective retry budget (the field, or the default).
+func (c *Client) retryBudget() time.Duration {
+	if c.RetryBudget > 0 {
+		return c.RetryBudget
+	}
+	return defaultRetryBudget
 }
 
 // chatURL returns the chat-completions endpoint. Accepts a baseURL with
@@ -99,13 +114,12 @@ func (c *Client) chatURL() string {
 	return u + "/chat/completions"
 }
 
-// 429 backoff schedule. Exp from initial → max, then HOLDS at max
-// indefinitely until the request succeeds or ctx is canceled. The
-// busy-box reality: on a contended free-tier endpoint, every minute
-// of waiting is another shot at slipping through; capping retry
-// count throws those shots away. We keep pounding at retryMaxBackoff
-// intervals and let the harness's ctx (thread close / shutdown) be
-// the only authoritative stop.
+// 429 backoff schedule. Exp from initial → max, then HOLDS at max until
+// the request succeeds, the ctx is canceled, or the RETRY BUDGET is
+// exhausted (Client.RetryBudget, default defaultRetryBudget). On a
+// contended box every wait is another shot at a slot — so we keep trying
+// rather than giving up after a fixed attempt count — but a SUPER-busy box
+// shouldn't be pounded forever, so the budget is the wall-clock ceiling.
 //
 // First few attempts climb 1s → 2s → 4s → 8s → 16s → 30s → 30s → …
 // so a transient burst clears fast while a sustained limit doesn't
@@ -118,6 +132,13 @@ var (
 	retryInitialBackoff = 1 * time.Second
 	retryMaxBackoff     = 30 * time.Second
 )
+
+// defaultRetryBudget bounds the TOTAL wall-clock a single postChatWithRetry
+// spends retrying (429 + 5xx) before it gives up with a clear error, when the
+// caller hasn't set Client.RetryBudget. 5m matches a "keep trying through a
+// busy spell, but don't hang a caller forever" policy; the caller's ctx
+// deadline still wins if it's shorter. var so tests can shrink it.
+var defaultRetryBudget = 5 * time.Minute
 
 // retryLogEvery throttles the "still retrying" log line. The first
 // few retries log every time; once we're holding at retryMaxBackoff
@@ -137,8 +158,9 @@ const retryLogEvery = 10
 var retryAfterCeiling = 5 * time.Minute
 
 // retry5xxMaxAttempts caps how many times we retry on a 5xx response.
-// 429 has its own infinite-retry path (Retry-After is the proxy's
-// authoritative signal). 5xx is different — it usually means
+// 429 has its own path (retry until a slot frees, bounded only by the
+// RetryBudget + ctx — Retry-After is the proxy's authoritative signal).
+// 5xx is different — it usually means
 // "upstream broke" or "transient gateway error"; retrying a few
 // times catches the proxy-blip / cold-start / momentary upstream
 // hiccup, but persistent 5xx should fail fast so the operator hears
@@ -151,20 +173,25 @@ var retry5xxMaxAttempts = 5
 // postChatWithRetry issues a chat-completions POST and transparently
 // retries on HTTP 429 with exponential backoff capped at 30s.
 // Returns the live response (caller closes its body) on success or a
-// non-retryable failure. The Retry-After header is honored when
-// numeric and ≤ 30s; otherwise the next scheduled backoff wins.
+// non-retryable failure. The retry delay is taken from the Retry-After
+// header OR a corrallm-style JSON backpressure body (retryAfterFrom),
+// clamped to retryAfterCeiling; absent both, the next scheduled backoff
+// wins.
 //
 // payload is the marshaled body. We rebuild the request every attempt
 // because http.Request.Body is single-use; bytes.NewReader is cheap.
 //
 // Why bake this into the client (not the caller): every consumer of
 // ChatStream/Chat hits 429 the same way (provider rate limit), and
-// every consumer wants the same recovery (wait and retry, give up
-// only on ctx cancel or repeated failure). Pushing this into the
-// harness would duplicate the loop in every role.
+// every consumer wants the same recovery (wait and retry, give up on
+// ctx cancel, RetryBudget exhaustion, or repeated 5xx). Pushing this
+// into the harness would duplicate the loop in every role.
 func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID string) (*http.Response, error) {
 	backoff := retryInitialBackoff
 	fiveXXAttempts := 0
+	budget := c.retryBudget()
+	start := time.Now()
+	deadline := start.Add(budget)
 	for attempt := 0; ; attempt++ {
 		// Cheap ctx check before each attempt so a cancellation that
 		// arrived between the last sleep and now short-circuits
@@ -207,17 +234,17 @@ func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID 
 			// exp-backoff schedule. Counter NOT incremented for the
 			// 5xx cap — 429 is "wait your turn", not "broken".
 			sleep := backoff
-			if ra := resp.Header.Get("Retry-After"); ra != "" {
-				if secs, perr := strconv.Atoi(strings.TrimSpace(ra)); perr == nil && secs > 0 {
-					sleep = time.Duration(secs) * time.Second
-					if sleep > retryAfterCeiling {
-						sleep = retryAfterCeiling
-					}
-				}
-			}
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			if d, ok := retryAfterFrom(resp.Header, bodyBytes); ok {
+				sleep = d
+			}
 
+			if time.Now().Add(sleep).After(deadline) {
+				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of 429 backpressure",
+					budget, time.Since(start).Round(time.Second))
+			}
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
 				log.Printf("llm: provider returned 429 (attempt %d); retrying in %s",
 					attempt+1, sleep)
@@ -234,19 +261,19 @@ func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID 
 			// also honored if the server sends it.
 			fiveXXAttempts++
 			sleep := backoff
-			if ra := resp.Header.Get("Retry-After"); ra != "" {
-				if secs, perr := strconv.Atoi(strings.TrimSpace(ra)); perr == nil && secs > 0 {
-					sleep = time.Duration(secs) * time.Second
-					if sleep > retryAfterCeiling {
-						sleep = retryAfterCeiling
-					}
-				}
-			}
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			if d, ok := retryAfterFrom(resp.Header, bodyBytes); ok {
+				sleep = d
+			}
 
 			if fiveXXAttempts >= retry5xxMaxAttempts {
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
+			}
+			if time.Now().Add(sleep).After(deadline) {
+				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s (last status %d)",
+					budget, time.Since(start).Round(time.Second), status)
 			}
 			log.Printf("llm: upstream returned %d (5xx attempt %d/%d); retrying in %s",
 				status, fiveXXAttempts, retry5xxMaxAttempts, sleep)
@@ -262,6 +289,48 @@ func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID 
 			backoff = retryMaxBackoff
 		}
 	}
+}
+
+// retryAfterFrom extracts a retry delay from a throttled/failed response.
+// The Retry-After HEADER wins (HTTP standard, integer seconds). When absent,
+// corrallm-style backpressure BODIES carry the hint as JSON — either a
+// top-level "retry_after" or one nested under "error" (the shape corrallm's
+// fair-share proxy returns on 429: {"error":{"reason":"queue-timeout",
+// "retry_after":10,...}}). Returns ok=false when neither is present, so the
+// caller keeps its exponential-backoff schedule. Always clamped to
+// retryAfterCeiling so a misbehaving server can't park the daemon.
+func retryAfterFrom(h http.Header, body []byte) (time.Duration, bool) {
+	if ra := strings.TrimSpace(h.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			return clampRetry(secs), true
+		}
+	}
+	if len(body) > 0 {
+		var parsed struct {
+			RetryAfter int `json:"retry_after"`
+			Error      struct {
+				RetryAfter int `json:"retry_after"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(body, &parsed) == nil {
+			secs := parsed.RetryAfter
+			if secs == 0 {
+				secs = parsed.Error.RetryAfter
+			}
+			if secs > 0 {
+				return clampRetry(secs), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func clampRetry(secs int) time.Duration {
+	d := time.Duration(secs) * time.Second
+	if d > retryAfterCeiling {
+		d = retryAfterCeiling
+	}
+	return d
 }
 
 // sleepOrCancel waits sleep duration unless ctx fires first. Returns
@@ -293,10 +362,26 @@ func sleepOrCancel(ctx context.Context, sleep time.Duration) bool {
 //	Bearer), not this header. Harness Sessions set TraceID = thread
 //	id; empty is fine (the header just won't be sent).
 //
+// Grammar: when non-empty, forwarded as the request body's "grammar"
+//
+//	field — a GBNF grammar the server constrains token sampling to
+//	(llama.cpp / corrallm). Raw passthrough; the server owns the
+//	syntax. Use for hard structural guarantees the model cannot
+//	violate (vs the client-side agent.Validator fix loop, which
+//	corrects a bad reply after the fact).
+//
+// ResponseFormat: when non-nil, forwarded as the request body's
+//
+//	"response_format" — e.g. map[string]any{"type":"json_object"} or a
+//	{"type":"json_schema","json_schema":{...}} object. Marshaled
+//	as-is; the server decides support.
+//
 // Nil opts behaves as the default.
 type ChatOpts struct {
-	ToolChoice string
-	TraceID    string
+	ToolChoice     string
+	TraceID        string
+	Grammar        string
+	ResponseFormat any
 }
 
 // ChatStream sends a chat completion request with streaming enabled.
@@ -327,6 +412,15 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 			body["tool_choice"] = opts.ToolChoice
 		}
 	}
+	// Constrained-decoding passthroughs. grammar (GBNF) and
+	// response_format are server-side sampling constraints — llama.cpp /
+	// corrallm honor them; providers that don't simply ignore the fields.
+	if opts != nil && opts.Grammar != "" {
+		body["grammar"] = opts.Grammar
+	}
+	if opts != nil && opts.ResponseFormat != nil {
+		body["response_format"] = opts.ResponseFormat
+	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -342,13 +436,27 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("llm: status %d", resp.StatusCode)
+		return nil, statusError(resp)
 	}
 
 	ch := make(chan StreamChunk, 64)
 	go c.readStream(ctx, resp.Body, ch)
 	return ch, nil
+}
+
+// statusError formats a non-2xx response into an error that INCLUDES a snippet
+// of the response body — the provider's error message (e.g. a 400 explaining
+// which tool schema it rejected) is the single most useful thing for debugging
+// an integration, and dropping it turns every failure into an opaque "status
+// 400". Closes the body.
+func statusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	resp.Body.Close()
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		return fmt.Errorf("llm: status %d", resp.StatusCode)
+	}
+	return fmt.Errorf("llm: status %d: %s", resp.StatusCode, msg)
 }
 
 // Chat sends a non-streaming chat completion request.
@@ -373,11 +481,10 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("llm: status %d", resp.StatusCode)
+		return "", nil, statusError(resp)
 	}
+	defer resp.Body.Close()
 
 	var result struct {
 		Choices []struct {

@@ -25,18 +25,18 @@ const secretFilePlaceholder = "{{secret_file}}"
 // Scope:
 //   - ""        — backwards-compat default, treated as "project"
 //   - "project" — one shared instance per integration, spawned at
-//                 daemon boot. Use when the MCP server is workspace-
-//                 agnostic OR indexes the project's canonical
-//                 repo_path.
+//     daemon boot. Use when the MCP server is workspace-
+//     agnostic OR indexes the project's canonical
+//     repo_path.
 //   - "thread"  — one instance per (integration, thread) pair,
-//                 spawned lazily when the thread's first dev session
-//                 activates. The Args list may contain
-//                 "{{worktree_root}}" placeholders that the
-//                 scheduler substitutes with the thread's worktree
-//                 directory at spawn time. Tears down on thread
-//                 close. Use for per-workspace indexers (poly-lsp-mcp
-//                 and friends) where each thread has its own
-//                 worktree.
+//     spawned lazily when the thread's first dev session
+//     activates. The Args list may contain
+//     "{{worktree_root}}" placeholders that the
+//     scheduler substitutes with the thread's worktree
+//     directory at spawn time. Tears down on thread
+//     close. Use for per-workspace indexers (poly-lsp-mcp
+//     and friends) where each thread has its own
+//     worktree.
 type MCPConfig struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
@@ -70,10 +70,10 @@ type MCPTool struct {
 
 // MCPServer wraps a connected MCP client.
 type MCPServer struct {
-	Config  MCPConfig
-	Client  *client.Client
-	Tools   []MCPTool
-	ready   chan struct{}
+	Config   MCPConfig
+	Client   *client.Client
+	Tools    []MCPTool
+	ready    chan struct{}
 	readyErr error
 	// secretDir is the per-server temp directory holding the rendered
 	// 0600 secret file (empty when SecretRef is unset). Teardown
@@ -339,12 +339,8 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 			srv.Tools = append(srv.Tools, MCPTool{
 				Name:        t.Name,
 				Description: t.Description,
-				InputSchema: map[string]any{
-					"type":       t.InputSchema.Type,
-					"properties": t.InputSchema.Properties,
-					"required":   t.InputSchema.Required,
-				},
-				ServerID: cfg.ID,
+				InputSchema: normalizeSchema(t.InputSchema.Type, t.InputSchema.Properties, t.InputSchema.Required),
+				ServerID:    cfg.ID,
 			})
 		}
 
@@ -394,6 +390,30 @@ func (m *Manager) materializeSecret(ctx context.Context, cfg MCPConfig) (args, e
 	args = substitutePlaceholder(cfg.Args, secretFilePlaceholder, path)
 	env = substitutePlaceholder(cfg.Env, secretFilePlaceholder, path)
 	return args, env, dir, nil
+}
+
+// normalizeSchema builds the JSON-Schema object advertised for a tool, filling
+// nil sub-fields with their empty forms. An MCP tool with no required fields
+// yields a nil Required, which marshals to `"required": null` — invalid JSON
+// Schema that breaks strict tool-grammar generators. Notably llama.cpp rejects
+// the whole request with `type must be array, but is null`. Defaulting
+// nil→empty ([] / {}) and an empty type→"object" keeps the schema valid for
+// every downstream consumer.
+func normalizeSchema(typ string, properties map[string]any, required []string) map[string]any {
+	if typ == "" {
+		typ = "object"
+	}
+	if properties == nil {
+		properties = map[string]any{}
+	}
+	if required == nil {
+		required = []string{}
+	}
+	return map[string]any{
+		"type":       typ,
+		"properties": properties,
+		"required":   required,
+	}
 }
 
 // substitutePlaceholder returns a copy of in with every occurrence of

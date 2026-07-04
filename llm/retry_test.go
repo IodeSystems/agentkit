@@ -181,6 +181,119 @@ func TestPostChatWithRetry_RespectsRetryAfterCap(t *testing.T) {
 	}
 }
 
+// TestRetryAfterFrom — unit coverage for the header-first / body-fallback
+// extraction. corrallm's fair-share proxy returns the hint in the JSON body
+// (nested under "error"), NOT the Retry-After header, so the body path is
+// load-bearing for the real provider.
+func TestRetryAfterFrom(t *testing.T) {
+	prevCeil := retryAfterCeiling
+	retryAfterCeiling = 5 * time.Minute
+	defer func() { retryAfterCeiling = prevCeil }()
+
+	corrallmBody := []byte(`{"error":{"capacity":1,"in_flight":1,"message":"backend at capacity; retry after backoff","reason":"queue-timeout","retry_after":10,"type":"backpressure","waiting":0}}`)
+
+	cases := []struct {
+		name   string
+		hdr    string
+		body   []byte
+		wantOK bool
+		want   time.Duration
+	}{
+		{"header wins", "3", corrallmBody, true, 3 * time.Second},
+		{"corrallm body error.retry_after", "", corrallmBody, true, 10 * time.Second},
+		{"top-level retry_after", "", []byte(`{"retry_after":7}`), true, 7 * time.Second},
+		{"neither present", "", []byte(`{"error":{"message":"nope"}}`), false, 0},
+		{"non-json body", "", []byte(`backend busy`), false, 0},
+		{"empty", "", nil, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.hdr != "" {
+				h.Set("Retry-After", tc.hdr)
+			}
+			got, ok := retryAfterFrom(h, tc.body)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v; want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.want {
+				t.Errorf("delay = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPostChatWithRetry_RespectsBodyRetryAfter — a 429 whose ONLY retry hint
+// is a corrallm-style JSON body (no Retry-After header) must still shape the
+// sleep. This is the exact shape observed live at llm.iodesystems.com.
+func TestPostChatWithRetry_RespectsBodyRetryAfter(t *testing.T) {
+	saveInit, saveMax := retryInitialBackoffSet(10*time.Millisecond, 5*time.Second)
+	defer retryInitialBackoffSet(saveInit, saveMax)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"reason":"queue-timeout","retry_after":1,"type":"backpressure"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "m")
+	start := time.Now()
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("postChatWithRetry: %v", err)
+	}
+	resp.Body.Close()
+	// Slept the body's retry_after:1 (not the 10ms initial backoff).
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v; want ≥ ~1s honoring body retry_after:1", elapsed)
+	}
+}
+
+// TestPostChatWithRetry_GivesUpAfterRetryBudget — sustained 429 (no slot ever
+// frees) must stop retrying once the RetryBudget wall-clock is spent, with a
+// clear "retry budget exhausted" error, rather than pounding a busy box until
+// the caller's ctx (which may be very long) fires.
+func TestPostChatWithRetry_GivesUpAfterRetryBudget(t *testing.T) {
+	fastBackoff(t) // initial=10ms, max=50ms
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "m")
+	c.RetryBudget = 150 * time.Millisecond // tiny budget for the test
+
+	start := time.Now()
+	// ctx deadline is deliberately far longer than the budget — the BUDGET must
+	// be what stops it.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := c.postChatWithRetry(ctx, []byte(`{}`), "test")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("nil error; want retry-budget-exhausted error")
+	}
+	if !strings.Contains(err.Error(), "retry budget") {
+		t.Errorf("err = %v; want it to mention the retry budget", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed = %v; want it to give up near the 150ms budget, not run to ctx", elapsed)
+	}
+	if hits.Load() < 1 {
+		t.Errorf("server hits = %d; want ≥ 1 (it should try at least once)", hits.Load())
+	}
+}
+
 // TestPostChatWithRetry_SendsAPIKeyAndTrace — the API key is sent as the
 // Authorization Bearer (autowork3's scheduling identity to the llama-swap
 // fork), and the trace id is forwarded for log correlation.
