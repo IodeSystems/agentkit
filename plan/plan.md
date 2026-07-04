@@ -207,6 +207,68 @@ final though.
 - Tests: `notify_revalidate_test.go` (parse + end-to-end glue) + flipped
   lifecycle assertion. Committed `646d348`. Full suite + agentkit green.
 
+### ✅ Slice 6 — public-facing docs + runnable example + grammar passthrough
+- **Goal (user):** show integrators the value — README, CLAUDE.md, docs, and a
+  CLI example against corrallm (`llm.iodesystems.com`) demonstrating every
+  major feature (tool loop, injection, local tools, schemas, grammar, …).
+- **Verified provider facts:** endpoint live, OpenAI-compatible; chat model
+  `Qwen3-6-27B-MPT` (~220k ctx); no auth for reads; api-key = scheduling
+  priority. 429 backpressure returns `retry_after` in a JSON BODY
+  (`{"error":{"reason":"queue-timeout","retry_after":10}}`), NOT the
+  `Retry-After` header. Backend is single-capacity + usually busy.
+- **Library changes (additive, tested):**
+  - `llm.ChatOpts` gained `Grammar` (GBNF) + `ResponseFormat` (any) → forwarded
+    raw into the request body when set; omitted when unset. This is the ONLY
+    reason server-side constrained decoding didn't work before — the client
+    never sent the fields (backend/config were fine). `tool_choice` already
+    shipped.
+  - 429/5xx retry now honors `retry_after` from the JSON body too, not just the
+    `Retry-After` header (`retryAfterFrom` helper; header wins, body falls
+    back, clamped to ceiling). Directly addresses corrallm's backpressure shape.
+  - **Retry is now BOUNDED (was infinite-until-ctx).** `Client.RetryBudget`
+    (default `defaultRetryBudget` = 5m) caps total wall-clock spent retrying;
+    ctx deadline still wins if shorter. Reverses the prior deliberate
+    infinite-429 policy per user ("super busy box, exponential retry to a
+    limit, timeouts configurable 5m"). Demo `--timeout` (default 5m) drives
+    both the ctx deadline and `client.RetryBudget`.
+  - Tests: `TestRetryAfterFrom`, `TestPostChatWithRetry_RespectsBodyRetryAfter`,
+    `TestPostChatWithRetry_GivesUpAfterRetryBudget`,
+    `TestChatStream_ForwardsConstrainedDecoding`.
+- **corrallm side (ml-kit/corrallm.yaml):** added a random-minted interactive
+  key `sk-agentkit-…25` for the demo. corrallm loads keys once at boot →
+  **needs a restart to activate** (not done: can't fully reconstruct the live
+  launch env — ADDR etc. — and it'd bounce the 2.5-day prod server + evict
+  Qwen + interrupt aw3). Staged only; user owns the restart.
+- **Example `examples/agentkit-demo/`** (same module, package main): subcommands
+  chat/tools/schema/grammar/inject/lift/notify/compact. `store.go` = a complete
+  in-mem `agent.Store` (+ RevalidateStore) integrators can copy. Offline demos
+  (schema/inject/lift/notify/compact) are deterministic (compact uses a
+  stubRunner for the summarize step); live demos (chat/tools/grammar) hit the
+  model and degrade gracefully on 429 with an explanation. All offline demos
+  run-verified; live path confirmed to honor backpressure to `--timeout`.
+- **Docs:** `README.md`, repo `CLAUDE.md` (invariants + guardrails), `docs/
+  {concepts,features,provider}.md`, `examples/agentkit-demo/README.md`.
+- **Kitchen-sink continuation (round 2):**
+  - `mcp` demo — real mcpmgr integration (`mcp.go`: `mcpToolDefs` +
+    `mcpDispatcher` bridges); spawns `npx @modelcontextprotocol/server-everything`.
+    **Live-confirmed** (model called `echo` through MCP).
+  - `structured` demo — reliable typed extraction stacking tool_choice +
+    SchemaValidator + ForcedTerminalTool + ErrSessionClosed. **Live-confirmed.**
+  - `--trace` flag + `trace.go` — a ~40-line stdout `agent.Tracer` (nested
+    Turn/streamChat spans + timings). **Live-confirmed.**
+  - **llm.Client now surfaces the 4xx/5xx BODY** (`statusError`) instead of an
+    opaque "status N" — this is how we found the MCP bug. +test.
+  - **mcpmgr bug fixed:** a tool with no required fields emitted
+    `"required": null`, which llama.cpp rejects ("type must be array, but is
+    null") → the whole chat 400s. `normalizeSchema` defaults nil→[]/{} and
+    empty type→object. +test. Benefits autowork3 too.
+- **Green:** `go build ./... && go vet ./... && go test ./...` ✅ (all live
+  demos except MCP/structured/grammar are offline-deterministic; those three +
+  chat/tools confirmed live via the dedicated `agentkit` key).
+- **NOT done / next:** not committed yet; live grammar/tool_choice not yet
+  confirmed against corrallm end-to-end (model was saturated — 429 the whole
+  session). Confirm when the backend is idle.
+
 ## Status: the whole arc (slices 1–5b) is SHIPPED + committed
 - agentkit: initial commit `e152268` (not pushed; not yet its own remote).
 - autowork3: branch `agentkit-extraction`, commits `840d37c` (extraction +
