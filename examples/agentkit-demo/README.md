@@ -10,6 +10,7 @@ go run ./examples/agentkit-demo <command> [flags]
 | command | shows | needs the model? |
 |---------|-------|------------------|
 | `chat`       | streaming chat + fair-share 429 backpressure retry | yes |
+| `serve`      | SSE streaming relay (`StreamChunkToSSE`) — stream a completion to a browser/curl | yes |
 | `tools`      | local Go tool-call loop (`get_weather`, `add`) | yes |
 | `mcp`        | MCP server integration: spawn, discover tools, call them | yes + npx |
 | `schema`     | client-side schema validation + fix loop | no |

@@ -43,6 +43,8 @@ type config struct {
 	timeout time.Duration
 	prompt  string
 	trace   bool
+	addr    string
+	keep    bool
 }
 
 func (c config) client() *llm.Client {
@@ -65,6 +67,7 @@ type demo struct {
 
 var demos = []demo{
 	{"chat", "streaming chat + fair-share 429 backpressure retry", runChat},
+	{"serve", "SSE streaming relay (stream a completion to a browser/curl)", runServe},
 	{"tools", "local Go tool-call loop", runTools},
 	{"mcp", "MCP server integration (spawn, discover, call)", runMCP},
 	{"schema", "client-side schema validation + fix loop", runSchema},
@@ -107,6 +110,8 @@ func main() {
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "deadline + client retry budget for a live call (429 retries count against it)")
 	fs.StringVar(&cfg.prompt, "prompt", "", "prompt override (command-specific default otherwise)")
 	fs.BoolVar(&cfg.trace, "trace", false, "print the loop's spans (Turn / streamChat / Shaper.Build) with timings")
+	fs.StringVar(&cfg.addr, "addr", "", "serve: listen address (default 127.0.0.1:<ephemeral>)")
+	fs.BoolVar(&cfg.keep, "keep", false, "serve: keep serving after the self-request (for browser/curl clients)")
 	_ = fs.Parse(os.Args[2:])
 
 	// Ctrl-C cancels the context — mirrors how a host aborts a Turn on thread

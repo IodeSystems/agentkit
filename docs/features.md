@@ -138,9 +138,31 @@ if lr, ok := agent.ParseLiftRequest(result); ok {
 
 The turn ends normally; the **session stays active**. When the upstream
 completes, the host injects the real payload as a `KindToolResult` Entry keyed
-by the same `ToolCallID`, and the next Turn reconciles. agentkit owns only the
-wire shape + wording — storage, the completion endpoint, and deadline GC stay
-with you. Lifting is event-driven, never a blocked goroutine.
+by the same `ToolCallID` (`sess.Inject`), and the **next Turn reconciles** it.
+The `lift` demo runs this end to end: Turn 1 parks on the async tool and the
+model acknowledges; the host injects the finished result; Turn 2 resumes and
+answers — the turn never blocked on the job. agentkit owns only the wire shape +
+wording; storage, the completion endpoint, and deadline GC stay with you.
+Lifting is event-driven, never a blocked goroutine.
+
+## SSE streaming to a UI — `serve`
+
+`llm.StreamChunkToSSE` formats a `StreamChunk` as a Server-Sent Events frame —
+content deltas as `data: {"type":"content","text":"…"}`, tool calls as
+`{"type":"tool_call",…}`, plus `[DONE]` and errors. Relaying a live completion
+to a browser is then a ~10-line handler:
+
+```go
+ch, _ := client.ChatStream(r.Context(), msgs, tools, nil)
+w.Header().Set("Content-Type", "text/event-stream")
+for chunk := range ch {
+    io.WriteString(w, llm.StreamChunkToSSE(chunk))
+    w.(http.Flusher).Flush()
+}
+```
+
+The `serve` demo stands up this endpoint and self-requests it, printing the raw
+frames a browser's `EventSource` would receive.
 
 ## 7. Notification lifecycle — `notify`
 

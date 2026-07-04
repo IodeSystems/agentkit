@@ -270,38 +270,70 @@ func runInject(ctx context.Context, cfg config) error {
 // ── lift: async tool results ───────────────────────────────────────
 
 func runLift(ctx context.Context, cfg config) error {
-	// A tool that can't answer inline (kicked off a long job) returns the LIFT
-	// wire shape instead of a result:
-	toolCallID := "call_run_job_1"
-	liftWire := `{"pending": true, "correlation_id": "job-7", "ttl_s": 30}`
-	fmt.Printf("tool returned: %s\n", liftWire)
+	// pending maps tool_call_id → correlation_id — the host's pending table.
+	pending := map[string]string{}
 
-	lr, ok := agent.ParseLiftRequest(liftWire)
-	if !ok {
-		return fmt.Errorf("expected a lift request")
-	}
-	// The dispatcher substitutes a clear "pending, wrap up" message so the model
-	// stops acting on the placeholder. The turn ends; the SESSION STAYS ACTIVE.
-	pending := agent.PendingResult(lr.CorrelationID, toolCallID, lr.TTLSeconds)
-	fmt.Printf("\nmodel sees instead:\n  %s\n", oneLine(pending))
+	// run_job is async: it can't answer inline, so it returns the LIFT wire
+	// shape. The dispatcher recognizes it (ParseLiftRequest), records the
+	// pending call, and substitutes PendingResult so the model wraps up. The
+	// SESSION STAYS ALIVE; the turn is NOT blocked on the job.
+	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
+		if tc.Function.Name != "run_job" {
+			return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+		}
+		wire := `{"pending": true, "correlation_id": "job-7", "ttl_s": 30}`
+		lr, ok := agent.ParseLiftRequest(wire)
+		if !ok {
+			return "started", nil
+		}
+		pending[tc.ID] = lr.CorrelationID
+		fmt.Printf("\n  ↳ run_job(...) → LIFT (pending, correlation=%s, tool_call=%s)\n", lr.CorrelationID, tc.ID)
+		return agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds), nil
+	})
 
-	// Later, when the upstream completes, the HOST injects the real payload as a
-	// tool_result keyed by the SAME tool_call_id. The next Turn reconciles it.
 	clk := &clock{}
 	store := newDemoStore()
-	store.publish(agent.Entry{
-		ID: "r1", Kind: agent.KindToolResult, ToolCallID: toolCallID,
-		ToolName: "run_job", Content: "Job job-7 finished: 3 files changed, tests green.",
-		CreatedAt: clk.next(),
-	})
-	fmt.Printf("\nupstream completes → host injects (keyed by tool_call_id=%s):\n", toolCallID)
-	msgs, _ := agent.DefaultContextBuilder(ctx, store, "demo", "")
-	for _, m := range msgs {
-		fmt.Printf("  %-9s %s\n", m.Role, oneLine(m.Content))
+	sess := &agent.Session{
+		SessionID: "demo",
+		System:    "You run export jobs with run_job. If a tool reports it is PENDING, acknowledge briefly and stop — a follow-up result will arrive later.",
+		Store:     store, Runner: cfg.client(), Tools: []llm.ToolDef{
+			toolDef("run_job", "Start a long-running export job (completes asynchronously).",
+				obj([]string{"name"}, map[string]any{"name": prop("string", "job name")})),
+		},
+		Dispatch: dispatch, Now: clk.next, MaxTurns: 6, Tracer: cfg.tracer(),
+		OnAssistantToken: func(s string) { fmt.Print(s) },
 	}
-	fmt.Println("\nagentkit owns only the wire shape + wording. Storage, the completion")
-	fmt.Println("endpoint, and deadline GC stay with the host — lifting is event-driven,")
-	fmt.Println("never a blocked goroutine.")
+
+	store.publish(entry(agent.KindUser, "Run the nightly export job.", clk.next()))
+	fmt.Print("── Turn 1: the dispatcher parks on the async tool ──\nassistant: ")
+	if _, err := sess.Turn(ctx); err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		fmt.Println("\n(model never called run_job — nothing to lift)")
+		return nil
+	}
+
+	// The upstream completes out-of-band; the host injects the REAL result as a
+	// tool_result keyed by the SAME tool_call_id. Inject appends it so the next
+	// Turn renders it — this is the resume seam.
+	fmt.Println("\n── upstream finishes → host injects the lifted result ──")
+	for tcID, corr := range pending {
+		_ = sess.Inject(ctx, agent.Entry{
+			Kind: agent.KindToolResult, ToolCallID: tcID, ToolName: "run_job",
+			Content:   fmt.Sprintf("Job %s finished: exported 1,240 rows to s3://exports/nightly.csv.", corr),
+			CreatedAt: clk.next(),
+		})
+		fmt.Printf("  injected tool_result for tool_call=%s\n", tcID)
+	}
+
+	fmt.Print("\n── Turn 2: the session resumes and reconciles it ──\nassistant: ")
+	if _, err := sess.Turn(ctx); err != nil {
+		return err
+	}
+	fmt.Println("\n\nThe turn never blocked on the job — it parked (PendingResult), ended, and")
+	fmt.Println("resumed on the injected result. Storage + deadline GC stay host-side;")
+	fmt.Println("agentkit owns only the wire shape + wording. Event-driven, not a goroutine park.")
 	return nil
 }
 
