@@ -188,28 +188,44 @@ final though.
   map `{"<groupBy>": "<toolName>"}` on the MCP integration config; result
   shape = return current truth, empty = clear.
 
-### ◻ Slice 5b — autowork3 MCP-convention wiring (NEXT)
-- **next:** implement the concrete consumer:
-  1. store `group_by` in notification metadata on publish (preparer needs each
-     notice's key field) — small `IngestNotification` edit.
-  2. `RevalidateStore` impl: `PendingNotices` = unshown notification
-     deliveries for the session, parse metadata.group_by + content[group_by]
-     → key; `Clear` → `events.ClearDeliveries`. (needs a per-session unshown-
-     notification read — extend events or reuse ListContextDeliveries filtered
-     to unshown notices.)
-  3. `Revalidator` impl: parse `revalidators` from the type=mcp integration
-     config (a raw-JSON extra key alongside the mcpmgr.MCPConfig fields — do
-     NOT push notification concepts into agentkit/mcpmgr); resolve the
-     thread's MCP server id; `s.mcpMgr.CallTool(serverID, tool, {key})` (use
-     the `toolCaller` seam for tests).
-  4. mask revalidator tool names out of `availableTools`/`collectTools`.
-  5. wire `Preparer: agent.MCPPreparer(store, rv)` into the scheduler's
-     `harness.Session` construction (scheduler.go ~1378).
-- **risks:** per-Turn MCP calls add latency — only iterate notices that carry
-  a group_by + have a configured revalidator; fail-open. Keep mcpmgr
-  notification-agnostic (revalidators is autowork3 config, parsed host-side).
-- **DEFERRED still:** daemon-side arbitrary-shell recheck stays out (the hook
-  + MCP convention replace the need). → icebox if ever revisited.
+### ✅ Slice 5b — autowork3 MCP-convention wiring
+- `internal/server/notify_revalidate.go`: `parseRevalidators` (a
+  `revalidators` {groupBy:toolName} map on the MCP integration config, parsed
+  host-side — mcpmgr stays notification-agnostic); `threadRevalidators` walk;
+  `mcpRevalidator` (agent.Revalidator over `mcpMgr.CallTool`); `noticeStore`
+  (agent.RevalidateStore over the events substrate — `PendingNotices` filters
+  `ListContextDeliveries` to notices with metadata.group_by, `Clear` →
+  `ClearDeliveries`); `notificationPreparer` → `agent.MCPPreparer` or nil.
+- scheduler: `Session.Preparer` set per session; `attachMCP` masks revalidator
+  tool names from the model's surface.
+- `IngestNotification` stores `group_by` in metadata.
+- **Slice-4 semantics fixed:** `ClearDeliveries`/`ClearStaleDeliveries` now
+  retract non-compacted deliveries regardless of `shown_at` — the dominant
+  waste is a notice already shown once then re-read every Turn (build renders
+  all non-compacted deliveries); the old `shown_at IS NULL` guard only caught
+  not-yet-delivered notices.
+- Tests: `notify_revalidate_test.go` (parse + end-to-end glue) + flipped
+  lifecycle assertion. Committed `646d348`. Full suite + agentkit green.
+
+## Status: the whole arc (slices 1–5b) is SHIPPED + committed
+- agentkit: initial commit `e152268` (not pushed; not yet its own remote).
+- autowork3: branch `agentkit-extraction`, commits `840d37c` (extraction +
+  notification lifecycle) + `646d348` (5b). Not pushed.
+- **Next natural steps (unstarted):** push/publish agentkit as its own repo +
+  drop the `replace` directive; point the user's separate claude-openai
+  project at `agentkit/agent` as the 2nd consumer to validate the seam.
+
+## Icebox (deferred, opt-in)
+- **Daemon-side active recheck** — a notice carrying a shell/MCP command the
+  daemon RUNS. NOT built: arbitrary shell from a notification payload is a
+  privilege-escalation surface. Superseded by the hook + masked-MCP
+  convention (integrator owns the check). Only revisit with an explicit
+  execution-context + auth decision.
+- **Supersede vs. shown stacking** — supersede (merge replace) folds only
+  UNSHOWN accumulators, so a new emit while an old same-key notice is already
+  shown can briefly leave two in context until the preparer/TTL/clear catches
+  it. Acceptable today; tighten to "delete prior non-compacted + insert" if it
+  bites.
 
 ### ◻ Slice 3 — wire the remaining tablestakes
 - **lifting:** autowork3's `pending_lifts` mechanism → `agent.Lift` (park +
