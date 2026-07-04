@@ -94,3 +94,7 @@ trying until `--timeout`.
 Pre-release. Module path `github.com/iodesystems/agentkit` is final. Extracted
 from autowork3 (its first consumer); the interface is deliberately host-neutral
 so a second consumer can implement `Store` over its own storage.
+
+## License
+
+[MIT](LICENSE) © IodeSystems
