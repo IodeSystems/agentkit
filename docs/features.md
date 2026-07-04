@@ -240,3 +240,14 @@ tracing onto the two-method interface; `examples/agentkit-demo/trace.go` is a
 │ └ agent.streamChat (16.9s)  n_messages=2 n_tool_calls=1 total_tokens=410
 └ agent.Turn (16.9s)
 ```
+
+## 12. Putting it together — `converge`
+
+The features above are not independent — they **coalesce**. A lifted tool
+result, user messages that queued, and live notifications all converge into one
+merged context at the next turn (see
+[concepts.md → the coalescing turn boundary](concepts.md#the-coalescing-turn-boundary)).
+The `converge` demo runs it end to end: a tool call parks, then a resolved
+result + a user message + a notification accumulate while the model is idle, and
+the next Turn delivers all three together — the model addresses them in one
+reply. This convergence is the point of the event-driven turn model.

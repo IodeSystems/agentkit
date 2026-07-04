@@ -20,6 +20,7 @@ go run ./examples/agentkit-demo <command> [flags]
 | `lift`       | async tool results (lifting) | no |
 | `notify`     | notification lifecycle: supersede / clear / preparer | no |
 | `compact`    | context shaping: LOD truncation + compaction | no |
+| `converge`   | **capstone** — lifted result + queued messages + notifications merged into one turn | yes |
 
 Offline demos exercise the mechanics deterministically (no network). The live
 demos hit the shared, capacity-limited model — a **429 is a feature demo**: the

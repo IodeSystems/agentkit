@@ -454,6 +454,84 @@ func (s stubRunner) ChatStream(_ context.Context, _ []llm.Message, _ []llm.ToolD
 	return ch, nil
 }
 
+// ── converge: the coalescing turn boundary ─────────────────────────
+//
+// The headline pattern: everything that accumulates while the model is away —
+// a resolved async (lifted) tool result, user messages that queued, and live
+// notifications — is delivered as ONE merged context at the next turn. It's not
+// three features bolted together: batching + injection + lifting all flow
+// through the single Store → ClaimPending → build seam and converge.
+func runConverge(ctx context.Context, cfg config) error {
+	clk := &clock{}
+	store := newDemoStore()
+	pending := map[string]string{} // tool_call_id → correlation_id
+
+	// run_export can't answer inline, so it lifts (parks the turn).
+	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
+		if tc.Function.Name != "run_export" {
+			return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+		}
+		lr, _ := agent.ParseLiftRequest(`{"pending":true,"correlation_id":"exp-9","ttl_s":30}`)
+		pending[tc.ID] = lr.CorrelationID
+		fmt.Printf("\n  ↳ run_export(...) → LIFT (pending, correlation=%s)\n", lr.CorrelationID)
+		return agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds), nil
+	})
+
+	sess := &agent.Session{
+		SessionID: "demo",
+		System:    "You are an ops assistant. Use run_export for exports. If a tool reports it is pending, acknowledge briefly and stop. When a result and new messages later arrive, address them together in one reply.",
+		Store:     store,
+		Runner:    cfg.client(),
+		Tools: []llm.ToolDef{
+			toolDef("run_export", "Start an export job (completes asynchronously).",
+				obj([]string{"dataset"}, map[string]any{"dataset": prop("string", "dataset name")})),
+		},
+		Dispatch: dispatch, Now: clk.next, MaxTurns: 6, Tracer: cfg.tracer(),
+		OnAssistantToken: func(s string) { fmt.Print(s) },
+	}
+
+	// Turn 1: the model calls the tool, which parks.
+	store.publish(entry(agent.KindUser, "Export the sales dataset.", clk.next()))
+	fmt.Print("── Turn 1: the tool call parks (lifted) ──\nassistant: ")
+	if _, err := sess.Turn(ctx); err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		fmt.Println("\n(model never called run_export — nothing lifted)")
+		return nil
+	}
+
+	// While the model is away, THREE independent things accumulate.
+	fmt.Println("\n── while the session is idle, 3 things accumulate ──")
+	for tcID, corr := range pending { // (1) the async job finishes → lifted result
+		_ = sess.Inject(ctx, agent.Entry{
+			Kind: agent.KindToolResult, ToolCallID: tcID, ToolName: "run_export",
+			Content: fmt.Sprintf("Export %s complete: 8,300 rows → s3://exports/sales.csv.", corr), CreatedAt: clk.next(),
+		})
+		fmt.Println("  (1) lifted tool_result injected")
+	}
+	store.publish(entry(agent.KindUser, "Also — how many rows was that?", clk.next())) // (2) queued message
+	fmt.Println("  (2) user message queued")
+	store.publishNotice(entry(agent.KindNotification, "exports bucket at 82% capacity", clk.next()), "resource", "exports-bucket", false) // (3) notification
+	fmt.Println("  (3) notification published")
+
+	// PROOF: one build() carries all three, chronologically interleaved.
+	msgs, _ := agent.DefaultContextBuilder(ctx, store, "demo", "")
+	fmt.Println("\n── the coalesced context the next Turn sends (all three merged) ──")
+	for _, m := range msgs {
+		fmt.Printf("  %-9s %s\n", m.Role, oneLine(m.Content))
+	}
+
+	// Turn 2: the model addresses the whole merged context in one pass.
+	fmt.Print("\n── Turn 2: resolved + addressed together ──\nassistant: ")
+	if _, err := sess.Turn(ctx); err != nil {
+		return err
+	}
+	fmt.Println("\n\nOne turn boundary coalesced a lifted tool result, a queued user message,")
+	fmt.Println("and a notification — batching + injection + lifting through one seam.")
+	return nil
+}
+
 // ── shared helpers ─────────────────────────────────────────────────
 
 // verbose wraps a dispatcher to print each tool call + result.

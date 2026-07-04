@@ -77,6 +77,7 @@ var demos = []demo{
 	{"lift", "async tool results (lifting)", runLift},
 	{"notify", "notification lifecycle: supersede / clear / preparer", runNotify},
 	{"compact", "context shaping: LOD truncation + compaction", runCompact},
+	{"converge", "coalescing turn boundary: lifted result + queued msgs + notifications merged", runConverge},
 }
 
 func main() {

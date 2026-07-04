@@ -92,6 +92,36 @@ or `MaxTurns`).
 `Session.Inject(ctx, Entry)` appends to this session's own log so the next
 `Turn` renders it — the self-inbox injection primitive.
 
+## The coalescing turn boundary
+
+The turn boundary is a **coalescing point** — and this is the most useful thing
+the model buys you. Whatever accumulates while the model is away — a resolved
+async (lifted) tool result, user messages that queued, and live notifications —
+is delivered as **one merged context** on the next turn, not one turn per item.
+
+This isn't three features bolted together; it's a single seam. Every iteration
+of `Turn` does the same thing at the top:
+
+1. `ClaimPending` — mark everything that queued as shown,
+2. the `Preparer` hook — drop notifications whose condition already resolved,
+3. `build()` — render **every** non-subsumed `Entry`, sorted by `CreatedAt`.
+
+So **batching** (many queued messages), **injection** (a pushed notification),
+and **lifting** (a tool result that arrived out-of-band, keyed by its
+`ToolCallID`) all flow through the same `Store → ClaimPending → build` path and
+converge into one chronological transcript the model answers in a single pass.
+
+Concretely: a tool call parks (the dispatcher returns `PendingResult`); the turn
+ends; while the session is idle the upstream finishes and the host injects the
+real result, the user sends another message, and an MCP notification fires. The
+next `Turn` renders all of it together — the model sees the completed job, the
+new question, and the notice as one coherent context and addresses them at once.
+The `converge` demo runs exactly this.
+
+Merging happens at the turn *boundary*, not between individual tool calls of one
+batch: within an iteration all tool calls dispatch back-to-back, and anything
+that arrives mid-dispatch is picked up at the next iteration's `ClaimPending`.
+
 ## `Shaper` — fitting the context window
 
 A `Session.Build` is any `ContextBuilder`. The default renders history

@@ -262,6 +262,13 @@ final though.
     `"required": null`, which llama.cpp rejects ("type must be array, but is
     null") → the whole chat 400s. `normalizeSchema` defaults nil→[]/{} and
     empty type→object. +test. Benefits autowork3 too.
+  - `serve` demo — SSE relay via `llm.StreamChunkToSSE`. **Live-confirmed.**
+  - `lift` demo upgraded to a live end-to-end park+resume across two Turns.
+  - `converge` capstone demo + `docs/concepts.md` "coalescing turn boundary"
+    section — names the composite pattern (a lifted result + queued messages +
+    notifications merge into ONE next-turn context). This was the underdocumented
+    headline of the event-driven turn model. **Live-confirmed.**
+  - `llm.Client` surfaces the 4xx/5xx BODY (`statusError`) not opaque status.
 - **Green:** `go build ./... && go vet ./... && go test ./...` ✅ (all live
   demos except MCP/structured/grammar are offline-deterministic; those three +
   chat/tools confirmed live via the dedicated `agentkit` key).
