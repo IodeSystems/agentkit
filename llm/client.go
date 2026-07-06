@@ -26,6 +26,13 @@ type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	Name    string `json:"name,omitempty"`
+	// ToolCalls carries an assistant message's requested tool calls, so a
+	// reconstructed conversation replays a valid assistant(tool_calls) →
+	// tool(tool_call_id) structure instead of orphan tool messages.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID links a role="tool" result back to the assistant tool call
+	// that produced it (OpenAI requires this correlation).
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall represents a tool call request from the LLM.

@@ -235,19 +235,14 @@ func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
 // render builds the llm.Message list. When lod is true, entries outside the
 // pristine tail get LOD-truncated content.
 func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod bool) []llm.Message {
-	out := make([]llm.Message, 0, len(entries)+1)
-	if system != "" {
-		out = append(out, llm.Message{Role: "system", Content: system})
-	}
 	olderEnd := len(entries) - pristineCount
-	for i, e := range entries {
+	return groupMessages(system, entries, func(i int, e Entry) string {
 		content := e.Content
 		if lod && i < olderEnd && len(content) > sh.Policy.LODTruncateAboveChars && sh.Policy.LODTruncateAboveChars > 0 {
 			content = lodStub(e, sh.Policy.LODTruncateAboveChars)
 		}
-		out = append(out, renderEntry(e, content))
-	}
-	return out
+		return content
+	})
 }
 
 // lodStub replaces content with a short head + a pointer back to the source

@@ -215,6 +215,22 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			continue
 		}
 
+		// Persist the assistant's tool CALLS (id + name + arguments) so a
+		// rebuilt context has a valid assistant(tool_calls) → tool(tool_call_id)
+		// structure, not orphan tool messages that confuse the model on replay.
+		for _, tc := range toolCalls {
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
+				ID:         uuid.New().String(),
+				Kind:       KindToolCall,
+				Content:    tc.Function.Arguments,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Function.Name,
+				CreatedAt:  now(),
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist tool call: %w", e)
+			}
+		}
+
 		var sessionClosed bool
 		for _, tc := range toolCalls {
 			if s.ForcedTerminalTool != "" && tc.Function.Name == s.ForcedTerminalTool {
