@@ -174,8 +174,8 @@ func hasEscapedBlob(s string) bool { return strings.Contains(s, `\"`) }
 // ACCEPTANCE 1: uniform poly-lsp → header + rows table, ≤ ~55% of JSON.
 func TestEncodeTight_Uniform(t *testing.T) {
 	got := EncodeTight(stdPayload)
-	want := "file server.go\n" +
-		"lang go\n" +
+	want := "file:server.go\n" +
+		"lang:go\n" +
 		"#\n" +
 		"sym,class,@\n" +
 		"Server,struct,[10,40]\n" +
@@ -219,8 +219,8 @@ func TestEncodeTight_SemiUniformSparseTable(t *testing.T) {
 }
 
 // ACCEPTANCE 3: nightmare (non-uniform + nested + delimiter-laden values) →
-// per-element recursion, \t-indent nesting, quoted delimiter values, ≤ ~100% of
-// JSON, and NO escaped JSON blob.
+// \t-indent nesting, quoted delimiter values, loose-JSON array fallback,
+// ≤ ~100% of JSON, and NO escaped JSON blob.
 func TestEncodeTight_Nightmare(t *testing.T) {
 	raw := `{"id":42,"tags":["a","b,c"],"items":[{"k":1},{"k":2,"v":"x y"},{"deep":{"meta":{"x":1,"y":2}}}],"note":"a, b | c","meta":{"deep":{"x":9}}}`
 	got := EncodeTight(raw)
@@ -230,64 +230,64 @@ func TestEncodeTight_Nightmare(t *testing.T) {
 	if r := ratio(got, raw); r > 100 {
 		t.Errorf("nightmare tight %.0f%% of JSON; want ≤ ~100%%", r)
 	}
-	// Genuine nesting via TAB indentation (meta.deep.x).
-	if !strings.Contains(got, "meta\n\tdeep\n\t\tx 9") {
+	// Genuine nesting via TAB indentation (meta.deep.x), scalar leaf via colon.
+	if !strings.Contains(got, "meta\n\tdeep\n\t\tx:9") {
 		t.Errorf("nightmare missing \\t-indented nesting for meta.deep.x:\n%s", got)
 	}
-	// Delimiter-laden value quoted (comma + pipe + spaces).
-	if !strings.Contains(got, `note "a, b | c"`) {
+	// Delimiter-laden value quoted (comma + pipe + spaces), colon delimiter.
+	if !strings.Contains(got, `note:"a, b | c"`) {
 		t.Errorf("nightmare should quote delimiter-laden value:\n%s", got)
 	}
 	// Scalar array with a comma element → bracketed + inner quote.
-	if !strings.Contains(got, `tags [a,"b,c"]`) {
+	if !strings.Contains(got, `tags:[a,"b,c"]`) {
 		t.Errorf("nightmare scalar-array rendering wrong:\n%s", got)
 	}
 	// The heterogeneous/nested items array does NOT factor into a table, so tight
-	// falls back to SELF-DELIMITING compact JSON rather than an ambiguous indented
-	// layout — this is the recoverability-over-terseness guarantee.
-	if !strings.Contains(got, `items`+"\n"+`[{"k":1},{"k":2,"v":"x y"},{"deep":{"meta":{"x":1,"y":2}}}]`) {
-		t.Errorf("nightmare items should fall back to self-delimiting JSON:\n%s", got)
+	// falls back to self-delimiting LOOSE JSON, inline via `items:[...]`.
+	if !strings.Contains(got, `items:[{k:1},{k:2,v:"x y"},{deep:{meta:{x:1,y:2}}}]`) {
+		t.Errorf("nightmare items should fall back to loose JSON inline:\n%s", got)
 	}
 }
 
 // TestEncodeTight_RecoverableNotAmbiguous is the direct answer to "can a reader
 // tell an array element from a sibling field?": a heterogeneous array must be
-// emitted as one self-delimiting JSON token, never as blank-separated indented
-// blocks that collide with the parent's sibling separators.
+// emitted as one self-delimiting (loose-JSON) token, never as blank-separated
+// indented blocks that collide with the parent's sibling separators.
 func TestEncodeTight_RecoverableNotAmbiguous(t *testing.T) {
 	// Array with a NESTED cell (can't be a flat table), plus a sibling scalar
 	// field after it — the case that used to produce ambiguous per-element blocks.
 	got := EncodeTight(`{"rows":[{"a":1},{"b":{"x":2}}],"after":7}`)
-	// The array is one self-delimiting JSON token on its own line under the key.
-	if !strings.Contains(got, "rows\n[{\"a\":1},{\"b\":{\"x\":2}}]") {
-		t.Fatalf("nested-cell array should fall back to self-delimiting JSON:\n%s", got)
+	// The array is one self-delimiting token, inline under its key.
+	if !strings.Contains(got, "rows:[{a:1},{b:{x:2}}]") {
+		t.Fatalf("nested-cell array should fall back to self-delimiting loose JSON:\n%s", got)
 	}
 	// `after` is a plain root field — unambiguously NOT an array element.
-	if !strings.Contains(got, "after 7") {
+	if !strings.Contains(got, "after:7") {
 		t.Errorf("sibling field lost:\n%s", got)
 	}
 	// No blank-line-separated bare blocks that could be misread as array elements.
-	if strings.Contains(got, "\n\na ") || strings.Contains(got, "\n\nb ") {
+	if strings.Contains(got, "\n\na:") || strings.Contains(got, "\n\nb:") {
 		t.Errorf("tight must not emit ambiguous per-element blocks:\n%s", got)
 	}
 }
 
 // Per-strategy unit checks.
 func TestEncodeTight_Strategies(t *testing.T) {
-	// 1 & 6: all-scalar object → inline; literal-ambiguous strings quoted (type).
-	if got := EncodeTight(`{"n":42,"s":"hi","b":true,"z":null,"num":"42"}`); got != `n 42, s hi, b true, z null, num "42"` {
+	// 1 & 6: all-scalar object → inline `key:val,key:val`; literal-ambiguous
+	// strings quoted (type preserved).
+	if got := EncodeTight(`{"n":42,"s":"hi","b":true,"z":null,"num":"42"}`); got != `n:42,s:hi,b:true,z:null,num:"42"` {
 		t.Errorf("all-scalar inline / literal-ambiguity: %q", got)
 	}
 	// 2: prose (multiline JSON string) → verbatim, no quotes/escaping.
 	if got := EncodeTight("\"line1\\nline2\""); got != "line1\nline2" {
 		t.Errorf("prose passthrough: %q", got)
 	}
-	// 3: scalar array → inline brackets.
-	if got := EncodeTight(`{"tags":["a","b"]}`); got != "tags [a,b]" {
+	// 3: scalar array → inline brackets, colon delimiter.
+	if got := EncodeTight(`{"tags":["a","b"]}`); got != "tags:[a,b]" {
 		t.Errorf("scalar array: %q", got)
 	}
-	// 7: nested object → \t per level.
-	if got := EncodeTight(`{"a":{"b":{"c":1}}}`); got != "a\n\tb\n\t\tc 1" {
+	// 7: nested object → \t per level, scalar leaf via colon.
+	if got := EncodeTight(`{"a":{"b":{"c":1}}}`); got != "a\n\tb\n\t\tc:1" {
 		t.Errorf("nested \\t indent: %q", got)
 	}
 	// 8: empties → explicit markers.

@@ -27,31 +27,36 @@ import (
 //     of keys as a one-time header, comma-separated rows, ,, empty cells for
 //     missing keys (uniform is the degenerate case: union = the common keys).
 //  5. array that does NOT factor into a clean table (heterogeneous keys, nested
-//     cells, mixed) → RAW compact JSON. There is no unambiguous flat layout for
-//     such an array — a hand-rolled indent/blank scheme collides with the
-//     parent's sibling separators, so a reader can't tell an element from a
-//     sibling field. Tight refuses to guess: JSON is self-delimiting and fully
-//     recoverable. Terseness yields to recoverability here by design.
+//     cells, mixed) → self-delimiting LOOSE JSON (via EncodeLoose). There is no
+//     unambiguous FLAT layout for such an array — a hand-rolled indent/blank
+//     scheme collides with the parent's sibling separators — so tight defers to
+//     the structural encoder: braces/brackets bound every element, and loose
+//     strips the quotes JSON doesn't need. Terseness yields to recoverability.
 //  6. object, all values inline-able (scalar / scalar-array) → inline
-//     `key val, key val`.
-//  7. object with nested children → each key on its own line; an array child
-//     stays FLAT under the key label (a table, or a self-delimiting JSON array),
-//     a nested OBJECT is indented ONE TAB per level (\t, never spaces).
+//     `key:val,key:val`.
+//  7. object with nested children → each key on its own line; an array child is
+//     inline `key:[...]` when single-line (loose fallback) or a bare `key` label
+//     with the TABLE on the following lines; a nested OBJECT is a bare `key`
+//     label with its child indented ONE TAB per level (\t, never spaces).
 //  8. empty array/object → explicit terse marker [] / {}.
 //
-// Separators (documented, non-colliding):
-//   - table column / row-cell separator: COMMA (so an empty cell ,, is
-//     unambiguous). A value containing a comma is quoted.
-//   - inline-object pair separator: COMMA-SPACE `, ` (distinct from the bare
-//     table comma).
-//   - a scalar array keeps BRACKETS with comma-joined values: [10,40].
-//   - genuine object nesting: ONE TAB per depth level (strategy 7). Path-encoded
-//     hierarchy (dotted keys like "Server.Start") stays FLAT — no indentation.
+// CANONICAL GRAMMAR (code and every test assertion match this exactly):
+//   - key/value delimiter: COLON, no surrounding space — `id:42`, `items:[...]`.
+//     A key may not contain a colon (it is quoted if it does); a value may
+//     (the FIRST colon delimits).
+//   - inline-object pairs: `key:val` joined by bare COMMA — `n:42,s:hi`.
+//   - table header + rows: bare COMMA between cells; a missing cell is empty (,,);
+//     a cell/value containing a comma/whitespace/pipe/quote or empty is quoted.
+//   - scalar array: BRACKETS, comma-joined — [10,40] / [a,"b,c"].
+//   - non-tabular array fallback: EncodeLoose(compact JSON) — [{k:1},{k:2,v:"x y"}].
+//   - genuine object nesting: ONE TAB per depth level. Path-encoded hierarchy
+//     (dotted keys like "Server.Start") stays FLAT — no indentation.
 //
-// Invariant: recoverability first — every datum, and which key/position it
-// belongs to, is recoverable from delimiters + the union header + indentation
-// alone (never a count). Where a strategy would be ambiguous it drops to the
-// next, more explicit one. Non-JSON input passes through unchanged.
+// Invariant (non-negotiable, above any byte target): recoverability first —
+// every datum, and which key/position it belongs to, is recoverable from
+// delimiters + the union header + indentation alone (never a count). Where a
+// strategy would be ambiguous it drops to the next, more explicit one. Non-JSON
+// input passes through unchanged.
 func EncodeTight(raw string) string {
 	v, ok := parseOrdered(raw)
 	if !ok {
@@ -97,10 +102,18 @@ func renderArray(arr []any, depth int) string {
 	// keys, nested cells, mixed scalars+objects) has no unambiguous flat layout —
 	// a hand-rolled indent/blank-line scheme collides with the parent's own
 	// sibling separators, so a reader can't tell an element from a sibling field.
-	// Recoverability wins over terseness: emit RAW compact JSON, which is
-	// self-delimiting (brackets bound the array, braces bound each object) and
-	// unambiguously recoverable. depth is irrelevant to a single self-closed token.
-	return compactJSON(arr)
+	// Recoverability wins over terseness: emit self-delimiting LOOSE JSON — the
+	// structure ({}[]:,) bounds every element, but the needless quotes on keys and
+	// safe values are stripped (a strict-JSON fallback re-quotes what it doesn't
+	// need to). depth is irrelevant to a single self-closed token.
+	return looseFallback(arr)
+}
+
+// looseFallback renders a value as self-delimiting LOOSE JSON: the JSON
+// structure is preserved (so it is unambiguously recoverable) but quotes survive
+// only where they carry information (delimiter-laden / literal-ambiguous values).
+func looseFallback(v any) string {
+	return EncodeLoose(compactJSON(v))
 }
 
 // renderObject routes an object: empty (8) → all-inline (6) → nested (7).
@@ -121,13 +134,13 @@ func renderObject(m *omap, depth int) string {
 	return renderNestedObject(m, depth) // strategy 7
 }
 
-// renderInlineObject renders `key val, key val` on one line (strategy 6).
+// renderInlineObject renders `key:val,key:val` on one line (strategy 6).
 func renderInlineObject(m *omap) string {
 	parts := make([]string, len(m.keys))
 	for i, k := range m.keys {
-		parts[i] = tightKeyTok(k) + " " + renderCell(m.vals[k])
+		parts[i] = tightKeyTok(k) + ":" + renderCell(m.vals[k])
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, ",")
 }
 
 // renderNestedObject renders one key per line; array children stay flat, object
@@ -138,14 +151,19 @@ func renderNestedObject(m *omap, depth int) string {
 	for _, k := range m.keys {
 		val := m.vals[k]
 		if inlineable(val) {
-			// scalar / scalar-array → `key val` on this line.
-			blocks = append(blocks, tightKeyTok(k)+" "+renderCell(val))
+			// scalar / scalar-array → `key:val` on this line.
+			blocks = append(blocks, tightKeyTok(k)+":"+renderCell(val))
 			continue
 		}
 		child := renderNode(val, depth+1)
 		if _, isArr := val.([]any); isArr {
-			// array child (table / per-element) → FLAT under the key label.
-			blocks = append(blocks, tightKeyTok(k)+"\n"+child)
+			if strings.Contains(child, "\n") {
+				// multiline array child (a TABLE) → bare key label, table below.
+				blocks = append(blocks, tightKeyTok(k)+"\n"+child)
+			} else {
+				// single-line array child (loose-JSON fallback) → inline `key:[...]`.
+				blocks = append(blocks, tightKeyTok(k)+":"+child)
+			}
 		} else {
 			// nested OBJECT → key label + child indented ONE TAB (genuine nesting).
 			blocks = append(blocks, tightKeyTok(k)+"\n"+indentTab(child))
@@ -290,15 +308,16 @@ func tightValTok(s string) string {
 }
 
 // tightKeySafe reports whether a KEY emits bare: non-empty, no whitespace or
-// active delimiter. (No literal-ambiguity check — a key is always a string, so a
-// bare 123/true key is unambiguous.)
+// active delimiter (comma / colon / pipe / quote — colon now delimits key:value,
+// so a key can't contain one). (No literal-ambiguity check — a key is always a
+// string, so a bare 123/true key is unambiguous.)
 func tightKeySafe(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
 		switch r {
-		case ' ', '\t', '\n', '\r', '\f', '\v', ',', '|', '"':
+		case ' ', '\t', '\n', '\r', '\f', '\v', ',', ':', '|', '"':
 			return false
 		}
 	}
