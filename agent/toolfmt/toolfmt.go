@@ -1,7 +1,7 @@
 // Package toolfmt provides pluggable, information-preserving re-encoders for
 // tool-call RESULTS before they enter an LLM's context. The goal is fewer
 // tokens for the same data: JSON is verbose (repeated keys, punctuation), so a
-// uniform array of flat objects is far cheaper as YAML/TOON/CSV.
+// uniform array of flat objects is far cheaper as TOON/CSV/loose/tight.
 //
 // Every encoder shares one contract:
 //
@@ -31,24 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
-
-// EncodeYAML re-encodes a JSON tool result as YAML. YAML works for ANY JSON
-// value and is LLM-native, so this never falls back except on non-JSON input,
-// which passes through unchanged.
-func EncodeYAML(raw string) string {
-	v, ok := parseJSON(raw)
-	if !ok {
-		return raw
-	}
-	out, err := yaml.Marshal(v)
-	if err != nil {
-		return raw
-	}
-	return strings.TrimRight(string(out), "\n")
-}
 
 // EncodeTOON re-encodes a JSON tool result as Token-Oriented Object Notation:
 // a uniform array of flat objects states its keys ONCE as a header, then emits
@@ -62,9 +45,8 @@ func EncodeYAML(raw string) string {
 //     that is a uniform array of flat objects → scalar fields as `key: val`
 //     lines, then `<arrayKey>[N]{cols}:` header + rows.
 //
-// Anything else (non-uniform, deeply nested, scalar) falls back to YAML, which
-// is still terse and fully information-preserving. Non-JSON input passes
-// through unchanged.
+// Anything else (non-uniform, deeply nested, scalar) falls back to compact JSON,
+// which is fully information-preserving. Non-JSON input passes through unchanged.
 func EncodeTOON(raw string) string {
 	v, ok := parseJSON(raw)
 	if !ok {
@@ -93,8 +75,8 @@ func EncodeTOON(raw string) string {
 		}
 	}
 
-	// Fallback: terse YAML, still fully information-preserving.
-	return EncodeYAML(raw)
+	// Fallback: compact JSON, still fully information-preserving.
+	return compactJSON(v)
 }
 
 // EncodeCSV re-encodes a JSON tool result as CSV — the tersest form for flat
@@ -139,6 +121,147 @@ func EncodeCSV(raw string) string {
 
 	// Not flat tabular → passthrough raw JSON (CSV can't represent it).
 	return raw
+}
+
+// EncodeLoose re-encodes a JSON tool result as "loose JSON": the EXACT JSON
+// structure (braces, brackets, commas, colons, per-row keys) with the quote tax
+// removed where unambiguous. Object keys that are safe identifiers and string
+// values that are safe bare tokens lose their quotes; everything structural
+// stays. This sits between strict JSON and TOON — keys stay per-row (unlike
+// TOON's header-once tabular form) but the quote overhead is gone. Non-JSON
+// input passes through unchanged.
+//
+// Bare-emit rule (only USEFUL quotes survive; recoverability wins):
+//   - A KEY is bare unless it is empty or contains a structural JSON delimiter
+//     (" : , { } [ ]) or whitespace. So #, @, foo.bar, 123, us-west-2 → BARE.
+//   - A string VALUE is bare unless it is empty, contains one of those
+//     delimiters or whitespace, OR is literal-ambiguous with a bare token (it
+//     equals true/false/null or parses as a JSON number) — those keep quotes
+//     because the quote is USEFUL: it preserves string-vs-number/bool TYPE on
+//     read-back. Every other value goes bare.
+func EncodeLoose(raw string) string {
+	v, ok := parseJSON(raw)
+	if !ok {
+		return raw
+	}
+	var b strings.Builder
+	writeLoose(&b, v)
+	return b.String()
+}
+
+func writeLoose(b *strings.Builder, v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		// Sorted keys for determinism.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if looseSafeKey(k) {
+				b.WriteString(k)
+			} else {
+				b.WriteString(quoteJSON(k))
+			}
+			b.WriteByte(':')
+			writeLoose(b, t[k])
+		}
+		b.WriteByte('}')
+	case []any:
+		b.WriteByte('[')
+		for i, el := range t {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeLoose(b, el)
+		}
+		b.WriteByte(']')
+	case string:
+		if looseSafeValue(t) {
+			b.WriteString(t)
+		} else {
+			b.WriteString(quoteJSON(t))
+		}
+	default:
+		// number / bool / nil — already bare, and json.Marshal renders them
+		// exactly (nil → null, bools, numbers).
+		out, err := json.Marshal(v)
+		if err == nil {
+			b.Write(out)
+		} else {
+			b.WriteString(scalarString(v))
+		}
+	}
+}
+
+// looseSafeKey reports whether an object key can be emitted bare: non-empty and
+// free of structural JSON delimiters and whitespace. (No literal-ambiguity check
+// — a key is always a string, so a bare 123 or true key is unambiguous.)
+func looseSafeKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
+			return false
+		}
+		switch r {
+		case ',', ':', '{', '}', '[', ']', '"':
+			return false
+		}
+	}
+	return true
+}
+
+// looseSafeValue reports whether a string value can be emitted bare: non-empty,
+// no whitespace, no structural/delimiter char, and not ambiguous with a
+// number/bool/null literal (whose quote is USEFUL — it preserves type).
+func looseSafeValue(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v' {
+			return false
+		}
+		switch r {
+		case ',', ':', '{', '}', '[', ']', '"':
+			return false
+		}
+	}
+	// Ambiguous with a real scalar literal on read-back → keep quotes.
+	switch s {
+	case "true", "false", "null":
+		return false
+	}
+	if looksLikeNumber(s) {
+		return false
+	}
+	return true
+}
+
+// looksLikeNumber reports whether s would parse as a JSON number literal.
+func looksLikeNumber(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	var n json.Number
+	if err := dec.Decode(&n); err != nil {
+		return false
+	}
+	return !dec.More()
+}
+
+// quoteJSON renders s as a JSON string literal (with quotes + escaping).
+func quoteJSON(s string) string {
+	out, err := json.Marshal(s)
+	if err != nil {
+		return `"` + s + `"`
+	}
+	return string(out)
 }
 
 // EncodeJSONTOON re-encodes a JSON tool result as an EMBEDDED hybrid: the OUTER
