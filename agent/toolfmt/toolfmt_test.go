@@ -242,9 +242,33 @@ func TestEncodeTight_Nightmare(t *testing.T) {
 	if !strings.Contains(got, `tags [a,"b,c"]`) {
 		t.Errorf("nightmare scalar-array rendering wrong:\n%s", got)
 	}
-	// Heterogeneous items array → per-element (blank-separated), NOT a broken table.
-	if !strings.Contains(got, "k 1\n\nk 2, v \"x y\"") {
-		t.Errorf("nightmare items should render per-element:\n%s", got)
+	// The heterogeneous/nested items array does NOT factor into a table, so tight
+	// falls back to SELF-DELIMITING compact JSON rather than an ambiguous indented
+	// layout — this is the recoverability-over-terseness guarantee.
+	if !strings.Contains(got, `items`+"\n"+`[{"k":1},{"k":2,"v":"x y"},{"deep":{"meta":{"x":1,"y":2}}}]`) {
+		t.Errorf("nightmare items should fall back to self-delimiting JSON:\n%s", got)
+	}
+}
+
+// TestEncodeTight_RecoverableNotAmbiguous is the direct answer to "can a reader
+// tell an array element from a sibling field?": a heterogeneous array must be
+// emitted as one self-delimiting JSON token, never as blank-separated indented
+// blocks that collide with the parent's sibling separators.
+func TestEncodeTight_RecoverableNotAmbiguous(t *testing.T) {
+	// Array with a NESTED cell (can't be a flat table), plus a sibling scalar
+	// field after it — the case that used to produce ambiguous per-element blocks.
+	got := EncodeTight(`{"rows":[{"a":1},{"b":{"x":2}}],"after":7}`)
+	// The array is one self-delimiting JSON token on its own line under the key.
+	if !strings.Contains(got, "rows\n[{\"a\":1},{\"b\":{\"x\":2}}]") {
+		t.Fatalf("nested-cell array should fall back to self-delimiting JSON:\n%s", got)
+	}
+	// `after` is a plain root field — unambiguously NOT an array element.
+	if !strings.Contains(got, "after 7") {
+		t.Errorf("sibling field lost:\n%s", got)
+	}
+	// No blank-line-separated bare blocks that could be misread as array elements.
+	if strings.Contains(got, "\n\na ") || strings.Contains(got, "\n\nb ") {
+		t.Errorf("tight must not emit ambiguous per-element blocks:\n%s", got)
 	}
 }
 

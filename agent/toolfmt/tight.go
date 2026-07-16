@@ -26,14 +26,17 @@ import (
 //  4. array of objects, uniform OR semi-uniform → SPARSE UNION TABLE: the union
 //     of keys as a one-time header, comma-separated rows, ,, empty cells for
 //     missing keys (uniform is the degenerate case: union = the common keys).
-//  5. array of objects too heterogeneous (union table would be >60% empty) or
-//     whose cells hold nested values → PER-ELEMENT: each element via renderNode,
-//     blank-line separated.
+//  5. array that does NOT factor into a clean table (heterogeneous keys, nested
+//     cells, mixed) → RAW compact JSON. There is no unambiguous flat layout for
+//     such an array — a hand-rolled indent/blank scheme collides with the
+//     parent's sibling separators, so a reader can't tell an element from a
+//     sibling field. Tight refuses to guess: JSON is self-delimiting and fully
+//     recoverable. Terseness yields to recoverability here by design.
 //  6. object, all values inline-able (scalar / scalar-array) → inline
 //     `key val, key val`.
-//  7. object with nested children → each key on its own line; a child that is an
-//     array (table / per-element) stays FLAT, a child that is a nested OBJECT is
-//     indented ONE TAB per level (\t, never spaces).
+//  7. object with nested children → each key on its own line; an array child
+//     stays FLAT under the key label (a table, or a self-delimiting JSON array),
+//     a nested OBJECT is indented ONE TAB per level (\t, never spaces).
 //  8. empty array/object → explicit terse marker [] / {}.
 //
 // Separators (documented, non-colliding):
@@ -90,7 +93,14 @@ func renderArray(arr []any, depth int) string {
 			return renderTable(cols, arr) // strategy 4
 		}
 	}
-	return renderPerElement(arr, depth) // strategy 5
+	// strategy 5: an array that does NOT factor into a clean table (heterogeneous
+	// keys, nested cells, mixed scalars+objects) has no unambiguous flat layout —
+	// a hand-rolled indent/blank-line scheme collides with the parent's own
+	// sibling separators, so a reader can't tell an element from a sibling field.
+	// Recoverability wins over terseness: emit RAW compact JSON, which is
+	// self-delimiting (brackets bound the array, braces bound each object) and
+	// unambiguously recoverable. depth is irrelevant to a single self-closed token.
+	return compactJSON(arr)
 }
 
 // renderObject routes an object: empty (8) → all-inline (6) → nested (7).
@@ -166,16 +176,6 @@ func renderTable(cols []string, arr []any) string {
 		lines = append(lines, strings.Join(cells, ","))
 	}
 	return strings.Join(lines, "\n")
-}
-
-// renderPerElement renders each element via renderNode, blank-line separated
-// (strategy 5).
-func renderPerElement(arr []any, depth int) string {
-	blocks := make([]string, len(arr))
-	for i, el := range arr {
-		blocks[i] = renderNode(el, depth)
-	}
-	return strings.Join(blocks, "\n\n")
 }
 
 // renderScalarArray renders [a,b,c] with comma-joined single-line cells.
