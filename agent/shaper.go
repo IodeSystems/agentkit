@@ -25,6 +25,14 @@ type ShaperPolicy struct {
 	// re-truncating a little more every turn. 0 → defaultLODHeadroom (10k);
 	// negative → no headroom (restructure only at BudgetTokens).
 	LODHeadroomTokens int
+	// AlwaysLOD forces LOD (level-of-detail) truncation of oversized older
+	// entries on EVERY Build, from Phase 0 on — skipping the "pristine, no-LOD"
+	// fast path that otherwise leaves the context untouched while under budget.
+	// Use it to force LOD every turn (e.g. a benchmark measuring recall over
+	// truncated history). LOD is render-time and stateless — there is no
+	// persisted-LOD op — so a policy flag, not a stored operation, is the right
+	// shape for this knob.
+	AlwaysLOD bool
 }
 
 // defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
@@ -109,9 +117,11 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// next turn.
 		target := sh.Policy.shapeTarget()
 
-		// Phase 0: pristine, no LOD. If we're under target, DON'T touch the
-		// prefix — appending to the tail keeps the cached prefix intact.
-		messages := sh.render(entries, pristineCount, system, false)
+		// Phase 0: pristine tail, normally rendered WITHOUT LOD. If we're under
+		// target, DON'T touch the prefix — appending to the tail keeps the cached
+		// prefix intact. AlwaysLOD forces LOD truncation from this phase on, so
+		// oversized older entries are truncated every turn even under budget.
+		messages := sh.render(entries, pristineCount, system, sh.Policy.AlwaysLOD)
 		before := sh.tokens(messages)
 		if before <= target {
 			return messages, nil
@@ -123,74 +133,124 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 			return messages, nil
 		}
 
-		// Phase 2: compaction. Summarize the oldest contiguous prefix of
-		// "older" entries. If nothing summarizable remains, return what we
-		// have.
-		olderEnd := len(entries) - pristineCount
-		if olderEnd <= 0 {
-			return messages, nil
-		}
-
-		var subsumed []Entry
-		for i := 0; i < olderEnd; i++ {
-			if entries[i].Kind == KindCompaction {
-				// Already-compacted region — don't re-summarize a marker.
-				continue
-			}
-			subsumed = append(subsumed, entries[i])
-		}
-		if len(subsumed) == 0 {
-			return messages, nil
-		}
-
-		summary, err := sh.summarize(ctx, entries[:olderEnd])
+		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
+		// entries into a summary marker. If nothing summarizable remains, return
+		// what we have.
+		info, didCompact, err := sh.compactOldest(ctx, sessionID)
 		if err != nil {
-			return nil, fmt.Errorf("agent/shaper: summarize: %w", err)
+			return nil, err
 		}
-
-		// Place the marker at the latest CreatedAt among the subsumed rows so
-		// it sits chronologically where those events were — not at wall-clock
-		// now. Otherwise the marker (older history) floats to the end and the
-		// pristine tail reorders behind it.
-		markerCreatedAt := int64(0)
-		for _, e := range entries[:olderEnd] {
-			if e.CreatedAt > markerCreatedAt {
-				markerCreatedAt = e.CreatedAt
-			}
+		if !didCompact {
+			return messages, nil
 		}
-		if err := sh.Store.Compact(ctx, sessionID, Compaction{
-			Marker: Entry{
-				ID:        uuid.New().String(),
-				Kind:      KindCompaction,
-				Content:   summary,
-				CreatedAt: markerCreatedAt,
-			},
-			Subsumes: subsumed,
-		}); err != nil {
-			return nil, fmt.Errorf("agent/shaper: compact: %w", err)
-		}
-
 		// Surface the compaction (summary + meta) to whoever installed a sink —
-		// the Session records it into TurnResult + fires OnCompaction. Measure
-		// the new active window by re-rendering the post-compaction entries.
-		afterEntries, aerr := sh.Store.Context(ctx, sessionID)
-		after := 0
-		if aerr == nil {
-			sortEntries(afterEntries)
-			ap := classifyPristineCount(afterEntries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
-			after = sh.tokens(sh.render(afterEntries, ap, system, true))
-		}
-		reportCompaction(ctx, CompactionInfo{
-			Summary:       summary,
-			SubsumedCount: len(subsumed),
-			TokensBefore:  before,
-			TokensAfter:   after,
-		})
+		// the Session records it into TurnResult + fires OnCompaction.
+		reportCompaction(ctx, info)
 
 		// Loop: Context picks up the marker in place of the subsumed rows and
 		// we re-check budget.
 	}
 	return nil, fmt.Errorf("agent/shaper: compaction did not converge in 4 attempts")
+}
+
+// compactOldest folds the oldest contiguous prefix of non-pristine entries into
+// a single compaction marker: it loads + sorts the session's entries, classifies
+// the pristine tail under the policy, collects the summarizable older entries
+// (skipping any existing KindCompaction markers so a marker is never
+// re-summarized), summarizes them, and records the marker via Store.Compact at
+// the latest CreatedAt among the subsumed rows (so the marker sits chrono-
+// logically where those events were, not at wall-clock now).
+//
+// Returns (info, didCompact, err). didCompact is false with a zero
+// CompactionInfo — NOT an error — when there is nothing summarizable (only the
+// pristine tail remains, or every older entry is already a marker). This is the
+// single implementation shared by Build's Phase 2 and the public Compact.
+// TokensBefore/After mirror Build: a full (no-LOD) render before, an LOD render
+// of the post-compaction window after.
+func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
+	if sh.Estimate == nil {
+		sh.Estimate = Default()
+	}
+	entries, err := sh.Store.Context(ctx, sessionID)
+	if err != nil {
+		return CompactionInfo{}, false, err
+	}
+	sortEntries(entries)
+	pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+
+	olderEnd := len(entries) - pristineCount
+	if olderEnd <= 0 {
+		return CompactionInfo{}, false, nil
+	}
+
+	var subsumed []Entry
+	for i := 0; i < olderEnd; i++ {
+		if entries[i].Kind == KindCompaction {
+			// Already-compacted region — don't re-summarize a marker.
+			continue
+		}
+		subsumed = append(subsumed, entries[i])
+	}
+	if len(subsumed) == 0 {
+		return CompactionInfo{}, false, nil
+	}
+
+	before := sh.tokens(sh.render(entries, pristineCount, "", false))
+
+	summary, err := sh.summarize(ctx, entries[:olderEnd])
+	if err != nil {
+		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
+	}
+
+	// Place the marker at the latest CreatedAt among the subsumed rows so it
+	// sits chronologically where those events were — not at wall-clock now.
+	// Otherwise the marker (older history) floats to the end and the pristine
+	// tail reorders behind it.
+	markerCreatedAt := int64(0)
+	for _, e := range entries[:olderEnd] {
+		if e.CreatedAt > markerCreatedAt {
+			markerCreatedAt = e.CreatedAt
+		}
+	}
+	if err := sh.Store.Compact(ctx, sessionID, Compaction{
+		Marker: Entry{
+			ID:        uuid.New().String(),
+			Kind:      KindCompaction,
+			Content:   summary,
+			CreatedAt: markerCreatedAt,
+		},
+		Subsumes: subsumed,
+	}); err != nil {
+		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: compact: %w", err)
+	}
+
+	// Measure the new active window by re-rendering the post-compaction entries.
+	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
+	after := 0
+	if aerr == nil {
+		sortEntries(afterEntries)
+		ap := classifyPristineCount(afterEntries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+		after = sh.tokens(sh.render(afterEntries, ap, "", true))
+	}
+
+	return CompactionInfo{
+		Summary:       summary,
+		SubsumedCount: len(subsumed),
+		TokensBefore:  before,
+		TokensAfter:   after,
+	}, true, nil
+}
+
+// Compact forces a compaction fold NOW, regardless of budget — the manual
+// counterpart to the implicit folds Build performs under budget pressure. It
+// summarizes the oldest contiguous prefix of non-pristine entries into a marker
+// (via compactOldest) and returns (info, didCompact, err). When only pristine
+// entries remain (nothing summarizable), it returns (zero, false, nil): no
+// marker written, no error — so calling it repeatedly is safe and idempotent-ish
+// once history is fully folded. Hosts use this to force a deterministic fold
+// (e.g. a benchmark that must exercise history compaction, then measure recall).
+func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
+	return sh.compactOldest(ctx, sessionID)
 }
 
 // classifyPristineCount returns the number of trailing entries that qualify
