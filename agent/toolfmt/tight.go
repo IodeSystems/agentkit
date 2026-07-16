@@ -84,8 +84,19 @@ func renderNode(v any, depth int) string {
 	}
 }
 
-// renderArray routes an array: empty (8) → scalars (3) → object union table (4)
-// → per-element (5).
+// renderArray routes an array: empty (8) → scalars (3) → PROBE table-vs-loose.
+//
+// For an array of objects there are two recoverable encodings — the sparse union
+// table (strategy 4) and self-delimiting loose JSON (strategy 5) — and which is
+// smaller is NOT a fixed function of "fill %": it depends on how many keys
+// overlap, how long the key names are, and how long the values are. A sparse
+// table pays a ,, for every absent cell but factors each key name into the header
+// ONCE; loose repeats every present key name but pays nothing for absent ones.
+// So tight PROBES: it renders both candidates and emits the fewer bytes. There is
+// no magic sparsity threshold — the break-even (where enough overlap makes a
+// `,,,a:3`-style sparse row a net saving) is MEASURED. Loose is always a valid
+// candidate; the table is a candidate only when every cell is flat (inlineable),
+// since a nested cell can't sit unambiguously in a comma row.
 func renderArray(arr []any, depth int) string {
 	if len(arr) == 0 {
 		return "[]" // strategy 8
@@ -93,20 +104,13 @@ func renderArray(arr []any, depth int) string {
 	if allScalars(arr) {
 		return renderScalarArray(arr) // strategy 3
 	}
-	if allObjects(arr) {
-		if cols, ok := unionTable(arr); ok {
-			return renderTable(cols, arr) // strategy 4
+	best := looseFallback(arr) // strategy 5 — always valid + recoverable
+	if cols, ok := tableColumns(arr); ok {
+		if tbl := renderTable(cols, arr); len(tbl) < len(best) { // strategy 4
+			best = tbl
 		}
 	}
-	// strategy 5: an array that does NOT factor into a clean table (heterogeneous
-	// keys, nested cells, mixed scalars+objects) has no unambiguous flat layout —
-	// a hand-rolled indent/blank-line scheme collides with the parent's own
-	// sibling separators, so a reader can't tell an element from a sibling field.
-	// Recoverability wins over terseness: emit self-delimiting LOOSE JSON — the
-	// structure ({}[]:,) bounds every element, but the needless quotes on keys and
-	// safe values are stripped (a strict-JSON fallback re-quotes what it doesn't
-	// need to). depth is irrelevant to a single self-closed token.
-	return looseFallback(arr)
+	return best
 }
 
 // looseFallback renders a value as self-delimiting LOOSE JSON: the JSON
@@ -245,13 +249,14 @@ func renderScalar(v any) string {
 	}
 }
 
-// unionTable computes the union of keys across a non-empty array of objects
-// (first-seen order). It reports ok=false — deferring to per-element rendering —
-// when any cell holds a nested (non-inline) value, or the union table would be
-// more than 60% empty cells.
-func unionTable(arr []any) (cols []string, ok bool) {
+// tableColumns computes the union of keys across a non-empty array of objects
+// (first-seen order), reporting the columns a union table WOULD use. It reports
+// ok=false only for STRUCTURAL ineligibility — a non-object element, a nested
+// (non-inline) cell that can't sit in a comma row, or no keys at all. It does NOT
+// judge sparsity: whether a sparse table is worth emitting is decided by the
+// byte PROBE in renderArray, not a threshold here.
+func tableColumns(arr []any) (cols []string, ok bool) {
 	seen := map[string]bool{}
-	present := 0
 	for _, el := range arr {
 		m, isObj := el.(*omap)
 		if !isObj {
@@ -259,20 +264,15 @@ func unionTable(arr []any) (cols []string, ok bool) {
 		}
 		for _, k := range m.keys {
 			if !inlineable(m.vals[k]) {
-				return nil, false // nested cell → per-element
+				return nil, false // nested cell → not tabular
 			}
 			if !seen[k] {
 				seen[k] = true
 				cols = append(cols, k)
 			}
-			present++
 		}
 	}
 	if len(cols) == 0 {
-		return nil, false
-	}
-	fill := float64(present) / float64(len(arr)*len(cols))
-	if fill < 0.40 { // >60% empty → too heterogeneous for a table
 		return nil, false
 	}
 	return cols, true

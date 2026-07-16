@@ -271,6 +271,35 @@ func TestEncodeTight_RecoverableNotAmbiguous(t *testing.T) {
 	}
 }
 
+// TestEncodeTight_ArrayProbe: the table-vs-loose choice is decided by MEASURED
+// bytes, not a fixed sparsity threshold. A sparse (33%-filled) array whose shared
+// keys still make the union table smaller must render as the table; a very-sparse
+// array with short unique keys must render as loose. In both cases tight emits the
+// strictly smaller of the two recoverable candidates.
+func TestEncodeTight_ArrayProbe(t *testing.T) {
+	// 33% fill, but factoring the (repeated/long) keys into one header beats the
+	// ,, empty-cell cost → TABLE wins even though it is "mostly empty".
+	sparse := `[{"user_id":1},{"status":"active"},{"flagged":true},{"user_id":2}]`
+	gotSparse := EncodeTight(sparse)
+	loose := EncodeLoose(sparse)           // the loose candidate the probe compares against
+	if strings.HasPrefix(gotSparse, "[") { // loose starts with '['; a table does not
+		t.Errorf("sparse-but-overlapping array should PROBE to the table, got loose:\n%s", gotSparse)
+	}
+	if len(gotSparse) >= len(loose) {
+		t.Errorf("probe must pick the smaller: table %d should be < loose %d", len(gotSparse), len(loose))
+	}
+	if !strings.HasPrefix(gotSparse, "user_id,status,flagged\n") {
+		t.Errorf("expected union-table header:\n%s", gotSparse)
+	}
+
+	// Very sparse, short unique keys → the empties dominate, loose wins.
+	vs := `[{"a":1},{"b":2},{"c":3},{"d":4},{"e":5}]`
+	gotVS := EncodeTight(vs)
+	if gotVS != "[{a:1},{b:2},{c:3},{d:4},{e:5}]" {
+		t.Errorf("very-sparse array should PROBE to loose, got:\n%s", gotVS)
+	}
+}
+
 // Per-strategy unit checks.
 func TestEncodeTight_Strategies(t *testing.T) {
 	// 1 & 6: all-scalar object → inline `key:val,key:val`; literal-ambiguous
