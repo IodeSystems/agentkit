@@ -417,6 +417,10 @@ func cellString(v any) string {
 // parseJSON reports whether raw is valid JSON and returns the decoded value.
 func parseJSON(raw string) (any, bool) {
 	dec := json.NewDecoder(strings.NewReader(raw))
+	// Keep numbers as their source literal — without this, a large integer id
+	// (28457823) decodes to float64 and scalarString formats it back in
+	// scientific notation (2.8457823e+07), corrupting the token the LLM reads.
+	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
