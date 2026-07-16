@@ -77,6 +77,13 @@ type Session struct {
 	// its existing observability labels stable.
 	SpanPrefix string
 
+	// EncodeToolResult, if set, re-encodes a raw tool-result string BEFORE it is
+	// stored + rendered into the model's context — e.g. JSON → YAML/TOON/CSV for a
+	// terser, more token-efficient representation. nil = passthrough (the raw
+	// result is stored unchanged). The transform must be information-preserving:
+	// the model only READS the result, so a non-JSON representation is safe.
+	EncodeToolResult func(raw string) string
+
 	// Now is overridable in tests.
 	Now func() int64
 
@@ -243,6 +250,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				} else {
 					toolResult = fmt.Sprintf("ERROR: %v", e)
 				}
+			}
+			if s.EncodeToolResult != nil {
+				toolResult = s.EncodeToolResult(toolResult)
 			}
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:         uuid.New().String(),
