@@ -2,6 +2,7 @@ package toolfmt
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -297,6 +298,119 @@ func TestEncodeTight_ArrayProbe(t *testing.T) {
 	gotVS := EncodeTight(vs)
 	if gotVS != "[{a:1},{b:2},{c:3},{d:4},{e:5}]" {
 		t.Errorf("very-sparse array should PROBE to loose, got:\n%s", gotVS)
+	}
+}
+
+// TestEncodeLift covers the lift add-in: dedup of REPEATED subtrees, the
+// never-worse-than-tight probe, and passthrough. Lift is dedup-only — a subtree
+// that appears once is never hoisted (see the un-nest case below), which is what
+// keeps candidate collection O(n) instead of probing every unique subnode.
+func TestEncodeLift(t *testing.T) {
+	// (a) DEDUP: an identical nested subtree under two keys is hoisted once and
+	// referenced twice — strictly smaller than tight.
+	dedup := `{"groupA":{"users":[{"id":1,"role":"admin"},{"id":2,"role":"user"}]},"groupB":{"users":[{"id":1,"role":"admin"},{"id":2,"role":"user"}]}}`
+	gotD := EncodeLift(dedup)
+	if len(gotD) >= len(EncodeTight(dedup)) {
+		t.Errorf("dedup lift (%d) should beat tight (%d):\n%s", len(gotD), len(EncodeTight(dedup)), gotD)
+	}
+	if strings.Count(gotD, "$0") < 3 { // 2 references + 1 definition anchor
+		t.Errorf("expected $0 referenced twice + defined once:\n%s", gotD)
+	}
+	if !strings.Contains(gotD, "$0\n") { // a `$0` definition anchor on its own line
+		t.Errorf("expected a $0 definition block:\n%s", gotD)
+	}
+
+	// (b) SINGLE OCCURRENCE is NOT hoisted: a good table trapped inside a
+	// heterogeneous (loose) array appears once, so dedup-only lift leaves it as
+	// tight. (The old un-nest optimization hoisted it, but that required probing
+	// every unique subnode — the O(n²) source — for ~0 real-corpus gain.)
+	unnest := `{"items":[{"k":1},{"rows":[{"a":1,"b":2},{"a":3,"b":4},{"a":5,"b":6},{"a":7,"b":8}]}]}`
+	if EncodeLift(unnest) != EncodeTight(unnest) {
+		t.Errorf("single-occurrence subtree must reduce to tight:\n%s", EncodeLift(unnest))
+	}
+
+	// (c) DEDUP works even on LARGE input (the O(n²) probe would have hung here):
+	// 200 rows sharing one repeated nested subtree hoist to a single $0.
+	var b strings.Builder
+	b.WriteString(`{"rows":[`)
+	for i := 0; i < 200; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"i":%d,"meta":{"kind":"widget","tier":"gold","region":"us-west-2"}}`, i)
+	}
+	b.WriteString(`]}`)
+	big := b.String()
+	gotBig := EncodeLift(big)
+	if len(gotBig) >= len(EncodeTight(big)) {
+		t.Errorf("repeated-subtree lift (%d) should beat tight (%d) on large input", len(gotBig), len(EncodeTight(big)))
+	}
+	if !strings.Contains(gotBig, "$0") {
+		t.Errorf("large repeated subtree should hoist to $0")
+	}
+
+	// NEVER WORSE than tight: for any payload, lift ≤ tight (byte-probed).
+	for _, raw := range []string{stdPayload, dedup, unnest, big,
+		`{"file":"a.go","#":[{"sym":"S","class":"m","@":[1,2]},{"sym":"main","class":"f","@":[3,4]}]}`,
+		`{"events":[{"ts":1,"level":"info"},{"ts":2,"level":"warn"}]}`} {
+		if len(EncodeLift(raw)) > len(EncodeTight(raw)) {
+			t.Errorf("lift must never exceed tight for %q", raw)
+		}
+	}
+
+	// No repetition / nothing trapped → lift reduces to EXACTLY tight.
+	plain := `{"file":"a.go","#":[{"sym":"S","class":"m","@":[1,2]},{"sym":"main","class":"f","@":[3,4]}]}`
+	if EncodeLift(plain) != EncodeTight(plain) {
+		t.Errorf("lift should equal tight when nothing is worth hoisting")
+	}
+
+	// Passthrough.
+	if EncodeLift(prose) != prose {
+		t.Error("lift should passthrough prose")
+	}
+	if EncodeLift(malformed) != malformed {
+		t.Error("lift should passthrough malformed JSON")
+	}
+}
+
+// TestEncodeTightC covers the comprehension-tuned variant: count-anchored uniform
+// tables, non-uniform arrays and nested objects dropping to ORDER-PRESERVING loose.
+func TestEncodeTightC(t *testing.T) {
+	// Uniform object array → `[N]header` count anchor + dense rows.
+	uni := `[{"id":1,"name":"a","yrs":12},{"id":2,"name":"b","yrs":8}]`
+	if got := EncodeTightC(uni); got != "[2]id,name,yrs\n1,a,12\n2,b,8" {
+		t.Errorf("uniform table w/ count anchor:\n%s", got)
+	}
+	// Non-uniform array (differing key sets) → loose, NOT a sparse ,, table.
+	nonuni := `[{"id":1,"name":"a"},{"id":2,"role":"x"}]`
+	if got := EncodeTightC(nonuni); strings.Contains(got, "\n") || !strings.HasPrefix(got, "[{") {
+		t.Errorf("non-uniform array should be loose (no table):\n%s", got)
+	}
+	// A row with a missing column is NOT uniform → loose (no empty cells).
+	if got := EncodeTightC(`[{"a":1,"b":2},{"a":3}]`); strings.Contains(got, ",,") || strings.Contains(got, "\n") {
+		t.Errorf("missing-cell array must not become a sparse table:\n%s", got)
+	}
+	// Object with mixed children → per-key: scalar inline, nested object as
+	// ORDER-PRESERVING loose braces, uniform array child as a count-anchor table.
+	nested := `{"order":"O6","cust":{"id":9,"tier":"gold"},"items":[{"sku":"x","q":2}]}`
+	if got := EncodeTightC(nested); got != "order:O6\ncust:{id:9,tier:gold}\nitems\n[1]sku,q\nx,2" {
+		t.Errorf("nested per-key dispatch:\n%s", got)
+	}
+	// A uniform table nested INSIDE an object is still a table, not flattened.
+	if got := EncodeTightC(`{"employees":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`); got != "employees\n[2]id,name\n1,a\n2,b" {
+		t.Errorf("table inside object must survive:\n%s", got)
+	}
+	// A genuinely-nested object VALUE keeps key order (not alphabetized).
+	if got := EncodeTightC(`{"a":{"z":1,"m":2,"b":3}}`); got != "a:{z:1,m:2,b:3}" {
+		t.Errorf("nested object order must be preserved:\n%s", got)
+	}
+	// All-scalar object still inlines (tightc keeps tight's cheap win).
+	if got := EncodeTightC(`{"n":42,"s":"hi"}`); got != "n:42,s:hi" {
+		t.Errorf("all-scalar object should inline: %q", got)
+	}
+	// Passthrough.
+	if EncodeTightC(prose) != prose || EncodeTightC(malformed) != malformed {
+		t.Error("tightc should passthrough prose / malformed JSON")
 	}
 }
 

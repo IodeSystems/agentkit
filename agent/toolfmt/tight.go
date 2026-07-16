@@ -68,6 +68,8 @@ func EncodeTight(raw string) string {
 // renderNode dispatches a decoded JSON node to the first applicable strategy.
 func renderNode(v any, depth int) string {
 	switch t := v.(type) {
+	case liftRef:
+		return string(t) // a hoisted-subtree reference ($n), emitted bare
 	case string:
 		if strings.ContainsAny(t, "\n\r") { // strategy 2: prose verbatim
 			return t
@@ -214,6 +216,8 @@ func renderScalarArray(arr []any) string {
 // anything richer as quoted compact JSON (recoverable fallback).
 func renderCell(v any) string {
 	switch t := v.(type) {
+	case liftRef:
+		return string(t) // reference token, bare (single-line by construction)
 	case string:
 		if strings.ContainsAny(t, "\n\r") || !tightValSafe(t) {
 			return quoteJSON(t)
@@ -287,6 +291,12 @@ func tightValSafe(s string) bool {
 	if s == "" {
 		return false
 	}
+	// A value whose first byte is a structural opener would be misread as a
+	// nested array/object by a decoder (e.g. the string "[a-z]+" or "{x"); quote
+	// it so the leading bracket/brace is unambiguously literal.
+	if s[0] == '[' || s[0] == '{' {
+		return false
+	}
 	for _, r := range s {
 		switch r {
 		case ' ', '\t', '\n', '\r', '\f', '\v', ',', '|', '"':
@@ -315,6 +325,12 @@ func tightKeySafe(s string) bool {
 	if s == "" {
 		return false
 	}
+	// A bare key beginning with '[' (e.g. "[2]x") collides with the tightc
+	// `[N]` table-count marker on a label line; '{' would open a nested object.
+	// Quote such keys so a decoder can't mistake the key for structure.
+	if s[0] == '[' || s[0] == '{' {
+		return false
+	}
 	for _, r := range s {
 		switch r {
 		case ' ', '\t', '\n', '\r', '\f', '\v', ',', ':', '|', '"':
@@ -335,7 +351,9 @@ func tightKeyTok(s string) string {
 
 func isScalar(v any) bool {
 	switch v.(type) {
-	case nil, string, bool, float64, json.Number:
+	case nil, string, bool, float64, json.Number, liftRef:
+		// liftRef is scalar for LAYOUT: it is a single-line token, so it inlines
+		// into cells / inline objects / scalar arrays like any other scalar.
 		return true
 	default:
 		return false
