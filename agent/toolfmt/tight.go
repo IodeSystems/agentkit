@@ -7,217 +7,18 @@ import (
 	"strings"
 )
 
-// EncodeTight is the aggressive synthesis of every token-saving principle,
-// co-optimizing tokens AND comprehension. It is NOT one format but a RECURSIVE
-// PER-NODE STRATEGY DISPATCHER: renderNode classifies each node by its content
-// SHAPE and routes to the best-fit strategy, and each strategy recursively calls
-// renderNode for its children. The optimal representation of a tree is the
-// best-fit strategy chosen independently per subtree.
-//
-// Strategy ladder (first that applies to a node wins):
-//
-//  1. scalar (string/number/bool/null) → bare token; a string is quoted ONLY if
-//     unsafe (contains the active delimiter/whitespace, empty, or is
-//     literal-ambiguous with true/false/null/a number — that quote is USEFUL, it
-//     preserves type). numbers/bools/null are bare.
-//  2. long/multiline string (prose — file contents, logs) → passthrough VERBATIM
-//     (never tabularize prose).
-//  3. array of scalars → inline [a,b,c].
-//  4. array of objects, uniform OR semi-uniform → SPARSE UNION TABLE: the union
-//     of keys as a one-time header, comma-separated rows, ,, empty cells for
-//     missing keys (uniform is the degenerate case: union = the common keys).
-//  5. array that does NOT factor into a clean table (heterogeneous keys, nested
-//     cells, mixed) → self-delimiting LOOSE JSON (via EncodeLoose). There is no
-//     unambiguous FLAT layout for such an array — a hand-rolled indent/blank
-//     scheme collides with the parent's sibling separators — so tight defers to
-//     the structural encoder: braces/brackets bound every element, and loose
-//     strips the quotes JSON doesn't need. Terseness yields to recoverability.
-//  6. object, all values inline-able (scalar / scalar-array) → inline
-//     `key:val,key:val`.
-//  7. object with nested children → each key on its own line; an array child is
-//     inline `key:[...]` when single-line (loose fallback) or a bare `key` label
-//     with the TABLE on the following lines; a nested OBJECT is a bare `key`
-//     label with its child indented ONE TAB per level (\t, never spaces).
-//  8. empty array/object → explicit terse marker [] / {}.
-//
-// CANONICAL GRAMMAR (code and every test assertion match this exactly):
-//   - key/value delimiter: COLON, no surrounding space — `id:42`, `items:[...]`.
-//     A key may not contain a colon (it is quoted if it does); a value may
-//     (the FIRST colon delimits).
-//   - inline-object pairs: `key:val` joined by bare COMMA — `n:42,s:hi`.
-//   - table header + rows: bare COMMA between cells; a missing cell is empty (,,);
-//     a cell/value containing a comma/whitespace/pipe/quote or empty is quoted.
-//   - scalar array: BRACKETS, comma-joined — [10,40] / [a,"b,c"].
-//   - non-tabular array fallback: EncodeLoose(compact JSON) — [{k:1},{k:2,v:"x y"}].
-//   - genuine object nesting: ONE TAB per depth level. Path-encoded hierarchy
-//     (dotted keys like "Server.Start") stays FLAT — no indentation.
-//
-// Invariant (non-negotiable, above any byte target): recoverability first —
-// every datum, and which key/position it belongs to, is recoverable from
-// delimiters + the union header + indentation alone (never a count). Where a
-// strategy would be ambiguous it drops to the next, more explicit one. Non-JSON
-// input passes through unchanged.
-func EncodeTight(raw string) string {
-	v, ok := parseOrdered(raw)
-	if !ok {
-		return raw
-	}
-	return renderNode(v, 0)
-}
+// This file holds the shared leaf machinery that EncodeTightC builds on: the
+// order-preserving JSON parse (omap/parseOrdered), scalar/cell rendering, the
+// bare-vs-quoted token rules, and the small shape predicates. The tightc
+// dispatch itself lives in tightc.go.
 
-// renderNode dispatches a decoded JSON node to the first applicable strategy.
-func renderNode(v any, depth int) string {
-	switch t := v.(type) {
-	case liftRef:
-		return string(t) // a hoisted-subtree reference ($n), emitted bare
-	case string:
-		if strings.ContainsAny(t, "\n\r") { // strategy 2: prose verbatim
-			return t
-		}
-		return tightValTok(t) // strategy 1
-	case nil, bool, json.Number, float64:
-		return renderScalar(t) // strategy 1
-	case []any:
-		return renderArray(t, depth)
-	case *omap:
-		return renderObject(t, depth)
-	default:
-		return compactJSON(v)
-	}
-}
-
-// renderArray routes an array: empty (8) → scalars (3) → PROBE table-vs-loose.
-//
-// For an array of objects there are two recoverable encodings — the sparse union
-// table (strategy 4) and self-delimiting loose JSON (strategy 5) — and which is
-// smaller is NOT a fixed function of "fill %": it depends on how many keys
-// overlap, how long the key names are, and how long the values are. A sparse
-// table pays a ,, for every absent cell but factors each key name into the header
-// ONCE; loose repeats every present key name but pays nothing for absent ones.
-// So tight PROBES: it renders both candidates and emits the fewer bytes. There is
-// no magic sparsity threshold — the break-even (where enough overlap makes a
-// `,,,a:3`-style sparse row a net saving) is MEASURED. Loose is always a valid
-// candidate; the table is a candidate only when every cell is flat (inlineable),
-// since a nested cell can't sit unambiguously in a comma row.
-func renderArray(arr []any, depth int) string {
-	if len(arr) == 0 {
-		return "[]" // strategy 8
-	}
-	if allScalars(arr) {
-		return renderScalarArray(arr) // strategy 3
-	}
-	best := looseFallback(arr) // strategy 5 — always valid + recoverable
-	if cols, ok := tableColumns(arr); ok {
-		if tbl := renderTable(cols, arr); len(tbl) < len(best) { // strategy 4
-			best = tbl
-		}
-	}
-	return best
-}
-
-// looseFallback renders a value as self-delimiting LOOSE JSON: the JSON
-// structure is preserved (so it is unambiguously recoverable) but quotes survive
-// only where they carry information (delimiter-laden / literal-ambiguous values).
-func looseFallback(v any) string {
-	return EncodeLoose(compactJSON(v))
-}
-
-// renderObject routes an object: empty (8) → all-inline (6) → nested (7).
-func renderObject(m *omap, depth int) string {
-	if len(m.keys) == 0 {
-		return "{}" // strategy 8
-	}
-	allInline := true
-	for _, k := range m.keys {
-		if !inlineable(m.vals[k]) {
-			allInline = false
-			break
-		}
-	}
-	if allInline {
-		return renderInlineObject(m) // strategy 6
-	}
-	return renderNestedObject(m, depth) // strategy 7
-}
-
-// renderInlineObject renders `key:val,key:val` on one line (strategy 6).
-func renderInlineObject(m *omap) string {
-	parts := make([]string, len(m.keys))
-	for i, k := range m.keys {
-		parts[i] = tightKeyTok(k) + ":" + renderCell(m.vals[k])
-	}
-	return strings.Join(parts, ",")
-}
-
-// renderNestedObject renders one key per line; array children stay flat, object
-// children indent one tab; sibling blocks are blank-line separated when either
-// is multiline so a table can't bleed into the next key (strategy 7).
-func renderNestedObject(m *omap, depth int) string {
-	blocks := make([]string, 0, len(m.keys))
-	for _, k := range m.keys {
-		val := m.vals[k]
-		if inlineable(val) {
-			// scalar / scalar-array → `key:val` on this line.
-			blocks = append(blocks, tightKeyTok(k)+":"+renderCell(val))
-			continue
-		}
-		child := renderNode(val, depth+1)
-		if _, isArr := val.([]any); isArr {
-			if strings.Contains(child, "\n") {
-				// multiline array child (a TABLE) → bare key label, table below.
-				blocks = append(blocks, tightKeyTok(k)+"\n"+child)
-			} else {
-				// single-line array child (loose-JSON fallback) → inline `key:[...]`.
-				blocks = append(blocks, tightKeyTok(k)+":"+child)
-			}
-		} else {
-			// nested OBJECT → key label + child indented ONE TAB (genuine nesting).
-			blocks = append(blocks, tightKeyTok(k)+"\n"+indentTab(child))
-		}
-	}
-	return joinBlocks(blocks)
-}
-
-// renderTable renders the union header + one comma-separated row per element,
-// empty cells for missing keys (strategy 4).
-func renderTable(cols []string, arr []any) string {
-	hdr := make([]string, len(cols))
-	for i, c := range cols {
-		hdr[i] = tightKeyTok(c)
-	}
-	lines := make([]string, 0, len(arr)+1)
-	lines = append(lines, strings.Join(hdr, ","))
-	for _, el := range arr {
-		m := el.(*omap)
-		cells := make([]string, len(cols))
-		for i, c := range cols {
-			if v, ok := m.vals[c]; ok {
-				cells[i] = renderCell(v)
-			} else {
-				cells[i] = "" // missing key → empty cell (,,)
-			}
-		}
-		lines = append(lines, strings.Join(cells, ","))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// renderScalarArray renders [a,b,c] with comma-joined single-line cells.
-func renderScalarArray(arr []any) string {
-	parts := make([]string, len(arr))
-	for i, e := range arr {
-		parts[i] = renderCell(e)
-	}
-	return "[" + strings.Join(parts, ",") + "]"
-}
+// --- cell / scalar rendering ---
 
 // renderCell renders a value at a SINGLE-LINE position (table cell, inline-object
 // value, scalar-array element): scalars bare/quoted, scalar arrays bracketed,
-// anything richer as quoted compact JSON (recoverable fallback).
+// anything richer as compact JSON (recoverable fallback).
 func renderCell(v any) string {
 	switch t := v.(type) {
-	case liftRef:
-		return string(t) // reference token, bare (single-line by construction)
 	case string:
 		if strings.ContainsAny(t, "\n\r") || !tightValSafe(t) {
 			return quoteJSON(t)
@@ -230,7 +31,7 @@ func renderCell(v any) string {
 			return renderScalarArray(t)
 		}
 		// Last-resort single-line: RAW compact JSON, never quoted/escaped
-		// (escaping a JSON value is strictly bigger than the original — forbidden).
+		// (escaping a JSON value is strictly bigger than the original).
 		return compactJSON(v)
 	default:
 		return compactJSON(v)
@@ -253,40 +54,29 @@ func renderScalar(v any) string {
 	}
 }
 
-// tableColumns computes the union of keys across a non-empty array of objects
-// (first-seen order), reporting the columns a union table WOULD use. It reports
-// ok=false only for STRUCTURAL ineligibility — a non-object element, a nested
-// (non-inline) cell that can't sit in a comma row, or no keys at all. It does NOT
-// judge sparsity: whether a sparse table is worth emitting is decided by the
-// byte PROBE in renderArray, not a threshold here.
-func tableColumns(arr []any) (cols []string, ok bool) {
-	seen := map[string]bool{}
-	for _, el := range arr {
-		m, isObj := el.(*omap)
-		if !isObj {
-			return nil, false
-		}
-		for _, k := range m.keys {
-			if !inlineable(m.vals[k]) {
-				return nil, false // nested cell → not tabular
-			}
-			if !seen[k] {
-				seen[k] = true
-				cols = append(cols, k)
-			}
-		}
+// renderInlineObject renders `key:val,key:val` on one line.
+func renderInlineObject(m *omap) string {
+	parts := make([]string, len(m.keys))
+	for i, k := range m.keys {
+		parts[i] = tightKeyTok(k) + ":" + renderCell(m.vals[k])
 	}
-	if len(cols) == 0 {
-		return nil, false
+	return strings.Join(parts, ",")
+}
+
+// renderScalarArray renders [a,b,c] with comma-joined single-line cells.
+func renderScalarArray(arr []any) string {
+	parts := make([]string, len(arr))
+	for i, e := range arr {
+		parts[i] = renderCell(e)
 	}
-	return cols, true
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // --- token safety ---
 
-// tightValSafe reports whether a string VALUE emits bare: non-empty, no
-// whitespace or active delimiter (comma / pipe / quote), and not
-// literal-ambiguous with true/false/null/a number.
+// tightValSafe reports whether a string VALUE emits bare: non-empty, not opening
+// with a structural bracket/brace, no whitespace or active delimiter (comma /
+// pipe / quote), and not literal-ambiguous with true/false/null/a number.
 func tightValSafe(s string) bool {
 	if s == "" {
 		return false
@@ -317,17 +107,15 @@ func tightValTok(s string) string {
 	return quoteJSON(s)
 }
 
-// tightKeySafe reports whether a KEY emits bare: non-empty, no whitespace or
-// active delimiter (comma / colon / pipe / quote — colon now delimits key:value,
-// so a key can't contain one). (No literal-ambiguity check — a key is always a
-// string, so a bare 123/true key is unambiguous.)
+// tightKeySafe reports whether a KEY emits bare: non-empty, not opening with a
+// structural bracket/brace, no whitespace or active delimiter (comma / colon /
+// pipe / quote — colon delimits key:value, so a key can't contain one).
 func tightKeySafe(s string) bool {
 	if s == "" {
 		return false
 	}
 	// A bare key beginning with '[' (e.g. "[2]x") collides with the tightc
 	// `[N]` table-count marker on a label line; '{' would open a nested object.
-	// Quote such keys so a decoder can't mistake the key for structure.
 	if s[0] == '[' || s[0] == '{' {
 		return false
 	}
@@ -351,9 +139,7 @@ func tightKeyTok(s string) string {
 
 func isScalar(v any) bool {
 	switch v.(type) {
-	case nil, string, bool, float64, json.Number, liftRef:
-		// liftRef is scalar for LAYOUT: it is a single-line token, so it inlines
-		// into cells / inline objects / scalar arrays like any other scalar.
+	case nil, string, bool, float64, json.Number:
 		return true
 	default:
 		return false
@@ -388,15 +174,6 @@ func allScalars(arr []any) bool {
 	return true
 }
 
-func allObjects(arr []any) bool {
-	for _, e := range arr {
-		if _, ok := e.(*omap); !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // joinBlocks joins rendered sibling blocks, inserting a blank line only AFTER a
 // multiline block (a table/nested block whose end must be delimited so its last
 // row can't be mistaken for the next key). A single-line block needs no trailer.
@@ -411,11 +188,6 @@ func joinBlocks(blocks []string) string {
 	return strings.Join(out, "\n")
 }
 
-// indentTab prefixes every line of s with one tab.
-func indentTab(s string) string {
-	return "\t" + strings.ReplaceAll(s, "\n", "\n\t")
-}
-
 // compactJSON renders any value (including *omap, which preserves key order) as
 // compact JSON — the recoverable fallback for sub-parts the scheme can't flatten.
 func compactJSON(v any) string {
@@ -426,10 +198,10 @@ func compactJSON(v any) string {
 	return string(out)
 }
 
-// --- order-preserving JSON parse (tight only) ---
+// --- order-preserving JSON parse ---
 
 // omap is a JSON object that remembers key insertion order (json.Unmarshal into
-// map[string]any loses it, and tight's column/field order is load-bearing for
+// map[string]any loses it, and tightc's column/field order is load-bearing for
 // comprehension).
 type omap struct {
 	keys []string

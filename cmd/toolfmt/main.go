@@ -4,7 +4,7 @@
 //
 //	toolfmt <format>   # reads JSON on stdin, writes the encoded form on stdout
 //
-// format is one of: json toon csv json-toon loose tight tight-lift
+// format is one of: json tightc
 // json is the identity encoding (stdin passed through unchanged).
 package main
 
@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: toolfmt <json|toon|csv|json-toon|loose|tight|tight-lift>")
+		fmt.Fprintln(os.Stderr, "usage: toolfmt <json|tightc>")
 		os.Exit(2)
 	}
 
@@ -33,18 +33,6 @@ func main() {
 	switch os.Args[1] {
 	case "json":
 		out = raw
-	case "toon":
-		out = toolfmt.EncodeTOON(raw)
-	case "csv":
-		out = toolfmt.EncodeCSV(raw)
-	case "json-toon":
-		out = toolfmt.EncodeJSONTOON(raw)
-	case "loose":
-		out = toolfmt.EncodeLoose(raw)
-	case "tight":
-		out = toolfmt.EncodeTight(raw)
-	case "tight-lift":
-		out = toolfmt.EncodeLift(raw)
 	case "tightc":
 		out = toolfmt.EncodeTightC(raw)
 	default:

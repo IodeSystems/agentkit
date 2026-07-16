@@ -42,8 +42,6 @@ func EncodeTightC(raw string) string {
 // arrays and nested objects).
 func renderNodeC(v any, depth int) string {
 	switch t := v.(type) {
-	case liftRef:
-		return string(t)
 	case string:
 		if strings.ContainsAny(t, "\n\r") {
 			return t
@@ -138,8 +136,6 @@ func looseOrderedC(v any) string {
 			parts[i] = looseOrderedC(e)
 		}
 		return "[" + strings.Join(parts, ",") + "]"
-	case liftRef:
-		return string(t)
 	case string:
 		if strings.ContainsAny(t, "\n\r") || !tightValSafe(t) {
 			return quoteJSON(t)

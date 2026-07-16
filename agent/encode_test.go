@@ -39,7 +39,7 @@ func TestEncodeToolResult_TransformsStoredResult(t *testing.T) {
 		Dispatch: func(_ context.Context, _ llm.ToolCall) (string, error) {
 			return rawJSON, nil
 		},
-		EncodeToolResult: toolfmt.EncodeCSV,
+		EncodeToolResult: toolfmt.EncodeTightC,
 	}
 	if _, err := s.Turn(context.Background()); err != nil {
 		t.Fatal(err)
@@ -57,12 +57,12 @@ func TestEncodeToolResult_TransformsStoredResult(t *testing.T) {
 	if result.Content == rawJSON {
 		t.Fatal("EncodeToolResult was not applied; content is raw JSON")
 	}
-	want := toolfmt.EncodeCSV(rawJSON)
+	want := toolfmt.EncodeTightC(rawJSON)
 	if result.Content != want {
-		t.Fatalf("stored content = %q; want CSV %q", result.Content, want)
+		t.Fatalf("stored content = %q; want tightc %q", result.Content, want)
 	}
-	if !strings.Contains(result.Content, "class,sym") {
-		t.Errorf("stored content is not CSV:\n%s", result.Content)
+	if !strings.Contains(result.Content, "[2]sym,class") {
+		t.Errorf("stored content is not tightc (missing count-anchored table):\n%s", result.Content)
 	}
 }
 
