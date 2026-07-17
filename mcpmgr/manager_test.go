@@ -40,7 +40,7 @@ func polyBinary(t *testing.T) string {
 // TestStartServer_DiscoversPolyLSPTools — load-bearing assertion for
 // the initialize-handshake fix. With initialize skipped, GetTools
 // returns nothing (the readyErr is logged as "client not
-// initialized"). With initialize sent, the 6 expected tools surface.
+// initialized"). With initialize sent, the expected tools surface.
 func TestStartServer_DiscoversPolyLSPTools(t *testing.T) {
 	bin := polyBinary(t)
 	root := t.TempDir()
@@ -65,13 +65,13 @@ func TestStartServer_DiscoversPolyLSPTools(t *testing.T) {
 	// Tool discovery is async (mcpmgr.StartServer kicks off a
 	// goroutine for ListTools). Poll a few times rather than
 	// inspecting unexported state.
+	// poly-lsp-mcp's DEFAULT surface (its legacy 9-tool one is behind
+	// --legacy-tools). The names are incidental here — this test is about
+	// mcpmgr discovering tools from a real stdio MCP server at all.
 	want := map[string]bool{
-		"structure":       false,
-		"node_read":       false,
-		"node_edit":       false,
-		"node_delete":     false,
-		"node_refactor":   false,
-		"node_references": false,
+		"node_query": false,
+		"node_read":  false,
+		"node_edit":  false,
 	}
 	var got []string
 	deadline := time.Now().Add(8 * time.Second)
@@ -188,8 +188,11 @@ func TestStartThreadServer_IsolatesByThread(t *testing.T) {
 		t.Error("ThreadServerStarted(tC) = true; want false (never started)")
 	}
 
-	// Poll for tool discovery on both.
-	wantToolCount := 6
+	// Poll for tool discovery on both. poly-lsp-mcp's default surface is 3
+	// tools (node_query/node_read/node_edit); the 9-tool one is behind
+	// --legacy-tools. The count is incidental — this test is about thread
+	// isolation, not the surface.
+	wantToolCount := 3
 	deadline := time.Now().Add(8 * time.Second)
 	var toolsA, toolsB []mcpmgr.MCPTool
 	for time.Now().Before(deadline) {
