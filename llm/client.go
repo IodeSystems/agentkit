@@ -70,12 +70,63 @@ type StreamChunk struct {
 // completion. Fields beyond prompt/completion/total are optional and
 // only filled when the provider returns them (Anthropic's cache
 // fields, OpenAI's reasoning tokens, etc).
+//
+// PromptTokens counts the prompt the provider was SENT, not the prompt it
+// actually had to process — a cached prefix is billed here in full even
+// though it was never re-evaluated. Use CachedPromptTokens/NewPromptTokens
+// for the real work; see the note on CachedPromptTokens for why that
+// distinction is easy to get catastrophically wrong.
 type Usage struct {
-	PromptTokens             int `json:"prompt_tokens"`
-	CompletionTokens         int `json:"completion_tokens"`
-	TotalTokens              int `json:"total_tokens"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+
+	// Anthropic's shape: flat, top-level.
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+
+	// OpenAI's shape: NESTED. llama-server (and thus corrallm) speaks this
+	// one, and only this one — it was previously unparsed, so every cached
+	// token read as zero and prompt_tokens looked like real work forever.
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails is OpenAI's nested prompt-token breakdown.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// CachedPromptTokens returns prompt tokens served from cache, normalizing the
+// two provider shapes.
+//
+// This matters more than it looks. A cached prefix costs ~nothing to process
+// (llama.cpp reuses the KV slot; measured ~1,860 tok/s prompt eval vs ~110
+// tok/s generation), but PromptTokens still reports it at full size on EVERY
+// turn. Summing PromptTokens across a conversation therefore charges a stable
+// prefix once per turn — which ranks the most-cached region of the prompt (the
+// tool schemas, byte-identical every turn) as the dominant cost when it is
+// very nearly free. That artifact drove a whole tool-surface redesign against
+// a gap that, measured on generated tokens and wall clock, was ~12%.
+func (u *Usage) CachedPromptTokens() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return u.CacheReadInputTokens
+}
+
+// NewPromptTokens returns the prompt tokens the provider actually had to
+// evaluate this turn — the honest per-turn prompt cost.
+func (u *Usage) NewPromptTokens() int {
+	if u == nil {
+		return 0
+	}
+	if n := u.PromptTokens - u.CachedPromptTokens(); n > 0 {
+		return n
+	}
+	return 0
 }
 
 // Client sends requests to an OpenAI-compatible LLM endpoint.
