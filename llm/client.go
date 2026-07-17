@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,10 +23,22 @@ import (
 )
 
 // Message represents a chat message in the OpenAI-compatible format.
+//
+// Content is the plain-text body — the overwhelmingly common case, and the wire
+// shape is a bare string. For MULTIMODAL input (a vision model reading an
+// image — e.g. OCR), set Parts instead: when Parts is non-empty it OWNS the
+// "content" field, which marshals as OpenAI's array-of-parts shape
+// ([{type:text,...},{type:image_url,...}]) and Content is ignored. The string
+// path is left byte-for-byte unchanged so every existing caller is unaffected.
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	Name    string `json:"name,omitempty"`
+	// Parts, when non-empty, replaces Content with a multimodal content array
+	// (text + image parts). Send-only: responses are always plain text, so this
+	// is never populated on a decoded reply. Tagged "-" — MarshalJSON emits it
+	// under "content" itself.
+	Parts []ContentPart `json:"-"`
 	// ToolCalls carries an assistant message's requested tool calls, so a
 	// reconstructed conversation replays a valid assistant(tool_calls) →
 	// tool(tool_call_id) structure instead of orphan tool messages.
@@ -33,6 +46,52 @@ type Message struct {
 	// ToolCallID links a role="tool" result back to the assistant tool call
 	// that produced it (OpenAI requires this correlation).
 	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// ContentPart is one element of a multimodal content array. Type is "text" or
+// "image_url"; exactly one of Text / ImageURL is set to match.
+type ContentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// ImageURL is an image reference: either an https URL or an inline data: URI
+// ("data:image/png;base64,…"). Detail ("auto"|"low"|"high") is optional.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// TextPart builds a text content part.
+func TextPart(text string) ContentPart { return ContentPart{Type: "text", Text: text} }
+
+// ImagePart builds an image content part from a URL or data: URI.
+func ImagePart(url string) ContentPart {
+	return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: url}}
+}
+
+// ImageData builds an image content part from raw bytes, encoding them as a
+// base64 data: URI with the given MIME type (e.g. "image/png"). This is the
+// OCR path: rasterize/extract a page image, hand the bytes straight to a vision
+// model without writing a temp file or hosting a URL.
+func ImageData(mime string, raw []byte) ContentPart {
+	uri := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+	return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: uri}}
+}
+
+// MarshalJSON renders "content" as a bare string (Parts empty, the default) or
+// as the multimodal array (Parts set). Everything else marshals normally.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type alias Message // strip the custom marshaler to avoid recursion
+	if len(m.Parts) == 0 {
+		return json.Marshal(alias(m))
+	}
+	// Outer Content (array, depth 0) shadows alias.Content (string, depth 1).
+	return json.Marshal(struct {
+		alias
+		Content []ContentPart `json:"content"`
+	}{alias: alias(m), Content: m.Parts})
 }
 
 // ToolCall represents a tool call request from the LLM.
