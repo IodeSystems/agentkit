@@ -9,6 +9,7 @@
 //	agentkit-demo inject     notification injection into an in-flight session
 //	agentkit-demo lift       async tool results (lifting)
 //	agentkit-demo notify     notification lifecycle: supersede / clear / preparer
+//	agentkit-demo ragnotify  proactive document surfacing (RAG-notify)
 //	agentkit-demo compact    context shaping: LOD truncation + compaction
 //
 // The model at llm.iodesystems.com is small and often BUSY — expect 429
@@ -76,6 +77,7 @@ var demos = []demo{
 	{"inject", "notification injection into an in-flight session", runInject},
 	{"lift", "async tool results (lifting)", runLift},
 	{"notify", "notification lifecycle: supersede / clear / preparer", runNotify},
+	{"ragnotify", "proactive document surfacing (RAG-notify): listen + ping relevant docs", runRagnotify},
 	{"compact", "context shaping: LOD truncation + compaction", runCompact},
 	{"converge", "coalescing turn boundary: lifted result + queued msgs + notifications merged", runConverge},
 }

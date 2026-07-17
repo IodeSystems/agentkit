@@ -303,6 +303,118 @@ final though.
   bumped — its 3 Turn call sites would need updating for the new signature).
 - **Next:** tag v0.2.0; optionally bump+adapt autowork3 to it.
 
+### ✅ Slice 8 — proactive retrieval (RAG-notify finder)
+- **Ask (user):** a "listen to the conversation and ping relevant docs" add-on
+  over their **ragtag** service (ingests + indexes + RAG-queries docs). Wants
+  BOTH an explicit MCP search tool AND background pings off user/agent messages
+  even when the model never searches.
+- **Design decisions (user-chosen):** new sibling pkg + neutral seam · ragtag is
+  already an MCP server · notices are **pointer-only** (id+title+score+line, not
+  the body).
+- **Validated against industry practice** (research, 2024–2026): the seam
+  placement (retrieval on a pre-model hook — LangGraph `pre_model_hook`, Claude
+  Code `UserPromptSubmit`, Zep `get_user_context`), pointer-not-payload
+  (claude-mem's index+pull), dual-channel (tool-call vs always-on is a
+  latency/UX call), and MCP `tools/call` pull-transport (nobody uses MCP push
+  for retrieval) are all mainstream. Two additions the research forced:
+  `Timeout` (hot-path latency — folded in) and the written assumption that
+  **RERANKING lives server-side in ragtag**, not in the finder (the #1 quality
+  lever; a raw-vector-top-k finder is noisy regardless of MinScore).
+- **Delivered:**
+  - `agent/finder.go` — `DocFinder` neutral interface + `DocHit` + `FinderOpts`
+    (`MinScore`/`MaxHits`/`Tag`/`Kinds`/`Timeout`/`Render`/`Now`) +
+    `FinderPreparer`: a `NotificationPreparer` that observes entries past a
+    per-session watermark, queries the finder, injects one pointer
+    `KindNotification` per fresh (unseen, above-threshold) hit, capped best-first
+    at MaxHits. Fail-open (Find error/timeout → skip, **don't advance
+    watermark** → retry next pass). Dedup by DocID per session (in-mem closure
+    state, like MCPPreparer leaves state host-side). No new Store method, no
+    Entry field, invariant #2 intact (`go list -deps` clean).
+  - `ragnotify/` sibling pkg (imports agent + mcpmgr only) — `MCPFinder` over an
+    MCP search tool + `ParseHits` (lenient: bare array or `hits`/`results`/
+    `documents` wrapper; `doc_id`|`id`, `snippet`|`text`|`content`; id-less hits
+    dropped). Same MCP server feeds both channels.
+  - `examples/agentkit-demo ragnotify` — offline keyword-stub finder; shows
+    pointer notice + MinScore threshold + per-doc dedup across 3 passes.
+- **Tests:** `agent/finder_test.go` (threshold, MaxHits best-first, dedup across
+  passes, watermark gates re-query, unobserved kinds skipped, fail-open retry) +
+  `ragnotify/ragtag_test.go` (parse shapes, id-less/empty drop, clip). Green:
+  `go build/vet/test ./...` ✅; ragnotify demo run-verified.
+- **Timing (documented, honest):** a USER message → pointer lands in the SAME
+  iteration (preparer runs pre-build). An ASSISTANT reply is observed on the
+  NEXT pass/Turn (the loop only re-enters a preparer when the turn continues or
+  a new Turn starts) — the inherent one-turn lag of the event-driven model.
+- **BLOCKING (user owns):** paste one real ragtag search-result JSON so
+  `ParseHits` matches it exactly instead of the assumed shapes. Confirm ragtag
+  reranks server-side.
+- **NOT committed yet.**
+
+### ◐ Slice 9 — local composable RAG tool (NEW separate module) + multimodal enabler
+- **Ask (user):** build a local, composable doc-RAG tool ON agentkit — BM25 +
+  PDF pagify/OCR via a media-capable LLM + sqlite `document:page:fragment`
+  index (+ a custom NSW/HNSW sidecar only IF cosine similarity underperforms).
+  Strategy: "worm into workflows via simple composable tools that scale" —
+  candidate to **supersede ragtag**.
+- **Decisions (user-chosen):**
+  - **Lives in a NEW separate module** that depends on agentkit (keeps
+    agentkit's dep hygiene — sqlite/PDF deps stay out of llm/mcpmgr/agent).
+    Module name/path: **UNDECIDED — blocking the scaffold.**
+  - **Multimodal `llm` FIRST** (reusable beyond this tool). ✅ DONE — see below.
+  - **PDF→image: pure-Go, assume image-PDFs** (extract embedded page images
+    via pdfcpu; born-digital vector-text PDFs out of scope for v1). No native
+    dep, no CGo.
+- **Design ratified for the new module:**
+  - **SQLite FTS5 = BM25 + the index in ONE pure-Go dep** (`modernc.org/sqlite`,
+    CGo-free → single static binary). Schema: documents / pages / fragments
+    (+ `fragments_fts` fts5, `bm25()` ranking). One `.sqlite` file IS the index.
+  - Composable CLIs, Unix-pipeable, each a lib too: `pagify` (pdfcpu image
+    extract) · `ocr` (multimodal llm → vision model) · `index` · `search`
+    (BM25) · `serve` (MCP tool + **`agent.DocFinder`**). The DocFinder seam
+    (slice 8) makes local↔remote-ragtag a swap, not a rewrite.
+  - Vectors deferred: add sqlite-vec or a custom NSW file only if FTS5 lexical
+    proves insufficient (ragtag already deleted its file-vector store `pkg/zvec`
+    in favor of PG+HNSW — don't rebuild it speculatively).
+- **✅ Multimodal enabler (in agentkit `llm`, this repo):** `Message.Parts
+  []ContentPart` + `ContentPart`/`ImageURL` + `TextPart`/`ImagePart`/`ImageData`
+  helpers + custom `Message.MarshalJSON` — Parts (when set) owns `content` and
+  marshals OpenAI's array-of-parts shape; the plain-string path is byte-for-byte
+  unchanged (test-pinned). Send-only (replies are text). stdlib-only
+  (`encoding/base64`) → invariant #1 intact (`llm` still zero third-party dep).
+  Tests: `llm/multimodal_test.go` (string-unchanged, multimodal array, ImageData
+  URI, tool-fields-unaffected). Green.
+- **Sequencing:** A = lexical core (FTS5 + index/search + DocFinder + MCP, fully
+  offline) · B = multimodal llm ✅ · C = PDF pagify+OCR · D (opt-in) = vectors.
+- **✅ Module scaffolded: `github.com/iodesystems/raglit`** at
+  `~/local/src/iodesystems/raglit` (replace → ../agentkit during dev).
+  - `store.go` — SQLite FTS5 store: `documents`/`fragments` + `fragments_fts`
+    (external-content, trigger-synced) + `bm25()` ranking. `Open`/`Ingest`
+    (idempotent replace-on-reingest)/`Search`. `ftsQuery` quotes tokens so
+    user punctuation/operators can't break MATCH; `Hit.Score = -bm25` (higher =
+    better, agentkit convention). Pure-Go `modernc.org/sqlite@v1.51.0`.
+  - `finder.go` — `Finder` = `agent.DocFinder` over the Store; collapses
+    fragments → one DocHit per document (best passage as the pointer line).
+  - `cmd/raglit` — `index` (walk dir, paragraph-split text/md) + `search` CLIs.
+  - `README.md`. Tests: BM25 ranking, idempotent reingest, punctuation-safe
+    query, Finder best-per-doc. **Green** (`go build/vet/test ./...`).
+  - **End-to-end run-verified:** indexed a 2-doc corpus, "why does my refresh
+    token expire" → correct auth fragment top (score 1.882); "rollback deploy"
+    → deploy fragment top. One portable `.sqlite` file.
+- **✅ Slice A complete — `raglit serve` (MCP):** `cmd/raglit/serve.go` — stdio
+  MCP server (mark3labs/mcp-go server side) with one `search` tool. `hitsJSON`
+  emits `{hits:[{doc_id,title,page,score,snippet}]}` — the exact shape
+  `ragnotify.ParseHits` consumes, so ONE raglit server drives BOTH channels
+  (explicit tool + proactive DocFinder). **Verified two ways:** (1) driven raw
+  over stdio (initialize→tools/call) → correct ranked JSON; (2) `serve_test.go`
+  loop-closure — raglit `hitsJSON` output → `ragnotify.ParseHits` → DocHits, in
+  code. raglit now requires agentkit at test scope (imports ragnotify).
+- **◻ Slice C:** `pagify` (pdfcpu image-PDFs) + `ocr` (multimodal llm → bonsai
+  vision endpoint). **◻ Slice D:** vectors (opt-in).
+- **BLOCKING (user owns):** (1) confirm **bonsai** is a working VL endpoint
+  (base URL + model) before wiring `ocr` — user said "bonsai SHOULD work",
+  unconfirmed; no bonsai config found locally. (2) ragtag search-result JSON
+  shape for `ragnotify.ParseHits` (carried from slice 8).
+- **NOT committed yet** (agentkit multimodal + raglit module both uncommitted).
+
 ## Status: the whole arc (slices 1–5b) is SHIPPED + committed
 - agentkit: initial commit `e152268` (not pushed; not yet its own remote).
 - autowork3: branch `agentkit-extraction`, commits `840d37c` (extraction +
@@ -317,6 +429,17 @@ final though.
   privilege-escalation surface. Superseded by the hook + masked-MCP
   convention (integrator owns the check). Only revisit with an explicit
   execution-context + auth decision.
+- **Async RAG-notify (zero hot-path latency)** — Slice 8's `FinderPreparer`
+  calls `Find` synchronously before build, so a user-message turn eats a ragtag
+  round-trip (bounded by `Timeout`, fail-open). Optional: kick `Find` in a
+  goroutine, inject via the inbox, hit lands next Turn (same lag assistant hits
+  already have) — Copilot-style hidden latency. Only build if the sync round-trip
+  measurably hurts turn latency.
+- **RAG-notify watermark/dedup persistence** — Slice 8 keeps watermark + seen-
+  DocID sets in an in-mem closure (one preparer per live session). A host that
+  recreates the Session/preparer per Turn re-observes history + re-pings. If that
+  host shape appears, make the watermark/seen store pluggable (a small interface,
+  like RevalidateStore) instead of in-mem.
 - **Supersede vs. shown stacking** — supersede (merge replace) folds only
   UNSHOWN accumulators, so a new emit while an old same-key notice is already
   shown can briefly leave two in context until the preparer/TTL/clear catches
