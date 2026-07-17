@@ -407,13 +407,25 @@ final though.
   over stdio (initialize→tools/call) → correct ranked JSON; (2) `serve_test.go`
   loop-closure — raglit `hitsJSON` output → `ragnotify.ParseHits` → DocHits, in
   code. raglit now requires agentkit at test scope (imports ragnotify).
-- **◻ Slice C:** `pagify` (pdfcpu image-PDFs) + `ocr` (multimodal llm → bonsai
-  vision endpoint). **◻ Slice D:** vectors (opt-in).
-- **BLOCKING (user owns):** (1) confirm **bonsai** is a working VL endpoint
-  (base URL + model) before wiring `ocr` — user said "bonsai SHOULD work",
-  unconfirmed; no bonsai config found locally. (2) ragtag search-result JSON
-  shape for `ragnotify.ParseHits` (carried from slice 8).
-- **NOT committed yet** (agentkit multimodal + raglit module both uncommitted).
+- **✅ Slice C — PDF pagify + vision-LLM OCR** (raglit commit `383cd9e`):
+  `pagify.go` (pdfcpu embedded-image extraction, image/scanned PDFs only;
+  `ErrNoPageImages` for born-digital), `ocr.go` (`OCR.Page` via multimodal
+  `llm.Message`; `Chatter` iface for stubbing), `Store.IngestPDF` (pagify→OCR→
+  index with real page nums; images persist under `<home>/pages/`), CLI `pagify`
+  + `ocr` + `index` PDF routing. **LIVE-VERIFIED** end-to-end: rendered text →
+  PDF → OCR → index → search hit.
+- **bonsai reality (resolved):** the vision model is **`ternary-bonsai-27b`**
+  (llm.iodesystems.com, key `raglit`) — live, accepts images, confirmed OCR.
+  `gemma-4-12b` and `Qwen3-6-27B-MPT` were "no backend available" (down) at test
+  time. CLI `--llm-model` defaults to `ternary-bonsai-27b`. Also available:
+  `nomic-embed-text` (embeddings) → unlocks Slice D vectors when wanted.
+- **◻ Slice D:** vectors (opt-in; sqlite-vec / NSW) — only if BM25 recall bites.
+- **Committed:** agentkit `9471217` (multimodal llm) + `f7af638` (ragnotify),
+  on `fix/cached-token-accounting`. raglit new repo `main`: `85e2533` (core +
+  home) + `383cd9e` (OCR). None pushed.
+- **Still open (user):** ragtag search-result JSON shape for
+  `ragnotify.ParseHits` (carried from slice 8; raglit's serve output already
+  matches it, so this only matters for pointing ragnotify at real ragtag).
 
 ## Status: the whole arc (slices 1–5b) is SHIPPED + committed
 - agentkit: initial commit `e152268` (not pushed; not yet its own remote).
