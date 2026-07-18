@@ -28,6 +28,12 @@ var contextOverflowHints = []string{
 	"maximum number of tokens", "maximum prompt",
 }
 
+// contextProbeCeiling bounds the probe: past this the requests get large and
+// slow (a 60k-token prompt is ~25s of prompt processing), and a server that
+// hasn't rejected by here won't give us a boundary. 32k is a safe lower bound
+// for windowing — bigger real windows just mean we window a touch smaller.
+const contextProbeCeiling = 32768
+
 func bodyIsContextOverflow(body string) bool {
 	s := strings.ToLower(body)
 	for _, h := range contextOverflowHints {
@@ -41,12 +47,16 @@ func bodyIsContextOverflow(body string) bool {
 // DiscoverContext probes the configured model's usable context window: it sends
 // prompts that grow exponentially until the server rejects one as too long, then
 // binary-searches to ~256-token resolution. It returns an approximate maximum
-// INPUT token count (~1 token per probe word). Costs O(log N) round-trips —
-// cache the result rather than calling it per request.
+// INPUT token count (~1 token per probe word) — a safe LOWER BOUND on the real
+// window. Costs O(log N) round-trips; cache the result rather than calling it
+// per request.
 //
-// It returns the largest size that was ACCEPTED (a lower bound on the true
-// window), so callers can size inputs to it safely. A model with no discoverable
-// ceiling (accepts up to the 1M probe cap) returns that cap.
+// IMPORTANT: this only finds a boundary on servers that REJECT an over-long
+// prompt (llama.cpp direct, OpenAI, vLLM, TGI). Some proxies accept and process
+// arbitrarily large prompts without error (corrallm was observed accepting 60k
+// tokens with HTTP 200) — there is no boundary to find, so the probe stops at
+// contextProbeCeiling and returns it as a lower bound. That keeps the probe
+// cheap and bounded rather than climbing until requests get enormous.
 func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
 	// probe reports whether ~nTokens of prompt is accepted (no overflow).
 	probe := func(nTokens int) (fits bool, err error) {
@@ -72,7 +82,6 @@ func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
 		return false, fmt.Errorf("llm: discover-context probe: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
-	const ceiling = 1 << 20 // 1M-token ceiling: effectively unbounded
 	lo := 0
 	hi := 0
 	for n := 512; ; n *= 2 {
@@ -85,7 +94,10 @@ func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
 			break
 		}
 		lo = n
-		if n >= ceiling {
+		if n >= contextProbeCeiling {
+			// No boundary by the ceiling → the server tolerates large prompts (or
+			// the window really is this big). Return the ceiling as a safe lower
+			// bound instead of climbing into multi-MB requests.
 			return lo, nil
 		}
 	}
