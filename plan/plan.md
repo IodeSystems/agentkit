@@ -419,7 +419,26 @@ final though.
   `gemma-4-12b` and `Qwen3-6-27B-MPT` were "no backend available" (down) at test
   time. CLI `--llm-model` defaults to `ternary-bonsai-27b`. Also available:
   `nomic-embed-text` (embeddings) → unlocks Slice D vectors when wanted.
-- **◻ Slice D:** vectors (opt-in; sqlite-vec / NSW) — only if BM25 recall bites.
+- **✅ Slice D — vectors** (raglit `c6c9419`; agentkit `cd6ea06`): agentkit
+  `llm.Client.Embed` (OpenAI `/v1/embeddings`, shared retry via `postWithRetry`).
+  raglit `embed.go` (Embedder + nomic prefixes + float32 BLOB codec + cosine),
+  `fragment_vectors` table (FK-cascade), `Store.VecSearch` (brute-force cosine —
+  pure-Go, modernc can't load sqlite-vec) + `HybridSearch` (BM25 ⊕ vec RRF);
+  `Ingest` takes ctx + embeds when `SetEmbedder`; Finder goes hybrid when an
+  embedder is set. CLI `index --embed` / `search --mode bm25|vec|hybrid`.
+  **LIVE-VERIFIED** vs `nomic-embed-text`: zero-lexical-overlap query hit the
+  right fragment. Custom NSW sidecar deferred — only if a linear scan gets slow.
+- **✅ init wizard + config** (raglit `7c882b0`): raglit is unusable until
+  configured (per user — "not everyone is as good as corrallm"). `raglit init`
+  wizard prompts OpenAI-compatible base URL + token, queries `/v1/models`, picks
+  a vision model + an embedding model → `<home>/config.json` (0600). No-arg
+  `raglit` runs the wizard when uninited. Flags default from config→env→OpenAI
+  fallback; `requireVision`/`requireEmbed` emit a "run raglit init" hint.
+  **LIVE-VERIFIED** wizard + config-driven commands vs bonsai.
+- **raglit status: A–D shipped + committed** on `main` (`85e2533` core+home,
+  `383cd9e` OCR, `c6c9419` vectors, `7c882b0` init). None pushed. Full spine
+  works: init → index (text+PDF, ±embed) → search (bm25/vec/hybrid) / serve
+  (MCP, both channels). Single static binary, pure-Go.
 - **Committed:** agentkit `9471217` (multimodal llm) + `f7af638` (ragnotify),
   on `fix/cached-token-accounting`. raglit new repo `main`: `85e2533` (core +
   home) + `383cd9e` (OCR). None pushed.
