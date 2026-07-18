@@ -46,9 +46,24 @@ const (
 // and back; fields agent doesn't interpret (Tag, Origin) are round-tripped
 // verbatim.
 type Entry struct {
-	ID         string
-	Kind       EntryKind
-	Content    string
+	ID      string
+	Kind    EntryKind
+	Content string
+	// Parts, when non-empty, carries MULTIMODAL content (text + image parts)
+	// for this entry and replaces Content when the entry is rendered to an
+	// llm.Message. Content should still be set to a plain-text summary of the
+	// parts: it is what LOD truncation, compaction summaries, and any
+	// text-only consumer will see, so an entry with Parts but an empty Content
+	// goes blank the moment the shaper substitutes a stub.
+	//
+	// Empty Parts (the overwhelming majority) renders exactly as before, so
+	// existing hosts and stores are unaffected. A Store that does not persist
+	// Parts simply loses the attachment across a reload, degrading to the text
+	// Content — acceptable, and the reason Content stays authoritative.
+	//
+	// Only KindUser is rendered multimodally today; provider APIs accept image
+	// parts on user messages, not on tool results or assistant turns.
+	Parts      []llm.ContentPart
 	ToolCallID string // correlates KindToolCall / KindToolResult
 	ToolName   string // the tool for KindToolCall / KindToolResult
 	// Tag is an opaque display label used only when rendering a

@@ -26,6 +26,15 @@ func sortEntries(es []Entry) {
 func renderEntry(e Entry, content string) llm.Message {
 	switch e.Kind {
 	case KindUser:
+		// Multimodal user turn: hand the parts through so the provider gets an
+		// OpenAI content ARRAY. Guarded on content == e.Content — when the
+		// shaper passes a substituted LOD stub or a compaction summary, the
+		// original attachment is deliberately no longer what we want to send,
+		// and re-attaching the image would defeat the truncation that decided
+		// to drop it.
+		if len(e.Parts) > 0 && content == e.Content {
+			return llm.Message{Role: "user", Parts: e.Parts}
+		}
 		return llm.Message{Role: "user", Content: content}
 	case KindAssistant:
 		return llm.Message{Role: "assistant", Content: content}
