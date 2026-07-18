@@ -485,13 +485,18 @@ final though.
     fragment. The whole "very good at code on filesystem" goal, working.
   - Risks that materialized as designed: small-model JSON absorbed by fix-loop +
     fallback; continuation keeps OCR sequential, embed runs concurrently.
-  - **Context guessing — live-validated + hardened** (agentkit `1d82331`, raglit
-    `2a3f989`): FOUND that corrallm/bonsai accepts 60k-token prompts with HTTP
-    200 (no overflow error) and advertises no n_ctx — so blow-the-limit has no
-    boundary to find. Bounded the probe at 32k (`contextProbeCeiling`), returned
-    as a safe lower bound; latency-capped the window (`maxWindowChars` ~6k tok).
-    Live: `DiscoverContext` → 32768 in 15s, bounded, cached. Servers that DO
-    reject overflow still get a real boundary.
+  - **Context handling — final shape** (agentkit `1d82331`, raglit `2a3f989`,
+    `f5fc108`): FOUND corrallm/bonsai accepts 60k-token prompts at HTTP 200 (no
+    overflow error, no advertised n_ctx) — so blow-the-limit has no boundary.
+    bonsai's real context is **256k** (user). Resolution: **config + smart
+    default, NOT an ingest-path probe.** `WindowCharsForHome` = configured
+    `ContextTokens` or `defaultContextTokens` (131072); window is
+    output-reliability-capped (`maxWindowChars` ~16k tok / 64k chars), so any
+    context ≥ ~40k gives the same window → the exact number rarely matters.
+    `DiscoverContext` bounded at 32k (`contextProbeCeiling`, safe lower bound on
+    tolerant servers; real boundary on rejecting servers) and kept as the wizard
+    "probe" option. `--context-tokens` flag overrides. Live: config-only home
+    (no flags) segments via bonsai; DiscoverContext → 32768 in 15s.
 
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
