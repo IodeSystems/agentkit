@@ -451,7 +451,7 @@ final though.
   ±embed) → status → search (bm25/vec/hybrid) / serve (MCP: search+ingest+
   index_status, both channels). Single static binary, pure-Go.
 
-### ◐ Slice F — LLM-segmented ingest engine (raglit)
+### ✅ Slice F — LLM-segmented ingest engine (raglit) — SHIPPED
 - Unified segmentation: VISION model for page images, TEXT model for on-disk
   text/code — same schema, continuation, pipeline. Per unit the LLM emits
   schema-validated `{continues_previous, fragments:[{text}]}` (an `emit_fragments`
@@ -467,14 +467,24 @@ final though.
 - **Context discovery (not compaction):** text/code windows sized to the model
   context, found by BLOWING the limit (probe until overflow, cache per
   endpoint+model). `DiscoverContext` → agentkit `llm` (reusable).
-- **Phases:** 1 segmentation core (Segmenter + Assembler + schema + fix-loop +
-  fallback) ◐ · 2 concurrent embed pipeline · 3 text/code + context-probe +
-  windowing · 4 cleanup (consolidate readDoc/TextFragments) + prompt tuning.
-- **next:** build Phase 1 (`segment.go`) — modality-agnostic, store-independent,
-  unit-tested with a fake Chatter + live single-page segmentation vs bonsai.
-- **risks:** small vision model (ternary-bonsai-27b) JSON reliability → the
-  SchemaValidator fix-loop + fallback absorb it; continuation forces sequential
-  OCR (no per-page parallelism — acceptable, embed runs concurrently instead).
+- **✅ ALL PHASES SHIPPED** (raglit `9502004` p1, `47b5113` p2, agentkit
+  `e77afef` DiscoverContext, raglit `65ecb1d` p3+4):
+  - **p1 segment.go** — `Segmenter` (SegmentImage/SegmentText, SchemaValidator
+    fix-loop + fallback) + `Assembler` (deferred open fragment, cross-unit merge).
+    Live: bonsai bound two short funcs into one fragment.
+  - **p2 pipeline.go** — `ingestUnits`: segment → insert (BM25) + CONCURRENT
+    embed goroutine; `IngestPDF` rewritten to segment page images. Live PDF OK.
+  - **p3 window.go + llm.DiscoverContext** — text windows sized to the probed
+    context (÷2 for the echoed output), cached in `config.ContextTokens`, lazy
+    on first text job. `ingestText` windows + segments code/text.
+  - **p4** — `index` now enqueues+drains through the one pipeline; duplicate
+    `readDoc` deleted.
+  - **Live-verified end-to-end:** `index auth.go` → bonsai segmented it into 4
+    function-level fragments (each func + doc comment bound); hybrid search for
+    "what happens if a refresh token is reused" returned the rotateRefresh
+    fragment. The whole "very good at code on filesystem" goal, working.
+  - Risks that materialized as designed: small-model JSON absorbed by fix-loop +
+    fallback; continuation keeps OCR sequential, embed runs concurrently.
 
 ### ◻ Slice G — multi-index + selection (independent of F)
 - `raglit serve` hosts named indexes; `search` defaults to ALL (merge/RRF, hits
