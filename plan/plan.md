@@ -486,11 +486,27 @@ final though.
   - Risks that materialized as designed: small-model JSON absorbed by fix-loop +
     fallback; continuation keeps OCR sequential, embed runs concurrently.
 
-### ◻ Slice G — multi-index + selection (independent of F)
-- `raglit serve` hosts named indexes; `search` defaults to ALL (merge/RRF, hits
-  tagged by index), `ingest` targets one, + `list_indexes`. ragnotify live-watch
-  gets an index-selection option (default all, configurable initial) + optional
-  `select_indexes` MCP tool so the agent can narrow/broaden mid-session.
+### ✅ Slice G — multi-index + selection (raglit `400c8a0`) — SHIPPED
+- `OpenIndex(home,name)` — "default"=index.sqlite, others=index-<name>.sqlite,
+  sharing originals/pages; name sanitized to [a-z0-9_-] (no traversal).
+  `Registry` (Get caches/creates, Names scans disk, SetEmbedder-all).
+- serve hosts the registry: `search` defaults to ALL (RRF-merged, hits tagged by
+  `index`) or a comma-set; `ingest` targets an index (created on demand);
+  `index_status` per-index/aggregate; `list_indexes`. One background loop drains
+  every index round-robin (per-index workers cached). `--index` on single-index
+  CLI (default "default" = existing file, back-compat).
+- **Live-watch selection: no code needed** — `ragnotify.MCPFinder` passes
+  `Opts.ExtraArgs {"index":...}` to search (default all = omit). Runtime
+  `select_indexes` tool DEFERRED (static/initial selection covers the ask).
+- **Verified over MCP stdio:** ingest to two indexes, list_indexes, search-all
+  (both, tagged) + scoped search. Registry unit tests green.
+
+### Fragment sizing (raglit `6f4a78e`) — decided + shipped
+- ~500-word floor: below it a hit can't concept-chain. Assembler greedily
+  absorbs sub-floor sibling fragments (MinChars ~3000) up to a ceiling
+  (MaxChars ~9000). Oversized fragments → pointer notifications (fetch on
+  demand), NOT summaries (deferred; extra cost + staleness). Prompt asks ~400-800
+  words.
 - **Committed:** agentkit `9471217` (multimodal llm) + `f7af638` (ragnotify),
   on `fix/cached-token-accounting`. raglit new repo `main`: `85e2533` (core +
   home) + `383cd9e` (OCR). None pushed.
