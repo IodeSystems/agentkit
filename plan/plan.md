@@ -435,10 +435,21 @@ final though.
   `raglit` runs the wizard when uninited. Flags default from config→env→OpenAI
   fallback; `requireVision`/`requireEmbed` emit a "run raglit init" hint.
   **LIVE-VERIFIED** wizard + config-driven commands vs bonsai.
-- **raglit status: A–D shipped + committed** on `main` (`85e2533` core+home,
-  `383cd9e` OCR, `c6c9419` vectors, `7c882b0` init). None pushed. Full spine
-  works: init → index (text+PDF, ±embed) → search (bm25/vec/hybrid) / serve
-  (MCP, both channels). Single static binary, pure-Go.
+- **✅ Slice E — lazy ingest queue + URL fetch + status + demo** (raglit
+  `f092fc5`): `ingest_jobs` table + `Enqueue`/`claimNextJob`/`IndexStatus`
+  (doc/fragment counts, per-state job counts, recent rate jobs/min, per-item ETA
+  = queue-pos × avg duration); `Fetch` (file://, http(s)://, bare path; PDF by
+  ext/content-type; 64 MiB cap); `Worker` (ProcessOne/Drain/Run — per-URL fail
+  recorded, never fatal). serve gained a background worker + `ingest` +
+  `index_status` MCP tools (alongside `search`). CLI `ingest [--now]` / `work` /
+  `status`; `demo` = self-contained offline tour (embedded corpus → lazy queue →
+  drain-with-status → search). **VERIFIED:** `raglit demo` end-to-end + serve
+  MCP loop (ingest → bg worker → index_status done → search).
+- **raglit status: A–E shipped + committed** on `main` (`85e2533` core+home,
+  `383cd9e` OCR, `c6c9419` vectors, `7c882b0` init, `f092fc5` lazy-ingest+demo).
+  None pushed. Full spine: init → index/ingest (local + URL, lazy, text+PDF,
+  ±embed) → status → search (bm25/vec/hybrid) / serve (MCP: search+ingest+
+  index_status, both channels). Single static binary, pure-Go.
 - **Committed:** agentkit `9471217` (multimodal llm) + `f7af638` (ragnotify),
   on `fix/cached-token-accounting`. raglit new repo `main`: `85e2533` (core +
   home) + `383cd9e` (OCR). None pushed.
