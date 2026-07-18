@@ -485,6 +485,28 @@ final though.
     fragment. The whole "very good at code on filesystem" goal, working.
   - Risks that materialized as designed: small-model JSON absorbed by fix-loop +
     fallback; continuation keeps OCR sequential, embed runs concurrently.
+  - **Context guessing — live-validated + hardened** (agentkit `1d82331`, raglit
+    `2a3f989`): FOUND that corrallm/bonsai accepts 60k-token prompts with HTTP
+    200 (no overflow error) and advertises no n_ctx — so blow-the-limit has no
+    boundary to find. Bounded the probe at 32k (`contextProbeCeiling`), returned
+    as a safe lower bound; latency-capped the window (`maxWindowChars` ~6k tok).
+    Live: `DiscoverContext` → 32768 in 15s, bounded, cached. Servers that DO
+    reject overflow still get a real boundary.
+
+## What's next (open, none blocking)
+- **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
+  oversized fragments (currently pointer-notify covers it).
+- **Segmentation quality pass:** verified it WORKS, but no systematic eval across
+  diverse docs / prompt tuning. Would need a small eval corpus.
+- **End-to-end proactive demo:** wire raglit's DocFinder over a real index into an
+  agentkit Session + FinderPreparer — the original "listen + ping relevant docs"
+  loop, shown working against raglit. Validates the whole arc.
+- **Repos/publish:** agentkit rides `fix/cached-token-accounting` with a stack of
+  feature commits (multimodal, ragnotify, Embed, DiscoverContext) — wants its own
+  branch/PR. raglit has NO remote yet. Neither pushed.
+- **Carried from slice 8:** real ragtag search-result JSON for `ragnotify.ParseHits`
+  (only matters when pointing ragnotify at actual ragtag; raglit's serve output
+  already matches).
 
 ### ✅ Slice G — multi-index + selection (raglit `400c8a0`) — SHIPPED
 - `OpenIndex(home,name)` — "default"=index.sqlite, others=index-<name>.sqlite,
