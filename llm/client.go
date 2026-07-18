@@ -231,6 +231,58 @@ func (c *Client) chatURL() string {
 	return u + "/chat/completions"
 }
 
+// embedURL returns the embeddings endpoint (sibling of chatURL).
+func (c *Client) embedURL() string {
+	u := c.baseURL
+	if !strings.HasSuffix(u, "/v1") {
+		u += "/v1"
+	}
+	return u + "/embeddings"
+}
+
+// Embed returns one embedding vector per input string from an OpenAI-compatible
+// /v1/embeddings endpoint. model is passed explicitly because embeddings use a
+// different model than chat (the Client's configured model is the chat model).
+// Output order matches input order. Honors the same auth + retry policy as Chat.
+func (c *Client) Embed(ctx context.Context, model string, input []string) ([][]float32, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(map[string]any{"model": model, "input": input})
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal embed: %w", err)
+	}
+	resp, err := c.postWithRetry(ctx, c.embedURL(), payload, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, statusError(resp)
+	}
+	var result struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("llm: decode embed: %w", err)
+	}
+	if len(result.Data) != len(input) {
+		return nil, fmt.Errorf("llm: embed returned %d vectors for %d inputs", len(result.Data), len(input))
+	}
+	// Re-order by Index defensively (spec says input order, but don't trust it).
+	vecs := make([][]float32, len(input))
+	for _, d := range result.Data {
+		if d.Index < 0 || d.Index >= len(vecs) {
+			return nil, fmt.Errorf("llm: embed index %d out of range", d.Index)
+		}
+		vecs[d.Index] = d.Embedding
+	}
+	return vecs, nil
+}
+
 // 429 backoff schedule. Exp from initial → max, then HOLDS at max until
 // the request succeeds, the ctx is canceled, or the RETRY BUDGET is
 // exhausted (Client.RetryBudget, default defaultRetryBudget). On a
@@ -304,6 +356,13 @@ var retry5xxMaxAttempts = 5
 // ctx cancel, RetryBudget exhaustion, or repeated 5xx). Pushing this
 // into the harness would duplicate the loop in every role.
 func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID string) (*http.Response, error) {
+	return c.postWithRetry(ctx, c.chatURL(), payload, traceID)
+}
+
+// postWithRetry POSTs payload to url with the same auth headers and 429/5xx
+// retry policy as the chat path — shared by Chat/ChatStream and Embed so every
+// endpoint honors the fair-share backpressure + retry budget identically.
+func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, traceID string) (*http.Response, error) {
 	backoff := retryInitialBackoff
 	fiveXXAttempts := 0
 	budget := c.retryBudget()
@@ -316,7 +375,7 @@ func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL(), bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("llm: request: %w", err)
 		}
