@@ -450,6 +450,37 @@ final though.
   None pushed. Full spine: init → index/ingest (local + URL, lazy, text+PDF,
   ±embed) → status → search (bm25/vec/hybrid) / serve (MCP: search+ingest+
   index_status, both channels). Single static binary, pure-Go.
+
+### ◐ Slice F — LLM-segmented ingest engine (raglit)
+- Unified segmentation: VISION model for page images, TEXT model for on-disk
+  text/code — same schema, continuation, pipeline. Per unit the LLM emits
+  schema-validated `{continues_previous, fragments:[{text}]}` (an `emit_fragments`
+  ToolDef + `agent.SchemaValidator` fix-loop → fallback to whole-unit fragment).
+  Fragments are model-judged coherent chunks (bind small related units — several
+  short funcs, list clusters; no pathological atoms).
+- **Continuation + deferred embed:** one OPEN fragment carried across units;
+  a unit's first fragment extends it when continues_previous (keeps start
+  page/ord) else closes it; the OPEN fragment is NOT embedded until the next
+  unit/EOF resolves it.
+- **Two concurrent in-process pipelines:** segment goroutine (sequential units)
+  → channel → embed goroutine, at once.
+- **Context discovery (not compaction):** text/code windows sized to the model
+  context, found by BLOWING the limit (probe until overflow, cache per
+  endpoint+model). `DiscoverContext` → agentkit `llm` (reusable).
+- **Phases:** 1 segmentation core (Segmenter + Assembler + schema + fix-loop +
+  fallback) ◐ · 2 concurrent embed pipeline · 3 text/code + context-probe +
+  windowing · 4 cleanup (consolidate readDoc/TextFragments) + prompt tuning.
+- **next:** build Phase 1 (`segment.go`) — modality-agnostic, store-independent,
+  unit-tested with a fake Chatter + live single-page segmentation vs bonsai.
+- **risks:** small vision model (ternary-bonsai-27b) JSON reliability → the
+  SchemaValidator fix-loop + fallback absorb it; continuation forces sequential
+  OCR (no per-page parallelism — acceptable, embed runs concurrently instead).
+
+### ◻ Slice G — multi-index + selection (independent of F)
+- `raglit serve` hosts named indexes; `search` defaults to ALL (merge/RRF, hits
+  tagged by index), `ingest` targets one, + `list_indexes`. ragnotify live-watch
+  gets an index-selection option (default all, configurable initial) + optional
+  `select_indexes` MCP tool so the agent can narrow/broaden mid-session.
 - **Committed:** agentkit `9471217` (multimodal llm) + `f7af638` (ragnotify),
   on `fix/cached-token-accounting`. raglit new repo `main`: `85e2533` (core +
   home) + `383cd9e` (OCR). None pushed.
