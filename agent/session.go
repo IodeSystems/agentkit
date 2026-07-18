@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -54,6 +55,14 @@ type Session struct {
 	// Turn calls (persisted state, not set by the host).
 	usageTotal int
 
+	// slots holds transclusion slots captured from tool results during the
+	// current Turn (see transclude.go). Reset at the top of each Turn; results
+	// merge last-writer-wins and {OUTPUT} tracks the most-recent one. The
+	// engine expands an assistant reply's {name}/{OUTPUT} placeholders against
+	// this before returning it as TurnResult.Reply — the model writes the short
+	// placeholder, the host displays the spliced-in bytes.
+	slots map[string]string
+
 	// MaxTurns caps the loop (default 100 — generous, since a role may chain
 	// read tool calls before its terminal output; better to pay extra
 	// round-trips than wedge the pipeline). Tests set this small.
@@ -76,6 +85,20 @@ type Session struct {
 	// "<prefix>.Turn" and "<prefix>.streamChat". A host sets this to keep
 	// its existing observability labels stable.
 	SpanPrefix string
+
+	// OmitSlotInstructions suppresses the automatic append of SlotSystemNote to
+	// the system prompt (see transclude.go). By default, when Tools are attached
+	// agent teaches the model the {OUTPUT}/{name} transclusion convention; set
+	// this when the host writes those instructions itself or wants them gone.
+	OmitSlotInstructions bool
+
+	// MaxToolResultChars, if > 0, caps how much of each tool result the MODEL
+	// sees: a longer result is truncated (head+tail, with a marker) in the
+	// context sent this round. Storage keeps the COMPLETE result, and the
+	// truncation is view-only — a reply can still surface the full bytes to the
+	// user with {OUTPUT}/{name} (see transclude.go). The marker tells the model
+	// the escape hatch exists. 0 = no truncation (default; no behavior change).
+	MaxToolResultChars int
 
 	// EncodeToolResult, if set, re-encodes a raw tool-result string BEFORE it is
 	// stored + rendered into the model's context — e.g. JSON → YAML/TOON/CSV for a
@@ -160,6 +183,24 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 	}
 
+	// Effective system prompt: when tools are attached, teach the model the
+	// transclusion convention (SlotSystemNote) so {OUTPUT}/{name} work out of the
+	// box — no placeholders make sense with no tools, so only append then. Opt
+	// out with OmitSlotInstructions when the host manages the prompt itself.
+	// Computed once; constant across the loop's iterations.
+	system := s.System
+	if len(s.Tools) > 0 && !s.OmitSlotInstructions {
+		if system == "" {
+			system = SlotSystemNote
+		} else {
+			system += "\n\n" + SlotSystemNote
+		}
+	}
+
+	// Fresh transclusion registry per Turn: a reply only references tool output
+	// produced within the same Turn's loop.
+	s.slots = map[string]string{}
+
 	var sawForcedToolCall bool
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
@@ -177,12 +218,17 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}
 		}
 
-		messages, e := build(ctx, s.SessionID, s.System)
+		messages, e := build(ctx, s.SessionID, system)
 		if e != nil {
 			return result, fmt.Errorf("agent: build context: %w", e)
 		}
+		// Cap the model's view of large tool results (storage keeps the
+		// complete bytes; {OUTPUT}/{name} still surface them to the user).
+		if s.MaxToolResultChars > 0 {
+			truncateToolMessages(messages, s.MaxToolResultChars)
+		}
 		// Active window = the tokens actually sent this round (post compaction +
-		// LOD). The last build of the Turn wins.
+		// LOD + tool-result truncation). The last build of the Turn wins.
 		result.Usage.Active = s.estimateTokens(messages)
 
 		resp, toolCalls, usage, e := s.streamChat(ctx, messages)
@@ -198,6 +244,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 
 		if resp != "" {
+			// Persist the reply RAW (placeholders intact) so model replay stays
+			// token-lean; expand only for display in TurnResult.Reply. A reply
+			// with no known {name}/{OUTPUT} placeholder is unchanged.
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:        uuid.New().String(),
 				Kind:      KindAssistant,
@@ -206,7 +255,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist llm reply: %w", e)
 			}
-			result.Reply = resp
+			result.Reply = expandSlots(resp, s.slots)
 		}
 
 		if len(toolCalls) == 0 {
@@ -251,6 +300,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 					toolResult = fmt.Sprintf("ERROR: %v", e)
 				}
 			}
+			// Register this result's transclusion slots ({OUTPUT} + any
+			// <name>...</name> sections) from the RAW result, so a reply can
+			// surface the COMPLETE, human-readable bytes to the user via
+			// {OUTPUT}/{name} — independent of the model-side encoding /
+			// truncation below.
+			maps.Copy(s.slots, captureSlots(toolResult))
 			if s.EncodeToolResult != nil {
 				toolResult = s.EncodeToolResult(toolResult)
 			}

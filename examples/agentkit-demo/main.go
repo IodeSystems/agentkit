@@ -8,6 +8,7 @@
 //	agentkit-demo grammar    server-side constrained decoding (GBNF + json)
 //	agentkit-demo inject     notification injection into an in-flight session
 //	agentkit-demo lift       async tool results (lifting)
+//	agentkit-demo print      transclusion: reference tool output by placeholder
 //	agentkit-demo notify     notification lifecycle: supersede / clear / preparer
 //	agentkit-demo ragnotify  proactive document surfacing (RAG-notify)
 //	agentkit-demo compact    context shaping: LOD truncation + compaction
@@ -76,6 +77,7 @@ var demos = []demo{
 	{"grammar", "server-side constrained decoding (GBNF + json)", runGrammar},
 	{"inject", "notification injection into an in-flight session", runInject},
 	{"lift", "async tool results (lifting)", runLift},
+	{"print", "transclusion: model references large tool output by placeholder instead of retyping it", runPrint},
 	{"notify", "notification lifecycle: supersede / clear / preparer", runNotify},
 	{"ragnotify", "proactive document surfacing (RAG-notify): listen + ping relevant docs", runRagnotify},
 	{"compact", "context shaping: LOD truncation + compaction", runCompact},

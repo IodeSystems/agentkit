@@ -338,6 +338,79 @@ func runLift(ctx context.Context, cfg config) error {
 	return nil
 }
 
+// ── print: transclusion (reference tool output, don't retype it) ────
+
+// runPrint is OFFLINE — no model. It shows the transclusion seam directly on
+// the exported surface (ExpandEntries + SlotSystemNote): a tool result carries
+// <name>...</name> sections; the model's reply references them by {name} /
+// {OUTPUT} instead of retyping; the host expands for display. The stored reply
+// keeps the placeholder, so model replay never re-ingests the big bytes.
+func runPrint(_ context.Context, _ config) error {
+	clk := &clock{}
+
+	// A "shell" tool wraps its output in sections. This is the only tool-side
+	// cooperation transclusion needs — {OUTPUT} works with none at all.
+	toolResult := "<table>" +
+		"id  name     status\n" +
+		"1   alpha    ok\n" +
+		"2   bravo    FAIL\n" +
+		"3   charlie  ok" +
+		"</table>" +
+		"<summary>3 rows, 1 failure</summary>"
+
+	// What the MODEL emits: a short reply that references the section instead of
+	// re-decoding the whole table into output tokens.
+	rawReply := "Query returned 3 rows (1 failure):\n{table}\n\nBottom line: {summary}."
+
+	entries := []agent.Entry{
+		entry(agent.KindUser, "run the status query", clk.next()),
+		entry(agent.KindToolResult, toolResult, clk.next()),
+		entry(agent.KindAssistant, rawReply, clk.next()),
+	}
+
+	// The host expands stored history for display; the live path expands
+	// TurnResult.Reply the same way.
+	shown := agent.ExpandEntries(entries)
+	display := shown[2].Content
+
+	fmt.Println("── what the MODEL emits (output tokens) ──")
+	fmt.Println(rawReply)
+	fmt.Printf("\n── what the USER sees (host-expanded) ──\n%s\n", display)
+	fmt.Printf("\n── what is STORED for the model (replay, kept lean) ──\n%s\n", entries[2].Content)
+
+	fmt.Printf("\nreply emitted: %d chars · displayed: %d chars → the model decoded %d fewer chars\n",
+		len(rawReply), len(display), len(display)-len(rawReply))
+	fmt.Println("The big bytes lived in the tool result (INPUT, cheap prefill) the whole time;")
+	fmt.Println("the model just pointed at them. Unknown braces like {not_a_slot} pass through.")
+	fmt.Printf("\n── the model-facing convention (agent.SlotSystemNote) ──\n%s\n", agent.SlotSystemNote)
+
+	// ── {OUTPUT} + truncation: model sees a cap, user sees everything ──
+	// Session.MaxToolResultChars truncates the MODEL's view of a big result;
+	// {OUTPUT} still surfaces the COMPLETE bytes to the user. Demonstrated on the
+	// exported surface: a large result → a one-token reply → full expansion.
+	fmt.Println("\n════════ big output: {OUTPUT} beats truncation ════════")
+	var b strings.Builder
+	for i := range 20 {
+		fmt.Fprintf(&b, "row %2d: alpha bravo charlie delta echo foxtrot golf hotel\n", i)
+	}
+	big := entry(agent.KindToolResult, b.String(), clk.next())
+	bigEntries := []agent.Entry{
+		entry(agent.KindUser, "dump the table", clk.next()),
+		big,
+		entry(agent.KindAssistant, "Full dump:\n{OUTPUT}", clk.next()),
+	}
+	bigShown := agent.ExpandEntries(bigEntries)
+
+	fmt.Printf("tool result: %d chars. With Session.MaxToolResultChars=200 the MODEL sees\n", len(big.Content))
+	fmt.Println("~200 chars + a '[truncated …]' marker — but its reply is just:")
+	fmt.Println("  Full dump:\n  {OUTPUT}")
+	fmt.Printf("\n── USER sees (host-expanded, complete) ──\n%s\n", bigShown[2].Content)
+	fmt.Println("The complete bytes reach the user without the model re-emitting — or even")
+	fmt.Println("fully reading — them. Any tool's <name>...</name> blocks are captured the")
+	fmt.Println("same way, so {name} works for every tool, not just a designated one.")
+	return nil
+}
+
 // ── notify: supersede / clear / revalidator preparer ───────────────
 
 func runNotify(ctx context.Context, cfg config) error {

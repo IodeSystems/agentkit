@@ -515,6 +515,64 @@ final though.
 - **Roadmap:** daemon auth + remote file upload; vector reranking; opt-in
   summaries.
 
+### ✅ Slice I — output transclusion + tool-result truncation (agent `transclude.go`)
+- **Problem:** to show a tool's output verbatim, the model retypes it into its
+  reply — OUTPUT tokens (serial decode, slow, drift) for bytes already in INPUT
+  context. Inverse of lifting: lifting DEFERS a result, transclusion FORWARDS
+  one verbatim.
+- **Design pivots (this arc, keep the history so we don't re-tread):**
+  1. Built model-driven transclusion (`{OUTPUT}`/`{name}`).
+  2. Added a TOOL-driven passthrough (`display.go` JSON wire shape +
+     `Entry.Display`). **Reverted** — user: "we don't need print; the tool's
+     last expression is just the string, maybe xml-tag separated." The
+     string+tags convention subsumes the wire shape.
+  3. Landed on: **agentkit stays dumb** (capture slots + mechanically truncate);
+     the *convention* lives in the **system prompt** (`SlotSystemNote`), not in
+     engine-aware `<summary>` handling. mcpshell's `print()` accumulator (buffer
+     → tool result, optional last-expr summary) is mcpshell's concern — agentkit
+     just eats the final string.
+- **Transclusion:** model writes `{OUTPUT}` (whole most-recent result) or
+  `{name}` (a `<name>...</name>` section — captured from EVERY tool's output,
+  not a designated one). `captureSlots` (from the RAW result, pre-encode, so
+  {OUTPUT} is human-readable) + `expandSlots` (KNOWN names only; unknown
+  `{token}` passes through so JSON/code braces survive). Section grammar narrow
+  (`[A-Za-z_]\w*`) so stray `</div>`/generics aren't slots.
+- **Truncation (`Session.MaxToolResultChars`, 0=off):** `truncateToolMessages`
+  caps the MODEL's per-round view of each tool result (head+tail + a
+  `[truncated N of M — write {OUTPUT} …, or a section: {x}]` marker, rune-safe
+  cuts). **View-only** — storage keeps the COMPLETE result and `{OUTPUT}`/`{name}`
+  still surface it whole to the user. So the model can show a big result it
+  never fully read.
+- **Auto-taught convention:** `Turn` appends `SlotSystemNote` to the system
+  prompt when `len(Tools) > 0` (placeholders are meaningless with no tools).
+  Opt out with `Session.OmitSlotInstructions`. So `{OUTPUT}`/`{name}` work out
+  of the box for any tool-bearing host (dun gets it free via its MCP tools) —
+  no host wiring needed.
+- **Layer boundary (settled):** the `{OUTPUT}` trick + truncation live in
+  agentkit (engine — tool-result flow + reply expansion). The tool-call
+  *viewer* (open a call → scrollable input/output sub-frames with `less`-style
+  `/?n|` search) belongs in **dun** (the TUI host; has bubbletea/glamour,
+  consumes agentkit). agentkit already stores what that viewer needs: input =
+  `KindToolCall.Content`, complete output = `KindToolResult.Content`, joined by
+  `ToolCallID`. mcpshell's `print()` accumulator is mcpshell's.
+- **Persist raw, expand for display:** assistant Entry stores the placeholder
+  (lean replay); `TurnResult.Reply` expanded (live path); `ExpandEntries`
+  re-expands stored history. Slots reset per Turn, captured in the dispatch loop
+  from raw results; last-writer-wins, `{OUTPUT}` = most recent. Additive — a
+  host that ignores placeholders / leaves MaxToolResultChars=0 is unaffected.
+- **Demo/tests:** `agentkit-demo print` (offline: transclusion + big-output
+  {OUTPUT}-beats-truncation). `transclude_test.go` — capture, known-only expand,
+  mismatched-tag guard, no-mutate ExpandEntries, e2e Turn, truncateForModel
+  (marker/head-tail/section-names/rune-safe), e2e truncation keeps {OUTPUT}
+  complete + model view actually cut.
+- **Known limits (icebox candidates):** no nested sections (RE2, no backrefs —
+  mismatched pairs skipped); `{OUTPUT}` ambiguous across multiple results (use
+  named sections); slots reset per Turn → a reply can only `{OUTPUT}` a result
+  from the SAME Turn (cross-Turn ref leaks the literal placeholder; seed slots
+  from Store at Turn start if needed); a compaction dropping the source result
+  leaves a dangling `{name}` on re-render; live-streaming hosts stream the raw
+  placeholder then render from the expanded `Reply` at end-of-turn.
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).
