@@ -498,6 +498,21 @@ final though.
     "probe" option. `--context-tokens` flag overrides. Live: config-only home
     (no flags) segments via bonsai; DiscoverContext → 32768 in 15s.
 
+### ✅ Slice H — folder ingest + daemon mode + publish (raglit `a006e5c`, `6038261`)
+- `ingest` accepts folders/files/bare paths (walk → queue) alongside URLs.
+- **Daemon:** `raglit daemon` = HTTP server owning the registry + background
+  workers (`/health`,`/indexes`,POST `/ingest`,`/search`,`/status`).
+  ingest/search/status gain `--daemon URL` / `$RAGLIT_DAEMON` → call into it
+  (no SQLite contention; remote-capable). Client expands folders locally, posts
+  paths/URLs; daemon reads its own FS. Localhost, no auth yet (roadmap).
+  Verified end-to-end via HTTP.
+- **README** rewritten as a 3-command quickstart (init → ingest folder → search).
+- **PUBLISHED:** agentkit branch `fix/cached-token-accounting` pushed to
+  `github.com/IodeSystems/agentkit`. raglit created + pushed to
+  **`github.com/IodeSystems/raglit`** (public), `main`.
+- **Roadmap:** daemon auth + remote file upload; vector reranking; opt-in
+  summaries.
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).
