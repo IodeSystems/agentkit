@@ -510,6 +510,8 @@ final though.
 - **PUBLISHED:** agentkit branch `fix/cached-token-accounting` pushed to
   `github.com/IodeSystems/agentkit`. raglit created + pushed to
   **`github.com/IodeSystems/raglit`** (public), `main`.
+- **Index selection:** `--index` on every command + MCP/daemon index arg; wizard
+  now sets `config.default_index` (raglit `e592ea7`) so unset --index uses it.
 - **Roadmap:** daemon auth + remote file upload; vector reranking; opt-in
   summaries.
 
