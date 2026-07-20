@@ -558,6 +558,31 @@ type ChatOpts struct {
 	TraceID        string
 	Grammar        string
 	ResponseFormat any
+
+	// Temperature and Seed pin sampling for reproducibility. Both are pointers
+	// so "unset" stays distinct from a deliberate 0 — temperature 0 is exactly
+	// the value a caller most wants to send, and a plain float64 could never
+	// express it without also forcing it on every caller that had no opinion.
+	//
+	// A measurement harness needs these: without them the server's own sampling
+	// config decides, so a model launched with --temp 0.7 makes a pass/fail
+	// probe a coin flip and single-shot runs disagree with themselves.
+	// Providers that do not support seed ignore the field.
+	Temperature *float64
+	Seed        *int
+}
+
+// applySampling copies pinned sampling params onto an outgoing request body.
+func applySampling(body map[string]any, opts *ChatOpts) {
+	if opts == nil {
+		return
+	}
+	if opts.Temperature != nil {
+		body["temperature"] = *opts.Temperature
+	}
+	if opts.Seed != nil {
+		body["seed"] = *opts.Seed
+	}
 }
 
 // ChatStream sends a chat completion request with streaming enabled.
@@ -597,6 +622,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	if opts != nil && opts.ResponseFormat != nil {
 		body["response_format"] = opts.ResponseFormat
 	}
+	applySampling(body, opts)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -637,6 +663,11 @@ func statusError(resp *http.Response) error {
 
 // Chat sends a non-streaming chat completion request.
 func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) (string, []ToolCall, error) {
+	return c.ChatWithOpts(ctx, messages, tools, nil)
+}
+
+// ChatWithOpts is Chat with sampling and constrained-decoding options.
+func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
@@ -645,6 +676,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
+	applySampling(body, opts)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
