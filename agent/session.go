@@ -54,6 +54,14 @@ type Session struct {
 	// usageTotal accumulates cumulative billed tokens across this Session's
 	// Turn calls (persisted state, not set by the host).
 	usageTotal int
+	// usageCached/Processed/Generated split usageTotal into the three channels
+	// that price differently, and usageTurns counts the round-trips they came
+	// from. Accumulated alongside usageTotal so a host can report cost honestly
+	// instead of by a sum the cached prefix dominates.
+	usageCached    int
+	usageProcessed int
+	usageGenerated int
+	usageTurns     int
 
 	// slots holds transclusion slots captured from tool results during the
 	// current Turn (see transclude.go). Reset at the top of each Turn; results
@@ -237,8 +245,16 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 		if usage != nil {
 			s.usageTotal += usage.PromptTokens + usage.CompletionTokens
+			s.usageCached += usage.CachedPromptTokens()
+			s.usageProcessed += usage.NewPromptTokens()
+			s.usageGenerated += usage.CompletionTokens
+			s.usageTurns++
 		}
 		result.Usage.Total = s.usageTotal
+		result.Usage.Cached = s.usageCached
+		result.Usage.Processed = s.usageProcessed
+		result.Usage.Generated = s.usageGenerated
+		result.Usage.Turns = s.usageTurns
 		if s.OnUsage != nil {
 			s.OnUsage(result.Usage)
 		}

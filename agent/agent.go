@@ -151,6 +151,31 @@ type TokenUsage struct {
 	// (compacted + LOD) context the model sees now, INCLUDING any compaction
 	// summary. This is the underlying-session size, distinct from Total.
 	Active int
+
+	// Cached, Processed and Generated split Total into the three channels that
+	// actually price differently. Total alone is close to useless for judging
+	// cost: it is dominated by the re-sent prefix, which is the CHEAPEST part.
+	// Measured on one agent run, Total was 97% Cached — so ranking two runs by
+	// Total ranks them by how much cache they read.
+	//
+	//   Cached    prompt tokens served from the provider's cache. Nearly free
+	//             (llama.cpp reuses the KV slot; ~17x faster than generation).
+	//   Processed prompt tokens the provider actually had to evaluate. In an
+	//             agent loop this is mostly TOOL RESULTS — the honest per-turn
+	//             input cost, and the thing a tool surface controls.
+	//   Generated completion tokens. The most expensive per token, and usually
+	//             the binding constraint, since output caps are hit long before
+	//             context limits.
+	//
+	// A provider that reports no cache breakdown leaves Cached at 0 and puts the
+	// whole prompt in Processed, which is the correct reading for that provider.
+	Cached    int
+	Processed int
+	Generated int
+
+	// Turns counts chat round-trips accumulated into this tally — the divisor
+	// for any per-turn figure.
+	Turns int
 }
 
 // TurnResult is what Turn returns: the model's final reply, whatever the loop
