@@ -62,6 +62,48 @@ string so the loop stays alive and the model can recover. A returned Go error
 aborts the Turn. A terminal tool returns `agent.ErrSessionClosed` to stop the
 loop after its result is persisted (used with `tool_choice=required` roles).
 
+### Runaway-loop detection (on by default)
+
+Two different failures, two guards.
+
+**A generation that collapses into repetition.** Measured: ~30 minutes spent
+re-emitting an 85-character fragment, to the server's context limit. `Stop`
+can't catch it (the text isn't known in advance) and a grammar can't (the
+output is well-formed) — only something watching the bytes arrive can, so
+`llm.Client` does. It watches content **and** tool-call arguments (the measured
+loop was inside `arguments`), and on a trip it closes the stream, which
+disconnects and makes the server abandon the generation.
+
+The caller sees a final chunk carrying the reason; `Session.Turn` handles it for
+you — it trims the redundant copies off the reply *before* persisting it (so the
+retry isn't built from a context primed to continue the loop), tells the model
+what it did, and re-prompts. Two consecutive collapses are retried; a third
+fails the Turn rather than paying the same cost in installments.
+
+```go
+client.Repetition = llm.RepetitionGuard{Off: true}   // disable entirely
+client.Repetition = llm.RepetitionGuard{MinSpan: 2048} // or just loosen it
+session.MaxRepetitionRetries = -1                    // never give up (MaxTurns still bounds)
+```
+
+Thresholds are set so that ordinary repetition — blank lines, markdown table
+rules, indentation, recurring boilerplate — never trips it. A cycle shorter than
+`MinPeriod` (24 bytes) is deliberately *not* reported at all; `ChatOpts.MaxTokens`
+is the backstop for those.
+
+**A turn-level loop:** the same call returning the same result, round after
+round. Every round is well-formed, so only the repetition across rounds shows
+it. `MaxRepeatedExchanges` (default 5) warns the model at 5 identical
+call+result exchanges and stops the Turn at 10.
+
+The **result** is part of that comparison on purpose: polling is a legitimate
+reason to repeat a call, so a guard keyed on the call alone would kill a job
+that is correctly waiting. A poll whose result advances never trips this.
+
+```go
+session.MaxRepeatedExchanges = -1 // off
+```
+
 ## 3. Schema validation + fix loop — `schema`
 
 `tool_choice=required` forces the model to *call* a tool, not to fill it

@@ -573,6 +573,52 @@ final though.
   leaves a dangling `{name}` on re-render; live-streaming hosts stream the raw
   placeholder then render from the expanded `Reply` at end-of-turn.
 
+### ✅ Slice J — runaway-loop detection (`llm/repetition.go`, `agent/session.go`)
+- **Problem (measured):** a generation collapsed into repetition and burned
+  **~30 minutes** re-emitting an 85-char fragment of a legal property
+  description, to the server's context limit. `ChatOpts.Stop` can't catch it
+  (the text isn't known in advance), a grammar can't (the output was
+  well-formed). Only the party watching bytes arrive can — `readStream`.
+- **`llm.RepetitionGuard` (zero value = ON):** per-stream periodicity watcher
+  over the tail; scans every 256B for a suffix of ≥3 identical blocks covering
+  ≥512B with a period in [24, 1024]. Trips → close body → **disconnect**, which
+  is what makes the server abandon the generation. Caller gets
+  `Done + StopReason=repetition + RepetitionInfo`.
+- **Both channels.** The measured loop was inside a tool call's `arguments`
+  (the fragment carried literal `\n` escapes — already JSON-encoded), so a
+  content-only detector would have watched the 30 minutes go by. The
+  mid-loop call is DISCARDED, never flushed.
+- **MinPeriod is tested against the MINIMAL period.** Without reducing first it
+  was decorative — every multiple of a period is also a period, so `"abab…"`
+  matched at p=24 and cleared a MinPeriod of 24. Measured false positives on
+  blank lines + indentation. Consequence, deliberate: a cycle shorter than
+  MinPeriod is never reported (MaxTokens is that backstop).
+- **`agent` side — recoverable, not fatal:** Turn trims the redundant copies off
+  the reply *before persisting* (else the retry is built from a context primed
+  to continue the loop), injects a `[repetition]` notification, re-prompts.
+  Bounded by `MaxRepetitionRetries` (default 2 consecutive) — past that the
+  retries reproduce the cost in installments. Heredoc parsing is skipped on a
+  cut stream (an open block is incomplete by construction).
+- **Turn-level loop (`MaxRepeatedExchanges`, default 5):** consecutive rounds
+  whose calls AND results are byte-identical. Signature covers the RESULTS on
+  purpose — polling is a legitimate repeated call, so keying on the call alone
+  kills a correctly-waiting job. Warn at 5 (the model may have a real reason to
+  wait; only it knows the alternative move), stop at 10. Negative = off.
+- **Consumer call-out (autowork3):** behavior change on a shared path. Turn can
+  now inject two new `KindNotification` tags (`repetition`, `tool_loop`) and can
+  return two new errors. Defaults are on; opt out per Session with
+  `MaxRepetitionRetries: -1` / `MaxRepeatedExchanges: -1`, or per Client with
+  `llm.RepetitionGuard{Off: true}`.
+- **Tests:** `llm/repetition_test.go` (trips on the measured loop within ~700B;
+  no false positive on blank lines / table rules / indentation / recurring
+  boilerplate; MinPeriod; e2e cut of a 5000-block SSE stream, content + tool
+  args). `agent/repetition_test.go`, `agent/toolloop_test.go` (retry-not-fatal,
+  trimmed persistence, notice reaches the retry, give-up bound, polling NOT
+  killed).
+- **Not done (icebox):** `Client.MaxStreamDuration` wall-clock cut — needs a
+  timer closing the body from another goroutine, and its error path currently
+  reads as a transport fault. Non-zero default `MaxTokens` also unaddressed.
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).

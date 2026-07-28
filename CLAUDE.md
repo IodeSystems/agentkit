@@ -61,6 +61,17 @@ plan/     living plan (plan.md = active, done.md = archive, icebox.md = deferred
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
   tools; document both.
+- **Loop guards are ON by default, at two levels.** `llm.RepetitionGuard`
+  watches each stream (content AND tool-call arguments — the measured 30-minute
+  loop was inside `arguments`) for a periodic suffix and CLOSES THE BODY; the
+  disconnect is what makes the server abandon the generation. `MinPeriod` is
+  tested against the block's MINIMAL period — skip that reduction and it is
+  decorative, since every multiple of a period is also a period. `agent` treats
+  a cut as recoverable: trim the redundant copies BEFORE persisting (or the
+  retry is primed to continue the loop), notify, re-prompt, bounded by
+  `MaxRepetitionRetries`. Separately `MaxRepeatedExchanges` catches the
+  turn-level loop; its signature includes the RESULTS so legitimate polling
+  never trips it.
 - **429 retry honors `retry_after` from header OR body, bounded by a budget.**
   corrallm's fair-share proxy returns the hint in a JSON backpressure body
   (`{"error":{"reason":"queue-timeout","retry_after":10}}`), not the
