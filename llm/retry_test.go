@@ -505,3 +505,23 @@ func TestPostChatWithRetry_429_DoesNotCountAgainst5xxCap(t *testing.T) {
 		t.Errorf("status = %d; want 200 (5xx cap should not have tripped on the single 500)", resp.StatusCode)
 	}
 }
+
+// A negative budget means unbounded: on a single-slot endpoint a wait is not a
+// delay, it is another attempt at the only slot, and the 5m default gives up in
+// the middle of an ordinary busy spell.
+func TestRetryBudgetUnbounded(t *testing.T) {
+	c := NewClient("http://x", "", "m")
+
+	c.RetryBudget = 0
+	if got := c.retryBudget(); got != defaultRetryBudget {
+		t.Errorf("0 should mean the default, got %s", got)
+	}
+	c.RetryBudget = 90 * time.Second
+	if got := c.retryBudget(); got != 90*time.Second {
+		t.Errorf("an explicit budget should pass through, got %s", got)
+	}
+	c.RetryBudget = -1
+	if got := c.retryBudget(); got < 365*24*time.Hour {
+		t.Errorf("negative should mean unbounded, got %s", got)
+	}
+}

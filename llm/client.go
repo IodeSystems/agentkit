@@ -289,6 +289,18 @@ type Client struct {
 	// honoring retry_after, but bounded). 0 → defaultRetryBudget (5m). The
 	// caller's ctx deadline still wins if shorter. Set it per Client for a
 	// busy endpoint.
+	//
+	// NEGATIVE means unbounded: ride out backpressure until the ctx says stop.
+	// Correct for a single-slot endpoint, where a wait is not a delay but
+	// another attempt at the only slot, and a 5-minute default gives up in the
+	// middle of an ordinary busy spell.
+	//
+	// Unbounded is safe because it only extends the 429 path. 5xx is ALSO capped
+	// by an attempt count (retry5xxMaxAttempts), so a genuinely broken upstream
+	// still stops; and a 500 reporting unparseable tool-call arguments is
+	// returned immediately without retrying, since the model produced those bytes
+	// deterministically from this context and every retry reproduces them.
+	// Nothing can spin forever on an outcome that cannot change.
 	RetryBudget time.Duration
 }
 
@@ -301,8 +313,13 @@ func NewClient(baseURL, apiKey, model string) *Client {
 	}
 }
 
-// retryBudget returns the effective retry budget (the field, or the default).
+// retryBudget returns the effective retry budget: the field, the default, or
+// effectively-forever when the caller asked for unbounded. The ctx still bounds
+// it, so "forever" means "as long as the caller is willing to wait".
 func (c *Client) retryBudget() time.Duration {
+	if c.RetryBudget < 0 {
+		return unboundedRetryBudget
+	}
 	if c.RetryBudget > 0 {
 		return c.RetryBudget
 	}
@@ -397,6 +414,12 @@ var (
 // busy spell, but don't hang a caller forever" policy; the caller's ctx
 // deadline still wins if it's shorter. var so tests can shrink it.
 var defaultRetryBudget = 5 * time.Minute
+
+// unboundedRetryBudget stands in for "no ceiling" (RetryBudget < 0). A duration
+// rather than a special case throughout the retry loop: every deadline
+// comparison keeps working unchanged, and the caller's ctx remains the real
+// bound. A century is past any plausible ctx.
+var unboundedRetryBudget = 100 * 365 * 24 * time.Hour
 
 // retryLogEvery throttles the "still retrying" log line. The first
 // few retries log every time; once we're holding at retryMaxBackoff
