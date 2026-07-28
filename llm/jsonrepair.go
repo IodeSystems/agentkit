@@ -1,4 +1,4 @@
-package agent
+package llm
 
 import (
 	"encoding/json"
@@ -28,7 +28,10 @@ import (
 // a strict JSON object is discarded and the call is refused as if no repair had
 // been attempted. A botched repair therefore degrades to the existing refusal,
 // never to a wrong dispatch.
-func repairLooseArgs(s string) (string, []string, repairOutcome) {
+// RepairLooseJSON is exported because both the tool-argument gate (agent) and
+// the heredoc json body reader (llm) need it, and a second copy of "never repair
+// a truncation" is the last invariant that should be duplicated.
+func RepairLooseJSON(s string) (string, []string, RepairOutcome) {
 	var repairs []string
 	out := s
 	if stripped, ok := stripCodeFence(out); ok {
@@ -48,40 +51,40 @@ func repairLooseArgs(s string) (string, []string, repairOutcome) {
 	// call again. Once quoting is normalized the truncation is visible, so it is
 	// re-classified here rather than at the caller.
 	if unterminated {
-		return "", nil, repairTruncated
+		return "", nil, RepairTruncated
 	}
 	if rewritten != "" && rewritten[0] == '{' && json.Valid([]byte(rewritten)) {
 		if len(repairs) == 0 {
-			return "", nil, repairFailed // nothing was wrong with it here
+			return "", nil, RepairFailed // nothing was wrong with it here
 		}
-		return rewritten, repairs, repairOK
+		return rewritten, repairs, RepairOK
 	}
-	if isTruncationErr(decodeErr(rewritten)) {
-		return "", nil, repairTruncated
+	if IsTruncationErr(DecodeErr(rewritten)) {
+		return "", nil, RepairTruncated
 	}
-	return "", nil, repairFailed
+	return "", nil, RepairFailed
 }
 
-// repairOutcome is what a repair attempt concluded. repairTruncated is separate
-// from repairFailed because the two produce different advice to the model.
-type repairOutcome int
+// RepairOutcome is what a repair attempt concluded. RepairTruncated is separate
+// from RepairFailed because the two produce different advice to the model.
+type RepairOutcome int
 
 const (
-	repairFailed repairOutcome = iota
-	repairOK
-	repairTruncated
+	RepairFailed RepairOutcome = iota
+	RepairOK
+	RepairTruncated
 )
 
-// decodeErr reports why s is not JSON, or nil if it is.
-func decodeErr(s string) error {
+// DecodeErr reports why s is not JSON, or nil if it is.
+func DecodeErr(s string) error {
 	var v json.RawMessage
 	return json.NewDecoder(strings.NewReader(s)).Decode(&v)
 }
 
-// isTruncationErr distinguishes "the input stopped early" from "the input is
+// IsTruncationErr distinguishes "the input stopped early" from "the input is
 // wrong". A *json.SyntaxError means the decoder read a byte it could not accept;
 // an EOF means it ran out while still expecting more.
-func isTruncationErr(err error) bool {
+func IsTruncationErr(err error) bool {
 	if err == nil {
 		return false
 	}

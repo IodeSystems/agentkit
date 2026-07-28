@@ -668,6 +668,15 @@ type ChatOpts struct {
 	Temperature *float64
 	Seed        *int
 
+	// Stop ends generation when any of these strings is produced. The provider
+	// excludes the matched string from the returned text.
+	//
+	// Needed with Grammar: a completed grammar does NOT force EOS. Measured with
+	// `root ::= call`, the model finished a valid call and then emitted the same
+	// call again, repeatedly, to the token cap. Stopping on the block terminator
+	// is what actually ends the turn.
+	Stop []string
+
 	// MaxTokens caps the completion. 0 = leave it to the server.
 	//
 	// This matters most with Grammar set. A grammar that permits repetition (a
@@ -690,6 +699,9 @@ func applySampling(body map[string]any, opts *ChatOpts) {
 	}
 	if opts.MaxTokens > 0 {
 		body["max_tokens"] = opts.MaxTokens
+	}
+	if len(opts.Stop) > 0 {
+		body["stop"] = opts.Stop
 	}
 }
 

@@ -56,191 +56,257 @@ const HeredocSentinel = "~~~AGENTKIT_EOF_7F3A"
 // HeredocOpen introduces a raw body: `key: <ext>` + this + newline.
 const HeredocOpen = "~~~"
 
-// ParseHeredocCalls extracts tool calls from model content, returning the calls
-// and whatever prose surrounded them.
+// HeredocEnd terminates a call block, and doubles as the stop sequence.
 //
-// Arguments are lifted to a strict JSON object, so what reaches a dispatcher and
-// what is persisted are ordinary escaped JSON. The raw form exists only between
-// the model and this function, which is the same division the native format uses
-// (and the reason escaping costs 0 tokens: it never reaches the tokenizer).
+// A grammar does not force EOS when it completes: measured with `root ::= call`,
+// the model produced a valid call and then repeated it to the token cap. Pass
+// HeredocStop as ChatOpts.Stop and re-append HeredocEnd before parsing, since the
+// provider strips the matched stop string.
+const HeredocEnd = "@@end"
+
+// HeredocStop is the stop sequence to pair with HeredocGrammar.
+func HeredocStop() []string { return []string{HeredocEnd} }
+
+// CloseHeredoc re-appends the terminator a stop sequence consumed, so the text
+// can be parsed. It is deliberately explicit rather than making the parser
+// tolerate a missing terminator: an unterminated block is how TRUNCATED output
+// looks, and the parser must keep refusing that.
+func CloseHeredoc(raw string) string {
+	if strings.Contains(raw, HeredocEnd) {
+		return raw
+	}
+	return strings.TrimRight(raw, "\n") + "\n" + HeredocEnd + "\n"
+}
+
+// HeredocTypes is the closed set of body type tags the grammar admits. Closed on
+// purpose: an open [a-z]+ let the model place an argument VALUE in the tag slot.
+// `json` is load-bearing (it makes the body a real value rather than a string);
+// the rest are descriptive and only reach the tool as "<key>_type".
+var HeredocTypes = []string{
+	"go", "java", "js", "json", "md", "py", "sh", "sql", "txt", "xml", "yaml",
+}
+
+func quoteAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = `"` + s + `"`
+	}
+	return out
+}
+
+// CallPrefix introduces a tool call. Everything after it, up to the end of the
+// JSON value, is the call's arguments as json-loose-heredoc.
+const CallPrefix = "@@call "
+
+// ParseToolCalls extracts tool calls from model content, plus any surrounding
+// prose.
 //
-// An argument is a raw block (`key: <ext>~~~SENTINEL`, then lines, then the
-// sentinel alone). A block's declared extension is recorded under "<key>_type"
-// when present, which is how a tool learns a body is xml vs json without sniffing.
+// The shape is a prefix line naming the tool, then ONE json-loose-heredoc object:
 //
-// A one-line `key: value` is also accepted, because a model that skips the block
-// form for a short value has still said something unambiguous. HeredocGrammar
-// deliberately does NOT offer that choice: given it, the model put a MULTI-line
-// value inline and the body's own lines were then read as further parameters.
-// Parse leniently, generate strictly.
-func ParseHeredocCalls(content string) (calls []ToolCall, prose string, err error) {
-	lines := strings.Split(content, "\n")
-	var rest []string
-	for i := 0; i < len(lines); {
-		name, ok := strings.CutPrefix(strings.TrimSpace(lines[i]), "@@call ")
-		if !ok {
-			rest = append(rest, lines[i])
-			i++
-			continue
+//	@@call write_file
+//	{ path: "a.java", content: ~~~EOF
+//	public class A {}
+//	~~~EOF
+//	}
+//
+// Arguments arrive as strict JSON with real types, so a tool whose schema wants a
+// number or an object gets one. That is the reason for parsing JSON rather than a
+// line format: only STRING bodies are awkward to escape, so only string bodies
+// get alternate syntax, and `{name: "prod", retries: 3}` stays two obvious pairs
+// instead of two heredocs.
+//
+// The object self-terminates, so no end marker is needed to parse. An UNCLOSED
+// object, string or body is reported as truncation rather than closed silently.
+func ParseToolCalls(content string) (calls []ToolCall, prose string, err error) {
+	var rest strings.Builder
+	i := 0
+	for {
+		idx := strings.Index(content[i:], CallPrefix)
+		if idx < 0 {
+			rest.WriteString(content[i:])
+			break
 		}
-		tc, next, e := parseOneCall(strings.TrimSpace(name), lines, i+1)
+		rest.WriteString(content[i : i+idx])
+		j := i + idx + len(CallPrefix)
+
+		nl := strings.IndexByte(content[j:], '\n')
+		if nl < 0 {
+			return nil, rest.String(), fmt.Errorf("llm: %s with no arguments (generation was cut off)", CallPrefix)
+		}
+		name := strings.TrimSpace(content[j : j+nl])
+		if name == "" {
+			return nil, rest.String(), fmt.Errorf("llm: %s with no tool name", CallPrefix)
+		}
+
+		args, next, e := rewriteLooseHeredoc(content, j+nl+1)
 		if e != nil {
-			return nil, strings.Join(rest, "\n"), e
+			return nil, rest.String(), fmt.Errorf("llm: %s: %w", name, e)
 		}
+		if !json.Valid([]byte(args)) {
+			return nil, rest.String(), fmt.Errorf("llm: %s: rewritten arguments are not valid JSON: %s", name, args)
+		}
+		if strings.TrimSpace(args)[0] != '{' {
+			return nil, rest.String(), fmt.Errorf("llm: %s: arguments must be a JSON object, got %s", name, args)
+		}
+		var tc ToolCall
+		tc.Type = "function"
+		tc.Function.Name = name
+		tc.Function.Arguments = args
 		calls = append(calls, tc)
 		i = next
 	}
-	return calls, strings.TrimSpace(strings.Join(rest, "\n")), nil
+	return calls, strings.TrimSpace(rest.String()), nil
 }
 
-func parseOneCall(name string, lines []string, i int) (ToolCall, int, error) {
-	var tc ToolCall
-	if name == "" {
-		return tc, i, fmt.Errorf("llm: @@call with no tool name")
-	}
-	args := map[string]any{}
-	for i < len(lines) {
-		line := lines[i]
-		if strings.TrimSpace(line) == "@@end" {
-			i++
-			tc.Type = "function"
-			tc.Function.Name = name
-			b, err := json.Marshal(args)
-			if err != nil {
-				return tc, i, fmt.Errorf("llm: encoding %s arguments: %w", name, err)
-			}
-			tc.Function.Arguments = string(b)
-			return tc, i, nil
-		}
-		key, val, found := strings.Cut(line, ":")
-		if !found {
-			// A stray line inside a call block. Skip rather than fail: the model
-			// sometimes prefixes a blank line, and refusing the whole call over
-			// whitespace would throw away real work.
-			i++
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
-		if ext, sentinel, isBlock := cutHeredocOpen(val); isBlock {
-			body, next, e := readBody(lines, i+1, sentinel)
-			if e != nil {
-				return tc, next, fmt.Errorf("llm: %s.%s: %w", name, key, e)
-			}
-			args[key] = body
-			if ext != "" {
-				args[key+"_type"] = ext
-			}
-			i = next
-			continue
-		}
-		args[key] = val
-		i++
-	}
-	return tc, i, fmt.Errorf("llm: @@call %s is missing its @@end", name)
-}
-
-// cutHeredocOpen recognises `<ext>~~~SENTINEL` and returns the extension and the
-// sentinel that will terminate the body.
-func cutHeredocOpen(val string) (ext, sentinel string, ok bool) {
-	idx := strings.Index(val, HeredocOpen)
-	if idx < 0 {
-		return "", "", false
-	}
-	ext = strings.TrimSpace(val[:idx])
-	sentinel = strings.TrimSpace(val[idx:])
-	if sentinel == HeredocOpen {
-		return "", "", false // "~~~" with no sentinel is not a block opener
-	}
-	return ext, sentinel, true
-}
-
-// readBody consumes lines until one equals sentinel exactly. A missing sentinel
-// is reported as an error rather than closed silently: an unterminated body is
-// TRUNCATED output, and inventing its end is how a half-written file gets
-// dispatched as though it were complete.
-func readBody(lines []string, i int, sentinel string) (string, int, error) {
-	var body []string
-	for ; i < len(lines); i++ {
-		if lines[i] == sentinel || strings.TrimRight(lines[i], "\r") == sentinel {
-			return strings.Join(body, "\n"), i + 1, nil
-		}
-		body = append(body, lines[i])
-	}
-	return "", i, fmt.Errorf("body never terminated by %q (generation was cut off; "+
-		"the call was NOT completed)", sentinel)
-}
-
-// HeredocGrammar builds a GBNF that constrains generation to this format for
-// exactly these tools. The sampler cannot emit a tool name that is not listed or
-// a sentinel that is not the pinned one, which removes the two things the model
-// was measured to get wrong when merely instructed: it drifted on the delimiter
-// (`<<END` became `<|<END`) and ignored some formats entirely.
+// HeredocGrammar constrains generation to `@@call <name>` plus one
+// json-loose-heredoc object, for exactly these tools.
 //
-// Pass the result as ChatOpts.Grammar with NO tools set. llama.cpp rejects the
-// combination, which is why this format is parsed from content.
+// The grammar earns its keep by removing choices the model was measured to get
+// wrong. It cannot emit an unlisted tool name. It cannot invent a body delimiter
+// (asked to produce `<<END` it produced `<|<END`, because `<|` is one token).
+// And the object is a real JSON object, so a value that is a number or a nested
+// object is expressible without a type tag.
+//
+// Pass it as ChatOpts.Grammar with NO tools set: llama.cpp refuses a grammar
+// alongside `tools`, which is exactly why this format is parsed from content.
+// Pair it with ChatOpts.Stop — a completed grammar does NOT force EOS, and
+// without a stop the model re-emits the same call to the token cap.
 func HeredocGrammar(tools []ToolDef) string {
-	names := make([]string, 0, len(tools))
+	var b strings.Builder
+	var alts []string
+	var rules strings.Builder
+
+	named := make([]ToolDef, 0, len(tools))
 	for _, t := range tools {
 		if t.Function.Name != "" {
-			names = append(names, `"`+t.Function.Name+`"`)
+			named = append(named, t)
 		}
 	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		names = []string{`[a-zA-Z_] [a-zA-Z0-9_]*`}
+	sort.Slice(named, func(i, j int) bool { return named[i].Function.Name < named[j].Function.Name })
+
+	for n, t := range named {
+		id := fmt.Sprintf("t%d", n)
+		alts = append(alts, id+"call")
+		keys := paramKeys(t)
+		fmt.Fprintf(&rules, "%scall  ::= \"%s%s\\n\" %sobj\n",
+			id, CallPrefix, t.Function.Name, id)
+		if len(keys) == 0 {
+			fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws \"}\"\n", id)
+			continue
+		}
+		// Per-tool key set. Measured: with an open `key ::= [a-zA-Z_]...` the
+		// model copied `overwrite: true` out of the prompt's EXAMPLE into a call
+		// whose schema has no such parameter, and it parsed cleanly. A closed set
+		// makes a hallucinated argument unrepresentable rather than merely wrong.
+		fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws %spair (ws \",\" ws %spair)* ws \",\"? ws \"}\"\n",
+			id, id, id)
+		fmt.Fprintf(&rules, "%spair  ::= %skey ws \":\" ws value\n", id, id)
+		fmt.Fprintf(&rules, "%skey   ::= %s\n", id, strings.Join(quoteAll(keys), " | "))
 	}
-	var b strings.Builder
-	b.WriteString("root      ::= call+\n")
-	b.WriteString(`call      ::= "@@call " name "\n" param+ "@@end\n"` + "\n")
-	b.WriteString("name      ::= " + strings.Join(names, " | ") + "\n")
-	// EVERY argument is a block, with no inline alternative. Measured: given the
-	// choice, the model put a multi-line value inline, after which the body's own
-	// lines were re-read as further `key: value` parameters and the call was
-	// garbage. Removing the alternative removes the mistake — that is what a
-	// grammar is FOR, and it is only available here because llama.cpp refuses a
-	// grammar alongside `tools`.
-	b.WriteString("param     ::= key \": \" block\n")
-	b.WriteString("key       ::= [a-zA-Z_] [a-zA-Z0-9_]*\n")
-	// The sentinel is a literal on both ends, so the model cannot choose it.
-	b.WriteString(`block     ::= ext? "` + HeredocSentinel + `\n" bodyline* "` +
-		HeredocSentinel + `\n"` + "\n")
-	b.WriteString("ext       ::= [a-z]+\n")
-	b.WriteString(`bodyline  ::= [^\n]* "\n"` + "\n")
+	if len(alts) == 0 {
+		alts = []string{"anycall"}
+		rules.WriteString(`anycall ::= "` + CallPrefix + `" [a-zA-Z_] [a-zA-Z0-9_]* "\n" object` + "\n")
+		rules.WriteString(`object  ::= "{" ws (pair (ws "," ws pair)*)? ws "}"` + "\n")
+		rules.WriteString(`pair    ::= key ws ":" ws value` + "\n")
+		rules.WriteString(`key     ::= [a-zA-Z_] [a-zA-Z0-9_]*` + "\n")
+	}
+
+	b.WriteString("root    ::= " + strings.Join(alts, " | ") + "\n")
+	b.WriteString(rules.String())
+	// A raw body is a STRING alternative, not a replacement for JSON: numbers,
+	// booleans, arrays and nested objects stay themselves, so a tool whose schema
+	// wants an integer receives one.
+	b.WriteString(`value   ::= object | array | string | body | number | "true" | "false" | "null"` + "\n")
+	b.WriteString(`object  ::= "{" ws (opair (ws "," ws opair)*)? ws "}"` + "\n")
+	b.WriteString(`opair   ::= okey ws ":" ws value` + "\n")
+	b.WriteString(`okey    ::= "\"" [^"]* "\"" | [a-zA-Z_] [a-zA-Z0-9_]*` + "\n")
+	b.WriteString(`array   ::= "[" ws (value (ws "," ws value)*)? ws "]"` + "\n")
+	b.WriteString(`string  ::= "\"" ([^"\\] | "\\" .)* "\""` + "\n")
+	b.WriteString(`body    ::= "` + HeredocOpen + `" tag? "\n" line* "` + HeredocOpen + `" tag? "\n"` + "\n")
+	b.WriteString(`tag     ::= [a-zA-Z0-9_]+` + "\n")
+	b.WriteString(`line    ::= [^\n]* "\n"` + "\n")
+	b.WriteString(`number  ::= "-"? [0-9]+ ("." [0-9]+)?` + "\n")
+	b.WriteString(`ws      ::= [ \t\n]*` + "\n")
 	return b.String()
 }
 
-// HeredocSystemPrompt describes the format to the model. The grammar enforces the
-// shape; this explains the intent, which the grammar cannot (a grammar can force
-// a sentinel but not convey that the body needs no escaping).
+// paramKeys lists a tool's declared parameter names, sorted.
+func paramKeys(t ToolDef) []string {
+	schema, ok := t.Function.Parameters.(map[string]any)
+	if !ok {
+		return nil
+	}
+	props, _ := schema["properties"].(map[string]any)
+	out := make([]string, 0, len(props))
+	for k := range props {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func HeredocSystemPrompt(tools []ToolDef) string {
 	var b strings.Builder
-	b.WriteString("To call a tool, emit a call block and nothing else. EVERY argument " +
-		"is a raw block terminated by " + HeredocSentinel + ".\n\n")
-	b.WriteString("Example, calling write_file with two arguments:\n\n")
-	// A CONCRETE example, not a placeholder skeleton. Measured twice: given
-	// `<arg>` or `<ext>` to fill in, the model emits those literally.
-	b.WriteString("@@call write_file\n" +
-		"path: " + HeredocSentinel + "\n" +
-		"src/Hello.java\n" +
-		HeredocSentinel + "\n" +
-		"content: java" + HeredocSentinel + "\n" +
+	// Short on purpose. The grammar already forbids unknown tool names and any
+	// other delimiter, so restating those spends tokens on rules the sampler
+	// enforces anyway. What a grammar CANNOT express is the intent: that a body
+	// is literal and must never be escaped. That is what this says.
+	b.WriteString("Call a tool by emitting this and nothing else:\n\n")
+	b.WriteString(CallPrefix + "write_file\n" +
+		"{\n" +
+		"  path: \"src/Hello.java\",\n" +
+		"  overwrite: true,\n" +
+		"  content: " + HeredocOpen + "java\n" +
 		"public class Hello {\n" +
 		"    System.out.println(\"hi\");\n" +
 		"}\n" +
-		HeredocSentinel + "\n" +
-		"@@end\n\n")
-	b.WriteString("The word after the colon (\"java\" above) names the body type and " +
-		"is optional.\n")
-	b.WriteString("Inside a block write the text EXACTLY as it should be: no backslash " +
-		"escapes, no doubled backslashes, no quoting.\n")
-	b.WriteString("A block ends at a line that is exactly " + HeredocSentinel + ".\n\n")
+		HeredocOpen + "java\n" +
+		"}\n" +
+		HeredocEnd + "\n\n")
+	b.WriteString("The arguments are ordinary JSON, so numbers, booleans, arrays " +
+		"and nested objects are written as themselves.\n")
+	b.WriteString("For a STRING that is long or contains quotes, newlines or " +
+		"backslashes, use a " + HeredocOpen + " body instead of a quoted string and " +
+		"write the text EXACTLY as it should be, escaping nothing. Close it with " +
+		"the same " + HeredocOpen + "tag on its own line. Backtick fences work too.\n")
+	b.WriteString("Short plain strings stay quoted: `path: \"a.java\"`.\n\n")
 	if len(tools) > 0 {
 		b.WriteString("Tools:\n")
 		for _, t := range tools {
-			schema, _ := json.Marshal(t.Function.Parameters)
-			fmt.Fprintf(&b, "- %s: %s\n  %s\n", t.Function.Name, t.Function.Description, schema)
+			fmt.Fprintf(&b, "- %s(%s): %s\n",
+				t.Function.Name, strings.Join(paramNames(t), ", "), t.Function.Description)
 		}
 	}
 	return b.String()
+}
+
+// paramNames lists a tool's parameters, required ones first and marked. The full
+// JSON Schema is deliberately NOT dumped: it duplicates what the grammar and the
+// example already convey, and on a multi-tool loop the schemas dominate the
+// prompt. A name and a required-marker is what the model acts on.
+func paramNames(t ToolDef) []string {
+	schema, ok := t.Function.Parameters.(map[string]any)
+	if !ok {
+		return nil
+	}
+	props, _ := schema["properties"].(map[string]any)
+	req := map[string]bool{}
+	if rs, ok := schema["required"].([]any); ok {
+		for _, r := range rs {
+			if s, ok := r.(string); ok {
+				req[s] = true
+			}
+		}
+	}
+	var out []string
+	for name := range props {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	for i, name := range out {
+		if !req[name] {
+			out[i] = name + "?"
+		}
+	}
+	return out
 }

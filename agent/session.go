@@ -528,22 +528,22 @@ func checkArgs(raw string) (args string, refusal string) {
 		// Tools with no parameters legitimately send nothing.
 		return raw, ""
 	}
-	err := decodeErr(s)
+	err := llm.DecodeErr(s)
 	if err != nil {
-		if isTruncationErr(err) {
+		if llm.IsTruncationErr(err) {
 			return raw, truncationRefusal(raw)
 		}
 		// Whole, but malformed. Worth a repair attempt: refusing costs the model
 		// a full regeneration of arguments it already produced correctly enough
 		// to read, and generated tokens are the priciest channel.
-		fixed, repairs, outcome := repairLooseArgs(s)
+		fixed, repairs, outcome := llm.RepairLooseJSON(s)
 		switch outcome {
-		case repairOK:
+		case llm.RepairOK:
 			log.Printf("agent: repaired loose tool-call arguments (%s); "+
 				"the strict form is what gets dispatched and stored",
 				strings.Join(repairs, "; "))
 			return fixed, ""
-		case repairTruncated:
+		case llm.RepairTruncated:
 			// Looseness masked the truncation from the first-pass decode.
 			return raw, truncationRefusal(raw)
 		}
