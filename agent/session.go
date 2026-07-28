@@ -90,6 +90,15 @@ type Session struct {
 	// tool". Empty for roles where every tool is acceptable.
 	ForcedTerminalTool string
 
+	// MaxRepetitionRetries caps how many CONSECUTIVE rounds may be cut for
+	// degenerate repetition (llm.RepetitionGuard) before Turn gives up. 0 → 2;
+	// negative → unlimited (MaxTurns still bounds the loop).
+	//
+	// Each cut round costs a re-prompt, and a model that has collapsed twice
+	// running usually collapses on the third: past that the retries reproduce
+	// the very cost the cut exists to avoid, just in installments.
+	MaxRepetitionRetries int
+
 	// Preparer, if set, revalidates + clears stale pending notifications
 	// before each iteration's context is built (the prepareNotifications-
 	// BeforeSend seam). Nil = no preparation.
@@ -186,6 +195,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	if maxTurns <= 0 {
 		maxTurns = 100
 	}
+	maxRepTrips := s.MaxRepetitionRetries
+	if maxRepTrips == 0 {
+		maxRepTrips = 2
+	}
 	now := s.Now
 	if now == nil {
 		now = func() int64 { return time.Now().UnixNano() }
@@ -222,6 +235,8 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	s.slots = map[string]string{}
 
 	var sawForcedToolCall bool
+	// repTrips counts CONSECUTIVE rounds cut for degenerate repetition.
+	var repTrips int
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
@@ -251,9 +266,20 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// LOD + tool-result truncation). The last build of the Turn wins.
 		result.Usage.Active = s.estimateTokens(messages)
 
-		resp, toolCalls, usage, e := s.streamChat(ctx, messages)
+		resp, toolCalls, usage, rep, e := s.streamChat(ctx, messages)
 		if e != nil {
 			return result, fmt.Errorf("agent: chat: %w", e)
+		}
+		if rep != nil {
+			// The transport cut a looping generation. Keep ONE copy of the
+			// repeated block and drop the rest before this reply is persisted:
+			// the whole point is that the loop must not enter the context it
+			// will be re-prompted from, or the next round is primed to continue
+			// it. The single copy stays because the text before the loop is
+			// usually the answer the model was part-way through giving.
+			if rep.Trailing > 0 && rep.Trailing < len(resp) {
+				resp = resp[:len(resp)-rep.Trailing]
+			}
 		}
 		if usage != nil {
 			s.usageTotal += usage.PromptTokens + usage.CompletionTokens
@@ -289,6 +315,40 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}
 			result.Reply = expandSlots(resp, s.slots)
 		}
+
+		if rep != nil {
+			repTrips++
+			// Tell the model what happened, as context rather than as a tool
+			// result: the cut may have landed in prose, where there is no call
+			// to answer. A notification is tail-kept and budget-neutral, so the
+			// notice survives to the next round without competing with history.
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
+				ID:   uuid.New().String(),
+				Kind: KindNotification,
+				Tag:  "repetition",
+				Content: fmt.Sprintf(
+					"Your previous response was CUT OFF because it had started repeating itself: "+
+						"you %s. The repeated copies were discarded. Do not resume that text — "+
+						"continue from where the repetition began, differently, and if you have "+
+						"nothing further to add then stop.", rep),
+				CreatedAt: now(),
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist repetition notice: %w", e)
+			}
+			if maxRepTrips > 0 && repTrips > maxRepTrips {
+				// Re-prompting is only worth it while the model can still
+				// recover. Past that it is the same 30 minutes, paid in
+				// installments — so fail with the evidence instead.
+				return result, fmt.Errorf(
+					"agent: model looped %d times in a row (last: %s); giving up rather than "+
+						"re-prompting a generation that keeps collapsing", repTrips, rep)
+			}
+			continue
+		}
+		// A clean round clears the streak: the cap counts CONSECUTIVE collapses,
+		// so a model that loops, recovers, and loops again much later is not
+		// killed for the sum.
+		repTrips = 0
 
 		if len(toolCalls) == 0 {
 			// Idle. If new events arrived between the chat call and now, loop
@@ -425,7 +485,7 @@ func (s *Session) estimateTokens(msgs []llm.Message) int {
 // streamChat consumes the streaming response, accumulates content, collects
 // tool calls, captures token usage (when reported), and emits per-token
 // notifications.
-func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, err error) {
+func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("streamChat"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID).Set("n_messages", len(messages))
 	defer func() {
@@ -478,13 +538,16 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	}
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	var content strings.Builder
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), toolCalls, usage, fmt.Errorf("%s", chunk.Error)
+			return content.String(), toolCalls, usage, nil, fmt.Errorf("%s", chunk.Error)
+		}
+		if chunk.StopReason == llm.StopReasonRepetition {
+			rep = chunk.Repetition
 		}
 		if chunk.Content != "" {
 			content.WriteString(chunk.Content)
@@ -509,8 +572,15 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 			break
 		}
 	}
+	if rep != nil {
+		// The stream was cut mid-generation, so anything still open is
+		// incomplete BY CONSTRUCTION — a heredoc block here would fail to parse
+		// and abort the Turn with a message about truncation, blaming the wrong
+		// cause. Hand back the prose and the finding; the caller answers it.
+		return content.String(), nil, usage, rep, nil
+	}
 	if !heredoc {
-		return content.String(), toolCalls, usage, nil
+		return content.String(), toolCalls, usage, nil, nil
 	}
 	// The stop sequence consumes the terminator, so put it back before parsing.
 	// Deliberately explicit: the parser must keep REFUSING an unterminated block,
@@ -520,9 +590,9 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	if perr != nil {
 		// A malformed or cut-off call is reported, not silently dropped. The
 		// caller answers it with a tool result so the model can retry.
-		return prose, nil, usage, perr
+		return prose, nil, usage, nil, perr
 	}
-	return prose, calls, usage, nil
+	return prose, calls, usage, nil, nil
 }
 
 // entryUsage projects a provider usage report onto the per-entry record.
