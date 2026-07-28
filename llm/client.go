@@ -208,6 +208,16 @@ type StreamChunk struct {
 	// dispatching a truncated call would run it with half its arguments.
 	// Only ever set alongside Error.
 	PartialToolCalls []ToolCall
+
+	// StopReason names a non-model reason the stream ended — set on the Done
+	// chunk. Empty on a normal completion, so consumers that ignore it are
+	// unaffected. Today the only value is StopReasonRepetition.
+	StopReason StopReason
+
+	// Repetition describes the degenerate loop that was cut, when StopReason is
+	// StopReasonRepetition. It carries what to log, what to tell the model, and
+	// how many trailing bytes are redundant copies. Nil otherwise.
+	Repetition *RepetitionInfo
 }
 
 // Usage carries provider-reported token counts for one chat
@@ -304,6 +314,11 @@ type Client struct {
 	// deterministically from this context and every retry reproduces them.
 	// Nothing can spin forever on an outcome that cannot change.
 	RetryBudget time.Duration
+
+	// Repetition configures degenerate-loop detection on streamed output. The
+	// zero value is ON with defaults; set Repetition.Off to disable. See
+	// RepetitionGuard for why this is not opt-in.
+	Repetition RepetitionGuard
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -963,6 +978,23 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	var sawDone, sawFinish bool
 	var events, contentChars int
 
+	// Degenerate-loop watchers, one per logical byte stream: content, plus each
+	// tool call's arguments (keyed by the protocol's index). Created lazily so a
+	// stream that never uses a channel never allocates its window.
+	var contentRep *repWatcher
+	toolRep := map[int]*repWatcher{}
+	// cutLoop reports the loop and ends the stream. Returning closes the body
+	// (deferred above), which disconnects — and the disconnect is what makes the
+	// server abandon the generation instead of running it to the context limit.
+	cutLoop := func(info *RepetitionInfo) {
+		log.Printf(
+			"llm: CUT A LOOPING GENERATION after %d events (%d content chars) — the model %s. "+
+				"The stream was closed client-side; output up to the cut is kept. This is a MODEL "+
+				"fault (degenerate repetition), not a transport error, and is not worth retrying "+
+				"unchanged.", events, contentChars, info)
+		ch <- StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: info}
+	}
+
 	// flushTools emits the accumulated calls. reason is the provider's
 	// finish_reason ("" when the stream simply ended).
 	//
@@ -1075,6 +1107,15 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		if choice.Delta.Content != "" {
 			contentChars += len(choice.Delta.Content)
 			ch <- StreamChunk{Content: choice.Delta.Content}
+			if !c.Repetition.Off {
+				if contentRep == nil {
+					contentRep = newRepWatcher(c.Repetition, "content")
+				}
+				if info := contentRep.feed(choice.Delta.Content); info != nil {
+					cutLoop(info)
+					return
+				}
+			}
 		}
 
 		// Accumulate tool-call fragments by index.
@@ -1099,6 +1140,27 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// the raw characters the model produced.
 			if frag := normalizeArgs(td.Function.Arguments); frag != "" {
 				tc.Function.Arguments += frag
+				if c.Repetition.Off {
+					continue
+				}
+				w := toolRep[td.Index]
+				if w == nil {
+					w = newRepWatcher(c.Repetition, "tool arguments")
+					toolRep[td.Index] = w
+				}
+				if info := w.feed(frag); info != nil {
+					// The name is known by now even though it arrived on an
+					// earlier delta than the fragment that tripped this.
+					if tc.Function.Name != "" {
+						info.Where = "tool:" + tc.Function.Name + " arguments"
+					}
+					// The accumulated call is DISCARDED, not flushed: its
+					// arguments are mid-loop and unparseable, and emitting it
+					// would put a call built from garbage into the history. The
+					// consumer answers the repetition itself.
+					cutLoop(info)
+					return
+				}
 			}
 		}
 
