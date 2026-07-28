@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"maps"
 	"strings"
@@ -98,6 +99,14 @@ type Session struct {
 	// running usually collapses on the third: past that the retries reproduce
 	// the very cost the cut exists to avoid, just in installments.
 	MaxRepetitionRetries int
+
+	// MaxRepeatedExchanges bounds the TURN-level loop: consecutive rounds whose
+	// tool calls AND their results are byte-identical. At this many, the model
+	// is told; at twice this many, Turn stops. 0 → 5; negative → off.
+	//
+	// The result is part of the comparison on purpose — see the check in Turn.
+	// A poll whose answer keeps changing is progress and must never trip this.
+	MaxRepeatedExchanges int
 
 	// Preparer, if set, revalidates + clears stale pending notifications
 	// before each iteration's context is built (the prepareNotifications-
@@ -199,6 +208,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	if maxRepTrips == 0 {
 		maxRepTrips = 2
 	}
+	maxRepeatRounds := s.MaxRepeatedExchanges
+	if maxRepeatRounds == 0 {
+		maxRepeatRounds = 5
+	}
 	now := s.Now
 	if now == nil {
 		now = func() int64 { return time.Now().UnixNano() }
@@ -235,8 +248,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	s.slots = map[string]string{}
 
 	var sawForcedToolCall bool
-	// repTrips counts CONSECUTIVE rounds cut for degenerate repetition.
-	var repTrips int
+	// repTrips counts CONSECUTIVE rounds cut for degenerate repetition;
+	// repeatRounds counts CONSECUTIVE identical tool-call/result exchanges.
+	var repTrips, repeatRounds int
+	var lastExchange uint64
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
@@ -402,6 +417,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 
 		var sessionClosed bool
+		results := make([]string, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			if s.ForcedTerminalTool != "" && tc.Function.Name == s.ForcedTerminalTool {
 				sawForcedToolCall = true
@@ -442,6 +458,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if s.EncodeToolResult != nil {
 				toolResult = s.EncodeToolResult(toolResult)
 			}
+			results = append(results, toolResult)
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:         uuid.New().String(),
 				Kind:       KindToolResult,
@@ -457,6 +474,48 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// A terminal tool fired. Don't loop into another chat round.
 			return result, nil
 		}
+
+		// Turn-level loop: the model keeps making the same call and getting the
+		// same answer. Distinct from a cut generation — every round here is
+		// individually well-formed; what repeats is the EXCHANGE.
+		//
+		// The signature covers the results as well as the calls, and that is
+		// what makes the guard safe to leave on. Polling is a legitimate reason
+		// to repeat a call, so keying on the call alone would kill a job that is
+		// correctly waiting for a status to change. A poll whose result changes
+		// is progress; one that returns byte-identical output round after round
+		// is not going to start.
+		if maxRepeatRounds > 0 && len(toolCalls) > 0 {
+			if sig := exchangeSignature(toolCalls, results); sig == lastExchange {
+				repeatRounds++
+			} else {
+				lastExchange, repeatRounds = sig, 1
+			}
+			if repeatRounds >= 2*maxRepeatRounds {
+				return result, fmt.Errorf(
+					"agent: tool-call loop — the same call(s) returned the same result(s) %d "+
+						"rounds running (last: %s); stopping rather than paying for more identical "+
+						"round-trips", repeatRounds, callNames(toolCalls))
+			}
+			if repeatRounds == maxRepeatRounds {
+				// Say it once, in context, and let the model break out itself —
+				// it may have a genuine reason to wait, and only it knows what
+				// the alternative move is.
+				if e := s.Store.Append(ctx, s.SessionID, Entry{
+					ID:   uuid.New().String(),
+					Kind: KindNotification,
+					Tag:  "tool_loop",
+					Content: fmt.Sprintf(
+						"You have called %s %d times in a row and received an IDENTICAL result "+
+							"every time. Repeating it will not produce a different answer. Change "+
+							"the approach, or report what you have and stop.",
+						callNames(toolCalls), repeatRounds),
+					CreatedAt: now(),
+				}); e != nil {
+					return result, fmt.Errorf("agent: persist tool-loop notice: %w", e)
+				}
+			}
+		}
 	}
 	if s.ForcedTerminalTool != "" && !sawForcedToolCall {
 		return result, fmt.Errorf(
@@ -466,6 +525,36 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			maxTurns, s.ForcedTerminalTool)
 	}
 	return result, fmt.Errorf("agent: max turns (%d) exceeded", maxTurns)
+}
+
+// exchangeSignature fingerprints one round's tool calls together with what they
+// returned. Hashed rather than compared as text so a session that pulls back
+// megabyte results does not hold a second copy of each one just to notice it is
+// stuck. Call IDs are excluded — they are fresh every round by construction and
+// would make every exchange look distinct.
+func exchangeSignature(calls []llm.ToolCall, results []string) uint64 {
+	h := fnv.New64a()
+	for i, tc := range calls {
+		h.Write([]byte(tc.Function.Name))
+		h.Write([]byte{0})
+		h.Write([]byte(tc.Function.Arguments))
+		h.Write([]byte{0})
+		if i < len(results) {
+			h.Write([]byte(results[i]))
+		}
+		h.Write([]byte{0})
+	}
+	return h.Sum64()
+}
+
+// callNames lists the tools in a round, for a message that has to name what is
+// looping without dumping the arguments into it.
+func callNames(calls []llm.ToolCall) string {
+	names := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		names = append(names, tc.Function.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // estimateTokens sizes a built message list with the session's estimator (nil →
