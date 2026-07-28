@@ -65,7 +65,17 @@ type Entry struct {
 	// parts on user messages, not on tool results or assistant turns.
 	Parts      []llm.ContentPart
 	ToolCallID string // correlates KindToolCall / KindToolResult
-	ToolName   string // the tool for KindToolCall / KindToolResult
+
+	// Usage records what the round-trip that PRODUCED this entry cost, stamped
+	// on KindAssistant entries. It lives on the entry — and therefore in the
+	// session log — rather than only in a trace sidecar, because the log is the
+	// durable record: a replay can then answer how long each turn took and what
+	// it spent without a second file that may not exist.
+	//
+	// Nil on every other kind, and omitted when marshalled, so stores and
+	// consumers that predate it are unaffected.
+	Usage    *EntryUsage `json:"Usage,omitempty"`
+	ToolName string      // the tool for KindToolCall / KindToolResult
 	// Tag is an opaque display label used only when rendering a
 	// KindNotification (e.g. the host's raw event-type "nudge"). Empty →
 	// the Kind string is used.
@@ -176,6 +186,17 @@ type TokenUsage struct {
 	// Turns counts chat round-trips accumulated into this tally — the divisor
 	// for any per-turn figure.
 	Turns int
+}
+
+// EntryUsage is the per-call cost of one round-trip, persisted with the entry
+// it produced. Deliberately the SPLIT rather than a single total: cached,
+// processed and generated tokens price differently by more than an order of
+// magnitude, and a lone total is dominated by the cheapest of the three.
+type EntryUsage struct {
+	LatencyMS int64 `json:"latency_ms,omitempty"`
+	Cached    int   `json:"cached,omitempty"`
+	Processed int   `json:"processed,omitempty"`
+	Generated int   `json:"generated,omitempty"`
 }
 
 // TurnResult is what Turn returns: the model's final reply, whatever the loop

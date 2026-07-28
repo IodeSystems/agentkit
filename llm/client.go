@@ -95,6 +95,11 @@ func (m Message) MarshalJSON() ([]byte, error) {
 }
 
 // ToolCall represents a tool call request from the LLM.
+//
+// Arguments is a STRING holding JSON, per the OpenAI spec — and per that same
+// spec it is not guaranteed to be valid JSON, so every consumer must parse
+// defensively (agent.Session refuses to dispatch a call it cannot parse).
+// Marshalling keeps the string form, which is what a request must carry.
 type ToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -102,6 +107,73 @@ type ToolCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+}
+
+// UnmarshalJSON accepts `arguments` as either the spec's JSON string or a bare
+// JSON object, which some providers send instead.
+//
+// Without this, an object made the whole decode fail: the non-streaming path
+// returned a decode error for the entire response, and the streaming path — which
+// ignores unparseable events by design, since a provider may interleave shapes it
+// does not recognise — dropped the chunk SILENTLY. Measured: zero tool calls, zero
+// errors, no log. The turn saw a model that had said nothing, which is
+// indistinguishable from a model that chose to say nothing.
+func (tc *ToolCall) UnmarshalJSON(b []byte) error {
+	var shadow struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(b, &shadow); err != nil {
+		return err
+	}
+	tc.ID = shadow.ID
+	tc.Type = shadow.Type
+	tc.Function.Name = shadow.Function.Name
+	tc.Function.Arguments = normalizeArgs(shadow.Function.Arguments)
+	return nil
+}
+
+// normalizeArgs renders a wire `arguments` value as the JSON string the rest of
+// the code works in.
+//
+// A JSON string is unquoted (its contents ARE the arguments, and in a stream it
+// is one fragment of them). Anything else is taken verbatim as its own JSON —
+// an off-spec provider sending the object directly. Absent and null both mean
+// "no arguments", which is distinct from unparseable and must not be reported
+// as a failure: a tool with no parameters legitimately has none.
+func normalizeArgs(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	if s[0] == '"' {
+		var out string
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return "" // unreachable: raw came from a successful parse
+		}
+		return out
+	}
+	log.Printf("llm: provider sent tool-call arguments as %s, not the string the "+
+		"OpenAI spec defines; accepting it verbatim", jsonShape(s))
+	return s
+}
+
+// jsonShape names a JSON value's kind from its first byte, for the log above.
+func jsonShape(s string) string {
+	switch s[0] {
+	case '{':
+		return "an object"
+	case '[':
+		return "an array"
+	case 't', 'f':
+		return "a boolean"
+	default:
+		return "a number"
+	}
 }
 
 // ToolDef describes a tool the LLM can call, matching the OpenAI tool format.
@@ -159,6 +231,12 @@ type Usage struct {
 	// one, and only this one — it was previously unparsed, so every cached
 	// token read as zero and prompt_tokens looked like real work forever.
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+
+	// LatencyMS is wall-clock for this one round-trip, measured client-side.
+	// Not reported by any provider — but "how long did that call take" is half
+	// of what anyone asks of a trace, and without it the token counts alone
+	// cannot distinguish a slow cold load from a large generation.
+	LatencyMS int64 `json:"latency_ms,omitempty"`
 }
 
 // PromptTokensDetails is OpenAI's nested prompt-token breakdown.
@@ -589,6 +667,14 @@ type ChatOpts struct {
 	// Providers that do not support seed ignore the field.
 	Temperature *float64
 	Seed        *int
+
+	// MaxTokens caps the completion. 0 = leave it to the server.
+	//
+	// This matters most with Grammar set. A grammar that permits repetition (a
+	// heredoc body is `bodyline*`) never REQUIRES termination, so an unbounded
+	// request can run to the context limit instead of finishing — observed as a
+	// hang, not an error.
+	MaxTokens int
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.
@@ -601,6 +687,9 @@ func applySampling(body map[string]any, opts *ChatOpts) {
 	}
 	if opts.Seed != nil {
 		body["seed"] = *opts.Seed
+	}
+	if opts.MaxTokens > 0 {
+		body["max_tokens"] = opts.MaxTokens
 	}
 }
 
@@ -652,6 +741,10 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	if opts != nil {
 		traceID = opts.TraceID
 	}
+	// Measured from BEFORE the request so latency includes retries, queueing and
+	// a cold model load — the parts that make a call slow are exactly the parts
+	// a server-side number would omit.
+	callStart := time.Now()
 	resp, err := c.postChatWithRetry(ctx, payload, traceID)
 	if err != nil {
 		return nil, err
@@ -661,7 +754,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	}
 
 	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, resp.Body, ch)
+	go c.readStream(ctx, resp.Body, ch, callStart)
 	return ch, nil
 }
 
@@ -741,7 +834,9 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 //
 // Usage lands on a final chunk (often a no-choices one when
 // `stream_options.include_usage=true`); forward as soon as seen.
-func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk) {
+// readStream parses the SSE body. callStart is when the request was issued, so
+// usage chunks can carry the round-trip latency no provider reports.
+func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time) {
 	defer body.Close()
 	defer close(ch)
 
@@ -753,8 +848,27 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	// numeric order, but typically index 0 streams first).
 	toolBuf := map[int]*ToolCall{}
 	var toolOrder []int
+	// Stream forensics: on an abrupt end these are the difference between
+	// "the provider truncated us" and "we mishandled a normal stream".
+	var sawDone, sawFinish bool
+	var events, contentChars int
 
-	flushTools := func() {
+	// flushTools emits the accumulated calls. reason is the provider's
+	// finish_reason ("" when the stream simply ended).
+	//
+	// Calls with unparseable arguments ARE emitted. The transport's job is to
+	// report faithfully what the provider sent, not to decide the turn's fate:
+	// swallowing the call here would abort the turn with no tool_result, so the
+	// model never learns its call was cut off and cannot retry smaller. The
+	// consumer (agent.Session) refuses to DISPATCH such a call and answers it
+	// with an error result instead — which keeps the call/result pair intact and
+	// closes the loop.
+	//
+	// A clean finish is NOT evidence the payload is whole: a generation stopped
+	// by the context window or a token cap terminates cleanly — measured
+	// finish_reason="length" WITH [DONE], carrying 450 chars of unterminated
+	// JSON. So the log below fires on every path, not just an abrupt end.
+	flushTools := func(reason string) {
 		for _, idx := range toolOrder {
 			tc := toolBuf[idx]
 			if tc == nil {
@@ -764,6 +878,17 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// deltas but the dispatcher expects it set.
 			if tc.Type == "" {
 				tc.Type = "function"
+			}
+			if !json.Valid([]byte(tc.Function.Arguments)) {
+				why := "the stream ended before they were complete"
+				if reason != "" {
+					why = "generation stopped early (finish_reason=" + reason + ")"
+				}
+				log.Printf(
+					"llm: TRUNCATED TOOL CALL — %q has unparseable arguments (%d chars) because %s. "+
+						"It is emitted so the caller can answer it with an error result, but it must "+
+						"NOT be dispatched or persisted verbatim. Cause is upstream, not the caller.",
+					tc.Function.Name, len(tc.Function.Arguments), why)
 			}
 			ch <- StreamChunk{ToolCall: tc}
 		}
@@ -780,8 +905,10 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
+		events++
 		if data == "[DONE]" {
-			flushTools()
+			sawDone = true
+			flushTools("")
 			ch <- StreamChunk{Done: true}
 			return
 		}
@@ -797,8 +924,12 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 						ID       string `json:"id,omitempty"`
 						Type     string `json:"type,omitempty"`
 						Function struct {
-							Name      string `json:"name,omitempty"`
-							Arguments string `json:"arguments,omitempty"`
+							Name string `json:"name,omitempty"`
+							// RawMessage, not string: a provider that sends the
+							// object directly would otherwise fail this event's
+							// unmarshal, and the loop below drops unparseable
+							// events without a word. See normalizeArgs.
+							Arguments json.RawMessage `json:"arguments,omitempty"`
 						} `json:"function"`
 					} `json:"tool_calls,omitempty"`
 				} `json:"delta"`
@@ -823,6 +954,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// stream_options.include_usage send one of these after content.
 		if len(event.Choices) == 0 {
 			if event.Usage != nil {
+				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 				ch <- StreamChunk{Usage: event.Usage}
 			}
 			continue
@@ -831,6 +963,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 
 		// Forward content immediately for token-level streaming.
 		if choice.Delta.Content != "" {
+			contentChars += len(choice.Delta.Content)
 			ch <- StreamChunk{Content: choice.Delta.Content}
 		}
 
@@ -851,8 +984,11 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			if td.Function.Name != "" {
 				tc.Function.Name = td.Function.Name
 			}
-			if td.Function.Arguments != "" {
-				tc.Function.Arguments += td.Function.Arguments
+			// Fragments concatenate: the protocol splits one call's arguments
+			// across many deltas. normalizeArgs unquotes each fragment back to
+			// the raw characters the model produced.
+			if frag := normalizeArgs(td.Function.Arguments); frag != "" {
+				tc.Function.Arguments += frag
 			}
 		}
 
@@ -860,9 +996,11 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// "tool_calls" it's the trigger to flush the accumulated calls;
 		// for "stop" with no tool calls accumulated, just done.
 		if choice.FinishReason != "" {
-			flushTools()
+			sawFinish = true
+			flushTools(choice.FinishReason)
 			done := StreamChunk{Done: true}
 			if event.Usage != nil {
+				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 				done.Usage = event.Usage
 			}
 			ch <- done
@@ -873,7 +1011,41 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	if err := scanner.Err(); err != nil {
 		ch <- StreamChunk{Error: err.Error()}
 	}
-	flushTools()
+	// The stream ended WITHOUT a finish_reason — a dropped connection, a server
+	// that gave up mid-generation, a truncated body. Anything still in the
+	// accumulator is therefore INCOMPLETE.
+	//
+	// Flushing it as a normal tool call is how a malformed call enters a
+	// conversation in the first place: the provider never sent one, we
+	// manufacture it from a partial buffer, the caller dispatches it and
+	// persists it, and every later request carrying that history is rejected at
+	// parse time by any server that deserializes arguments to render them.
+	//
+	// So emit partials as an ERROR carrying the fragments, never as ToolCalls.
+	// The caller can salvage the text; it cannot mistake it for a real call.
+	if partial := partialTools(toolBuf, toolOrder); len(partial) > 0 {
+		// Loud and specific: this is a PROVIDER fault (it closed the body
+		// mid-message), and the numbers below are what distinguish it from a
+		// client-side parsing mistake. Without them a reader sees only "bad
+		// JSON somewhere" and blames the wrong component — which is exactly
+		// what happened when this bug was first hit.
+		var names []string
+		bytes := 0
+		for _, tc := range partial {
+			names = append(names, tc.Function.Name)
+			bytes += len(tc.Function.Arguments)
+		}
+		detail := fmt.Sprintf(
+			"llm: PROVIDER TRUNCATED THE STREAM — body closed after %d events (%d content chars) "+
+				"with finish_reason=%v and [DONE]=%v; %d tool call(s) %v left incomplete with %d "+
+				"argument chars buffered. The partial call is NOT usable and was discarded rather "+
+				"than emitted: persisting it would make every later request carrying this history "+
+				"fail to parse. Cause is upstream (context exhausted mid-generation, or a dropped "+
+				"connection), not the caller.",
+			events, contentChars, sawFinish, sawDone, len(partial), names, bytes)
+		log.Print(detail)
+		ch <- StreamChunk{Error: detail, PartialToolCalls: partial}
+	}
 }
 
 // StreamChunkToSSE formats a StreamChunk as an SSE event string.
@@ -949,34 +1121,4 @@ func bodyIsTruncatedToolCall(body string) bool {
 			strings.Contains(b, "missing closing quote") ||
 			strings.Contains(b, "parse_error") ||
 			strings.Contains(b, "invalid string"))
-}
-
-// PartialWritePreview extracts the fragment of the cut-off arguments the
-// provider echoed back, so a caller can show the model how far it got.
-//
-// Best-effort and usually INCOMPLETE: llama.cpp reports the JSON parser's
-// "last read" context, which elides the middle of a long value (measured: a
-// 7.4 KB error body for a write that failed at column 19,315). It is a preview
-// to orient the model, not the file. The complete partial, when the transport
-// streamed it, is on llm.StreamChunk.PartialToolCalls.
-func (e *TruncatedToolCallError) PartialWritePreview() string {
-	if e == nil {
-		return ""
-	}
-	const marker = "last read: '"
-	i := strings.Index(e.Body, marker)
-	if i < 0 {
-		return ""
-	}
-	frag := e.Body[i+len(marker):]
-	if j := strings.LastIndex(frag, "'"); j > 0 {
-		frag = frag[:j]
-	}
-	const max = 2000
-	if len(frag) > max {
-		// Keep the TAIL: the model needs to know where to resume, and the head
-		// it can already see in its own history.
-		frag = "…" + frag[len(frag)-max:]
-	}
-	return frag
 }

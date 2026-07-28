@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"strings"
 	"time"
@@ -29,15 +31,6 @@ type Session struct {
 	Build    ContextBuilder // nil → DefaultContextBuilder over Store
 	Tools    []llm.ToolDef
 	Dispatch ToolDispatcher
-
-	// Compactor, if set, folds history ON DEMAND. Turn uses it to recover from
-	// a tool call truncated by a full context window: the Shaper's own
-	// budget-driven compaction runs while BUILDING a prompt, which is too late
-	// once the window filled mid-generation. A *Shaper satisfies this.
-	// Nil → truncation is reported rather than recovered from.
-	Compactor interface {
-		Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error)
-	}
 
 	// ChatOpts forwards LLM-call options on every round-trip. Nil OK. Used
 	// by protocol-bound roles to force tool_choice=required.
@@ -219,7 +212,6 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	s.slots = map[string]string{}
 
 	var sawForcedToolCall bool
-	var recoveredTruncation bool
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
@@ -251,20 +243,6 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 
 		resp, toolCalls, usage, e := s.streamChat(ctx, messages)
 		if e != nil {
-			// A tool call cut off mid-argument means the window filled while the
-			// model was writing. Retrying unchanged cannot help — at temperature
-			// 0 the same context reproduces the same truncation — so recover
-			// instead: compact, tell the model what happened, and let it try
-			// again with room. Once per Turn; a second occurrence is a real
-			// failure, not a transient one.
-			var truncated *llm.TruncatedToolCallError
-			if errors.As(e, &truncated) && !recoveredTruncation {
-				recoveredTruncation = true
-				if e2 := s.recoverFromTruncation(ctx, truncated); e2 != nil {
-					return result, fmt.Errorf("agent: chat: %w (recovery failed: %v)", e, e2)
-				}
-				continue
-			}
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
 		if usage != nil {
@@ -288,9 +266,13 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// token-lean; expand only for display in TurnResult.Reply. A reply
 			// with no known {name}/{OUTPUT} placeholder is unchanged.
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:        uuid.New().String(),
-				Kind:      KindAssistant,
-				Content:   resp,
+				ID:      uuid.New().String(),
+				Kind:    KindAssistant,
+				Content: resp,
+				// What this round-trip cost, recorded WITH the reply it produced.
+				// The session log is the durable record, so a replay can answer
+				// "how long, and how much" per turn without a trace sidecar.
+				Usage:     entryUsage(usage),
 				CreatedAt: time.Now().UnixNano(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist llm reply: %w", e)
@@ -315,10 +297,32 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// rebuilt context has a valid assistant(tool_calls) → tool(tool_call_id)
 		// structure, not orphan tool messages that confuse the model on replay.
 		for _, tc := range toolCalls {
+			// Arguments that are not valid JSON must never be persisted VERBATIM.
+			// They POISON THE SESSION: providers deserialize historical
+			// tool_calls to render them (the Qwen chat template iterates
+			// `arguments` as a mapping to emit <parameter=…> tags), so one bad
+			// entry makes every later request fail at parse time, before
+			// inference. Measured: 19,310 chars of unterminated JSON left a
+			// session permanently unresumable — a 50ms 500 on every request,
+			// immune to compacting the context 51x.
+			//
+			// But DROPPING the call is wrong too: the dispatcher still records a
+			// tool_result against tc.ID, which would then reference a call that
+			// is not in the history — an orphan, which is what this loop exists
+			// to avoid.
+			//
+			// So keep the call and REPLACE its arguments with a valid-JSON
+			// stand-in that says what happened. The exchange stays paired, the
+			// model sees its own truncated call and the matching error result,
+			// and nothing unparseable ever enters the history.
+			args, refusal := checkArgs(tc.Function.Arguments)
+			if refusal != "" {
+				args = rejectedArgsPlaceholder(tc.Function.Arguments, refusal)
+			}
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
 				ID:         uuid.New().String(),
 				Kind:       KindToolCall,
-				Content:    tc.Function.Arguments,
+				Content:    args,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
 				CreatedAt:  now(),
@@ -332,7 +336,26 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if s.ForcedTerminalTool != "" && tc.Function.Name == s.ForcedTerminalTool {
 				sawForcedToolCall = true
 			}
-			toolResult, e := s.Dispatch(ctx, tc)
+			// Validate before dispatching, not inside each dispatcher. Arguments
+			// arrive as an opaque string, so a truncated payload is indistinguishable
+			// from a well-formed one until it is parsed — and every dispatcher would
+			// otherwise have to rediscover that, each with its own error wording.
+			//
+			// Running a call with half its arguments is the real hazard (a write
+			// with a truncated body, a delete with a truncated filter), so the call
+			// is answered rather than executed. Answering it — instead of dropping
+			// it — is what lets the model recover: it sees its own call paired with
+			// a result that names the failure, and retries smaller.
+			var toolResult string
+			var e error
+			if args, refusal := checkArgs(tc.Function.Arguments); refusal != "" {
+				toolResult = refusal
+			} else {
+				// Dispatch the REPAIRED text, not what arrived, so the tool and
+				// the stored history see the same strict JSON. tc is a copy.
+				tc.Function.Arguments = args
+				toolResult, e = s.Dispatch(ctx, tc)
+			}
 			if e != nil {
 				if errors.Is(e, ErrSessionClosed) {
 					sessionClosed = true
@@ -458,47 +481,122 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	return content.String(), toolCalls, usage, nil
 }
 
-// recoverFromTruncation handles a tool call that was cut off because the
-// context filled mid-argument.
+
+// entryUsage projects a provider usage report onto the per-entry record.
+// Returns nil when the provider reported nothing, so the field stays absent
+// rather than persisting a row of zeros that reads as "this call was free".
+func entryUsage(u *llm.Usage) *EntryUsage {
+	if u == nil {
+		return nil
+	}
+	eu := &EntryUsage{
+		LatencyMS: u.LatencyMS,
+		Cached:    u.CachedPromptTokens(),
+		Processed: u.NewPromptTokens(),
+		Generated: u.CompletionTokens,
+	}
+	if eu.LatencyMS == 0 && eu.Cached == 0 && eu.Processed == 0 && eu.Generated == 0 {
+		return nil
+	}
+	return eu
+}
+
+// checkArgs decides what to do with a call's arguments. It returns the text to
+// dispatch and persist, plus a refusal — the tool result to answer with instead
+// — which is empty when the call is fit to run.
 //
-// Three steps, in this order:
+// Fit means a JSON OBJECT: the wire format is a map of parameter name to value,
+// and providers that render historical calls walk it as one. A bare `"hello"`
+// or `[1,2]` is valid JSON that satisfies no tool's schema — and under the Qwen
+// template it silently renders zero <parameter=…> tags, so the model sees a call
+// it never made.
 //
-//  1. COMPACT. Without freeing space the retry hits the identical wall; this is
-//     the only step that changes the outcome.
-//  2. TELL THE MODEL. Left unsaid, it reissues the same oversized write into the
-//     newly-freed window and may simply succeed by luck, learning nothing — and
-//     the next large file fails the same way.
-//  3. HAND BACK WHAT IT WROTE. Providers stream tool arguments incrementally, so
-//     the partial is already buffered client-side (see llm.StreamChunk's
-//     PartialToolCalls). Quoting how far it got lets the model continue rather
-//     than regenerate thousands of tokens it already paid for.
+// THE ORDER OF THESE CHECKS IS THE SAFETY PROPERTY. Truncation is diagnosed
+// before repair is attempted, and a truncated payload is never repaired: closing
+// its open braces would manufacture a complete-looking call out of output the
+// model never finished, which is precisely the failure this code exists to
+// prevent. Repair only ever sees a payload that is whole but malformed.
 //
-// The note is a KindNotification: tail-kept and budget-neutral, so it survives
-// the compaction it follows and does not itself consume the space just freed.
-func (s *Session) recoverFromTruncation(ctx context.Context, tr *llm.TruncatedToolCallError) error {
-	if s.Compactor != nil {
-		if _, ok, err := s.Compactor.Compact(ctx, s.SessionID); err != nil {
-			return fmt.Errorf("compact: %w", err)
-		} else if !ok {
-			// Nothing left to fold — the context is irreducible, so a retry
-			// would fail identically. Surface that rather than looping.
-			return fmt.Errorf("context is already minimal; the single write is too large for the window")
+// Truncation is also reported separately from a syntax error, because they ask
+// for different things: truncation means retry SMALLER (the model wrote too
+// much), a syntax error means retry CORRECTLY (the model wrote the wrong thing).
+// Collapsed into "bad arguments" the model guesses, and it usually guesses the
+// same size again.
+func checkArgs(raw string) (args string, refusal string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		// Tools with no parameters legitimately send nothing.
+		return raw, ""
+	}
+	err := decodeErr(s)
+	if err != nil {
+		if isTruncationErr(err) {
+			return raw, truncationRefusal(raw)
 		}
+		// Whole, but malformed. Worth a repair attempt: refusing costs the model
+		// a full regeneration of arguments it already produced correctly enough
+		// to read, and generated tokens are the priciest channel.
+		fixed, repairs, outcome := repairLooseArgs(s)
+		switch outcome {
+		case repairOK:
+			log.Printf("agent: repaired loose tool-call arguments (%s); "+
+				"the strict form is what gets dispatched and stored",
+				strings.Join(repairs, "; "))
+			return fixed, ""
+		case repairTruncated:
+			// Looseness masked the truncation from the first-pass decode.
+			return raw, truncationRefusal(raw)
+		}
+		return raw, fmt.Sprintf(
+			"ERROR: malformed json: %v. This call was NOT executed. Retry with "+
+				"well-formed arguments.", err)
 	}
-	var b strings.Builder
-	b.WriteString("Your previous tool call was CUT OFF: the context window filled while its " +
-		"arguments were still being written, so the call never completed and was discarded. " +
-		"The history has been compacted to free space.\n\n" +
-		"Make the retry SMALLER — write the file in several successive edits rather than one " +
-		"large one — or the same thing will happen again.")
-	if partial := tr.PartialWritePreview(); partial != "" {
-		b.WriteString("\n\nThis is how far the cut-off write got, so you can continue from it " +
-			"instead of starting over:\n" + partial)
+	if s[0] != '{' {
+		got := jsonKind(json.RawMessage(s))
+		if got == "" {
+			got = "null"
+		}
+		return raw, fmt.Sprintf(
+			"ERROR: arguments must be a JSON object mapping parameter names to values, "+
+				"got %s. This call was NOT executed.", got)
 	}
-	return s.Store.Append(ctx, s.SessionID, Entry{
-		ID:        uuid.New().String(),
-		Kind:      KindNotification,
-		Content:   b.String(),
-		CreatedAt: time.Now().UnixNano(),
+	return raw, ""
+}
+
+// truncationRefusal is the answer to a call that stopped early. It says retry
+// SMALLER, which is the one thing the model cannot work out for itself: from
+// where it sits, it wrote a complete call.
+func truncationRefusal(raw string) string {
+	return fmt.Sprintf(
+		"ERROR: malformed json — truncation detected: the arguments were cut off "+
+			"after %d characters, so this call was NOT executed. Retry with a smaller "+
+			"call: split a large write into successive edits.", len(raw))
+}
+
+// rejectedArgsPlaceholder replaces unusable tool-call arguments with a VALID
+// JSON OBJECT recording what happened. why is the same explanation the model
+// gets as the tool result, so the persisted call and its answer never disagree.
+//
+// A valid object is the whole point: a provider that deserializes historical
+// tool_calls (to render them as anything other than raw JSON) must be able to
+// parse every entry in the conversation, forever. A stand-in keeps that
+// invariant while staying honest about the failure.
+//
+// The tail is kept because the model wrote the beginning and can see it; what
+// it cannot infer is where its own output stopped.
+func rejectedArgsPlaceholder(raw, why string) string {
+	const keep = 800
+	tail := raw
+	if len(tail) > keep {
+		tail = "…" + tail[len(tail)-keep:]
+	}
+	b, err := json.Marshal(map[string]any{
+		"_error":     why,
+		"_raw_chars": len(raw),
+		"_tail":      tail,
 	})
+	if err != nil {
+		return `{"_error":"arguments were unusable; this call was NOT executed"}`
+	}
+	return string(b)
 }

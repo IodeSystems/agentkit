@@ -28,40 +28,6 @@ func TestBodyIsTruncatedToolCall(t *testing.T) {
 	}
 }
 
-func TestPartialWritePreview(t *testing.T) {
-	e := &TruncatedToolCallError{Status: 500, Body: realTruncationBody}
-	got := e.PartialWritePreview()
-	if got == "" {
-		t.Fatal("no preview extracted from a body that carries one")
-	}
-	if want := "package com.termux.app"; !contains(got, want) {
-		t.Errorf("preview %q missing %q", got, want)
-	}
-	// No echoed fragment → empty, not a panic or garbage.
-	if p := (&TruncatedToolCallError{Body: `{"error":{"message":"boom"}}`}).PartialWritePreview(); p != "" {
-		t.Errorf("expected empty preview, got %q", p)
-	}
-	if p := (*TruncatedToolCallError)(nil).PartialWritePreview(); p != "" {
-		t.Errorf("nil receiver should yield empty, got %q", p)
-	}
-}
-
-// A long preview keeps the TAIL: the model needs to know where to resume.
-func TestPartialWritePreviewKeepsTail(t *testing.T) {
-	long := "x"
-	for len(long) < 6000 {
-		long += "abcdefghij"
-	}
-	e := &TruncatedToolCallError{Body: "last read: '" + long + "ENDMARKER'"}
-	got := e.PartialWritePreview()
-	if len(got) > 2100 {
-		t.Errorf("preview not capped: %d chars", len(got))
-	}
-	if !contains(got, "ENDMARKER") {
-		t.Error("preview dropped the tail, which is the part that says where to resume")
-	}
-}
-
 func contains(h, n string) bool {
 	for i := 0; i+len(n) <= len(h); i++ {
 		if h[i:i+len(n)] == n {
