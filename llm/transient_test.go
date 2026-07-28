@@ -22,6 +22,10 @@ func TestTransientUpstream(t *testing.T) {
 		"dial tcp 127.0.0.1:8080: connect: connection refused",
 		"unexpected EOF",
 		"llm: upstream returned 503",
+		// Verbatim from three benchmark runs lost to a saturated slots:1 model.
+		"agent: chat: llm: retry budget 5m0s exhausted after 5m40s of 429 backpressure",
+		"provider returned 429",
+		"rate limit exceeded",
 	}
 	for _, s := range transient {
 		if !TransientUpstream(errors.New(s)) {
