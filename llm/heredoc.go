@@ -188,8 +188,12 @@ func HeredocGrammar(tools []ToolDef) string {
 		id := fmt.Sprintf("t%d", n)
 		alts = append(alts, id+"call")
 		keys := paramKeys(t)
-		fmt.Fprintf(&rules, "%scall  ::= \"%s%s\\n\" %sobj\n",
-			id, CallPrefix, t.Function.Name, id)
+		// The terminator is part of the grammar so ChatOpts.Stop can match it.
+		// Measured: without it, an object whose pair-list allows repetition let
+		// the model emit `path`/`content` over and over to the token cap. `}`
+		// was always legal, but so was another pair, and nothing forced the end.
+		fmt.Fprintf(&rules, "%scall  ::= \"%s%s\\n\" %sobj \"\\n%s\"\n",
+			id, CallPrefix, t.Function.Name, id, HeredocEnd)
 		if len(keys) == 0 {
 			fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws \"}\"\n", id)
 			continue
@@ -198,14 +202,19 @@ func HeredocGrammar(tools []ToolDef) string {
 		// model copied `overwrite: true` out of the prompt's EXAMPLE into a call
 		// whose schema has no such parameter, and it parsed cleanly. A closed set
 		// makes a hallucinated argument unrepresentable rather than merely wrong.
-		fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws %spair (ws \",\" ws %spair)* ws \",\"? ws \"}\"\n",
-			id, id, id)
+		// Bounded, not `*`. Measured: with unlimited pairs the model emitted
+		// `path`/`content` over and over to the token cap — `}` was always legal
+		// but so was another pair, and nothing forced the end. An object cannot
+		// hold more pairs than the tool has parameters, so cap it there and the
+		// object must close.
+		fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws %spair (ws \",\" ws %spair){0,%d} ws \",\"? ws \"}\"\n",
+			id, id, id, len(keys)-1)
 		fmt.Fprintf(&rules, "%spair  ::= %skey ws \":\" ws value\n", id, id)
 		fmt.Fprintf(&rules, "%skey   ::= %s\n", id, strings.Join(quoteAll(keys), " | "))
 	}
 	if len(alts) == 0 {
 		alts = []string{"anycall"}
-		rules.WriteString(`anycall ::= "` + CallPrefix + `" [a-zA-Z_] [a-zA-Z0-9_]* "\n" object` + "\n")
+		rules.WriteString(`anycall ::= "` + CallPrefix + `" [a-zA-Z_] [a-zA-Z0-9_]* "\n" object "\n` + HeredocEnd + `"` + "\n")
 		rules.WriteString(`object  ::= "{" ws (pair (ws "," ws pair)*)? ws "}"` + "\n")
 		rules.WriteString(`pair    ::= key ws ":" ws value` + "\n")
 		rules.WriteString(`key     ::= [a-zA-Z_] [a-zA-Z0-9_]*` + "\n")
@@ -222,7 +231,13 @@ func HeredocGrammar(tools []ToolDef) string {
 	b.WriteString(`okey    ::= "\"" [^"]* "\"" | [a-zA-Z_] [a-zA-Z0-9_]*` + "\n")
 	b.WriteString(`array   ::= "[" ws (value (ws "," ws value)*)? ws "]"` + "\n")
 	b.WriteString(`string  ::= "\"" ([^"\\] | "\\" .)* "\""` + "\n")
-	b.WriteString(`body    ::= "` + HeredocOpen + `" tag? "\n" line* "` + HeredocOpen + `" tag? "\n"` + "\n")
+	// The tag is REQUIRED, not optional. Measured: asked to write a body that
+	// itself contains a bare `~~~` line, the model opened with a bare `~~~` and
+	// the body closed on its own content. A mandatory tag means the closer is
+	// `~~~md`, which ordinary content does not contain — the same reason markdown
+	// grows its fences. Failure was safe (a truncation error, never a silently
+	// corrupted call), but it lost the call.
+	b.WriteString(`body    ::= "` + HeredocOpen + `" tag "\n" line* "` + HeredocOpen + `" tag ","? "\n"` + "\n")
 	b.WriteString(`tag     ::= [a-zA-Z0-9_]+` + "\n")
 	b.WriteString(`line    ::= [^\n]* "\n"` + "\n")
 	b.WriteString(`number  ::= "-"? [0-9]+ ("." [0-9]+)?` + "\n")
@@ -266,9 +281,12 @@ func HeredocSystemPrompt(tools []ToolDef) string {
 	b.WriteString("The arguments are ordinary JSON, so numbers, booleans, arrays " +
 		"and nested objects are written as themselves.\n")
 	b.WriteString("For a STRING that is long or contains quotes, newlines or " +
-		"backslashes, use a " + HeredocOpen + " body instead of a quoted string and " +
-		"write the text EXACTLY as it should be, escaping nothing. Close it with " +
-		"the same " + HeredocOpen + "tag on its own line. Backtick fences work too.\n")
+		"backslashes, use a " + HeredocOpen + "tag body instead of a quoted string " +
+		"and write the text EXACTLY as it should be, escaping nothing. Close it " +
+		"with the same " + HeredocOpen + "tag on its own line.\n")
+	b.WriteString("ALWAYS put a tag after " + HeredocOpen + " (its type: md, java, " +
+		"json, sh). A bare " + HeredocOpen + " would be closed by any " + HeredocOpen +
+		" the text itself contains.\n")
 	b.WriteString("Short plain strings stay quoted: `path: \"a.java\"`.\n\n")
 	if len(tools) > 0 {
 		b.WriteString("Tools:\n")

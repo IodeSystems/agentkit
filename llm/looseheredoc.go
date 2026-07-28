@@ -69,8 +69,20 @@ func blockScan(s string, i int) (body string, next int, ok bool, err error) {
 			} else {
 				line = rest[off : off+lineEnd]
 			}
-			if strings.TrimRight(line, " \t\r") == opener {
+			// The closer may carry the JSON comma that separates this pair from
+			// the next: the model writes `~~~json,` because a sibling key
+			// follows. Measured — with a strict closer that line fell through to
+			// `line*` as body content and the block never closed. Point `next` AT
+			// the comma so the ordinary scanner emits it as the separator.
+			trimmed := strings.TrimRight(line, " \t\r")
+			if trimmed == opener {
 				return strings.TrimSuffix(rest[:off], "\n"), i + nl + 1 + off + len(line) + 1, true, nil
+			}
+			if after, ok := strings.CutPrefix(trimmed, opener); ok &&
+				strings.TrimSpace(after) == "," {
+				body := strings.TrimSuffix(rest[:off], "\n")
+				commaAt := i + nl + 1 + off + strings.Index(line, ",")
+				return body, commaAt, true, nil
 			}
 			if lineEnd < 0 {
 				return "", i, true, fmt.Errorf("heredoc %q never closed (generation was cut off; "+

@@ -182,3 +182,64 @@ keysOK:
 		t.Error("body delimiter must not start with '<'")
 	}
 }
+
+// The model writes the closer as `~~~json,` when a sibling key follows, because
+// that is where JSON wants the comma. Observed live; a strict closer let the line
+// fall through to body content and the block never closed.
+func TestCloserMayCarryTheSeparatingComma(t *testing.T) {
+	in := "@@call write_file\n{\n  content: ~~~json\n{\"k\": [1, 2]}\n~~~json,\n  path: \"c.json\"\n}\n"
+	calls, _, err := ParseToolCalls(in)
+	if err != nil {
+		t.Fatalf("closer with a trailing comma should parse: %v", err)
+	}
+	a := mustArgs(t, calls[0])
+	if a["content"] != `{"k": [1, 2]}` {
+		t.Errorf("body = %#v", a["content"])
+	}
+	if a["path"] != "c.json" {
+		t.Errorf("the key after the body was lost: %#v", a["path"])
+	}
+}
+
+// An object cannot hold more pairs than the tool declares, so the grammar caps
+// repetition. Unbounded, the model looped one pair to the token cap.
+func TestGrammarBoundsPairRepetition(t *testing.T) {
+	td := tdef("write_file", `{"type":"object","properties":{"path":{},"content":{}}}`)
+	g := HeredocGrammar([]ToolDef{td})
+	if !strings.Contains(g, "{0,1}") {
+		t.Errorf("two keys should cap extra pairs at 1:\n%s", g)
+	}
+	if strings.Contains(g, `t0pair)* ws`) {
+		t.Errorf("pair repetition must be bounded, not `*`:\n%s", g)
+	}
+}
+
+// A closer followed by the separating comma has several equally reasonable
+// spellings, and the model picks between them freely. All mean the same thing,
+// so all must parse: the comma belongs to the JSON around the body, not to the
+// body, and where it lands is a formatting choice.
+func TestCommaAfterBodySpellings(t *testing.T) {
+	spellings := map[string]string{
+		"comma on the closer line":  "~~~json,\n  path: \"c.json\"",
+		"comma with a space before": "~~~json ,\n  path: \"c.json\"",
+		"comma on the next line":    "~~~json\n,\n  path: \"c.json\"",
+		"comma leading the pair":    "~~~json\n  , path: \"c.json\"",
+		"no comma, body last":       "~~~json",
+	}
+	for name, tailForm := range spellings {
+		t.Run(name, func(t *testing.T) {
+			in := "@@call write_file\n{\n  content: ~~~json\n{\"k\": 1}\n" + tailForm + "\n}\n"
+			calls, _, err := ParseToolCalls(in)
+			if err != nil {
+				t.Fatalf("should parse: %v\ninput:\n%s", err, in)
+			}
+			a := mustArgs(t, calls[0])
+			if a["content"] != `{"k": 1}` {
+				t.Errorf("body = %#v", a["content"])
+			}
+			if name != "no comma, body last" && a["path"] != "c.json" {
+				t.Errorf("key after the body lost: %#v", a["path"])
+			}
+		})
+	}
+}
