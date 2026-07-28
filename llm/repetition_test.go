@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,45 @@ func TestRepetitionTripsOnTheMeasuredLoop(t *testing.T) {
 	if got := info.Reps * info.Period; got > 4096 {
 		t.Errorf("detected only after %d bytes; the point is to cut before the tokens are spent", got)
 	}
+}
+
+// The real thing: 3,953 captured characters of the generation that ran 29.8
+// minutes and produced 176,309 tokens from a 3,912-token prompt (corrallm
+// activity id 107421, 2026-07-28 13:43, Qwen3-6-27B-MPT, finish_reason=length).
+// It is a county surveyor's plat being transcribed by the VLM OCR path; the
+// model transcribes cleanly for fifteen lines, then locks onto one clause.
+//
+// Note WHY this document seeds a loop: the source text legitimately repeats
+// ("EXCLUSIVE OF ... EXCLUSIVE OF ..."), which is ordinary in a legal
+// description. So the fixture also pins the boundary — the guard must fire on
+// the runaway without firing on the document's own repetition.
+func TestRepetitionCutsTheCapturedOCRRunaway(t *testing.T) {
+	b, err := os.ReadFile("testdata/looping_ocr.txt")
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	text := string(b)
+
+	w := newRepWatcher(RepetitionGuard{}, "content")
+	var info *RepetitionInfo
+	var fed int
+	for i := 0; i < len(text) && info == nil; i += 64 {
+		j := min(i+64, len(text))
+		fed = j
+		info = w.feed(text[i:j])
+	}
+	if info == nil {
+		t.Fatal("the guard did not fire on the generation that burned 30 minutes of GPU")
+	}
+	// The whole point is cutting EARLY. This ran to 176,309 tokens; the fixture
+	// is the first ~4 KB, and detection must land well inside it.
+	if fed > 2048 {
+		t.Errorf("detected only after %d chars; too late to matter", fed)
+	}
+	if info.Period < 24 {
+		t.Errorf("period %d is below MinPeriod — the minimal-period reduction is wrong", info.Period)
+	}
+	t.Logf("cut after %d chars: %s", fed, info)
 }
 
 // Legitimate output repeats constantly. These are the shapes that would make
