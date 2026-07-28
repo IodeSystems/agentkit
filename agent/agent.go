@@ -150,6 +150,33 @@ type CompactionInfo struct {
 	TokensAfter   int    // estimated active-window tokens after
 }
 
+// ToolFormat selects how tool calls travel between the model and the loop.
+type ToolFormat string
+
+const (
+	// ToolFormatNative uses the provider's own tool_calls field. Default, and
+	// correct for any provider whose template round-trips arguments faithfully.
+	ToolFormatNative ToolFormat = ""
+
+	// ToolFormatHeredoc carries calls as json-loose-heredoc in ordinary content,
+	// grammar-constrained, parsed client-side.
+	//
+	// Use it where the native format loses data. Measured on Qwen3: a value
+	// containing `</parameter>` comes back truncated at the delimiter, and the
+	// truncation is the MODEL's — visible with the server's parser bypassed — so
+	// no provider or template fix reaches it. The heredoc body has no such
+	// delimiter and carries the value verbatim.
+	//
+	// It also costs less: 42% fewer prompt tokens and 8% fewer generated on a
+	// four-tool set, because the tool list is a signature line rather than a JSON
+	// Schema dump.
+	//
+	// Requires a provider that accepts `grammar`. llama.cpp refuses a grammar
+	// together with `tools`, which is why this format leaves the native path
+	// rather than extending it. Probe with llm.ProbeToolSurface.
+	ToolFormatHeredoc ToolFormat = "heredoc"
+)
+
 // TokenUsage is the session-level token accounting surfaced every Turn.
 type TokenUsage struct {
 	// Total is cumulative prompt+completion tokens billed across every chat

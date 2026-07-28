@@ -151,8 +151,8 @@ func FinderPreparer(store Store, finder DocFinder, opts FinderOpts) Notification
 	}
 
 	var mu sync.Mutex
-	watermark := map[string]int64{}          // sessionID → max observed CreatedAt
-	seen := map[string]map[string]bool{}     // sessionID → set of notified DocIDs
+	watermark := map[string]int64{}      // sessionID → max observed CreatedAt
+	seen := map[string]map[string]bool{} // sessionID → set of notified DocIDs
 
 	return PreparerFunc(func(ctx context.Context, sessionID string) error {
 		entries, err := store.Context(ctx, sessionID)

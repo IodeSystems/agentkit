@@ -87,3 +87,17 @@ func (r *scriptRunner) ChatStream(_ context.Context, msgs []llm.Message, _ []llm
 	close(ch)
 	return ch, nil
 }
+
+// recordingRunner captures what was actually sent on the wire.
+type recordingRunner struct {
+	scriptRunner
+	tools []llm.ToolDef
+	opts  *llm.ChatOpts
+	msgs  []llm.Message
+}
+
+func (r *recordingRunner) ChatStream(ctx context.Context, msgs []llm.Message,
+	tools []llm.ToolDef, opts *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
+	r.tools, r.opts, r.msgs = tools, opts, msgs
+	return r.scriptRunner.ChatStream(ctx, msgs, tools, opts)
+}

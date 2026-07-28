@@ -22,11 +22,11 @@ func toolCall(id, name, args string) *llm.ToolCall {
 //
 // Four things have to hold at once, and each has burned this code before:
 //
-//	1. the tool never runs        — half arguments means a half write
-//	2. the persisted call parses  — an unparseable one poisons the session,
-//	                                 rejected at parse time by every later request
-//	3. a paired tool_result exists — a dropped call leaves an orphan result
-//	4. the loop continues         — so the model can retry, which is the point
+//  1. the tool never runs        — half arguments means a half write
+//  2. the persisted call parses  — an unparseable one poisons the session,
+//     rejected at parse time by every later request
+//  3. a paired tool_result exists — a dropped call leaves an orphan result
+//  4. the loop continues         — so the model can retry, which is the point
 func TestTurn_TruncatedToolCallIsAnsweredNotExecuted(t *testing.T) {
 	store := &memStore{}
 	store.queue(Entry{ID: "u1", Kind: KindUser, Content: "write the file", CreatedAt: 1})

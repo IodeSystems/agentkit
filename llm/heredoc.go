@@ -72,7 +72,10 @@ func HeredocStop() []string { return []string{HeredocEnd} }
 // tolerate a missing terminator: an unterminated block is how TRUNCATED output
 // looks, and the parser must keep refusing that.
 func CloseHeredoc(raw string) string {
-	if strings.Contains(raw, HeredocEnd) {
+	// Only a reply that actually STARTED a call needs a terminator. An ordinary
+	// prose reply has none to close, and appending one turns "done" into
+	// "done\n@@end" — text the model never wrote, surfaced to the user.
+	if !strings.Contains(raw, CallPrefix) || strings.Contains(raw, HeredocEnd) {
 		return raw
 	}
 	return strings.TrimRight(raw, "\n") + "\n" + HeredocEnd + "\n"
@@ -327,4 +330,23 @@ func paramNames(t ToolDef) []string {
 		}
 	}
 	return out
+}
+
+// RenderToolCall writes a stored tool call back in the format the model produces,
+// for replaying history under the heredoc transport.
+//
+// History must be shown in the SAME dialect the model writes, or it reads its own
+// past in a language it never used. Rendering it back as native tool_calls would
+// also re-enter the XML path this format exists to avoid, and would require a
+// `tools` array that heredoc mode deliberately does not send.
+//
+// Values are re-encoded as ordinary JSON rather than as bodies: a raw body is
+// only needed while GENERATING, to dodge escaping the model is bad at. Expanding
+// one here would risk a delimiter collision for no benefit.
+func RenderToolCall(name, arguments string) string {
+	args := strings.TrimSpace(arguments)
+	if args == "" {
+		args = "{}"
+	}
+	return CallPrefix + name + "\n" + args + "\n" + HeredocEnd
 }

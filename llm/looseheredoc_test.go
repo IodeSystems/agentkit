@@ -243,3 +243,17 @@ func TestCommaAfterBodySpellings(t *testing.T) {
 		})
 	}
 }
+
+// A reply with no call must come back untouched. Appending a terminator to
+// ordinary prose put text in front of the user that the model never wrote.
+func TestCloseHeredocLeavesProseAlone(t *testing.T) {
+	for _, s := range []string{"done", "I could not find the file.", ""} {
+		if got := CloseHeredoc(s); got != s {
+			t.Errorf("CloseHeredoc(%q) = %q, want unchanged", s, got)
+		}
+	}
+	started := "@@call w\n{a: 1}"
+	if got := CloseHeredoc(started); !strings.Contains(got, HeredocEnd) {
+		t.Errorf("a started call should be closed: %q", got)
+	}
+}

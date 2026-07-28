@@ -32,6 +32,10 @@ type Session struct {
 	Tools    []llm.ToolDef
 	Dispatch ToolDispatcher
 
+	// ToolFormat selects the tool-call transport. Empty = the provider's native
+	// tool_calls. See ToolFormatHeredoc for when to leave it.
+	ToolFormat ToolFormat
+
 	// ChatOpts forwards LLM-call options on every round-trip. Nil OK. Used
 	// by protocol-bound roles to force tool_choice=required.
 	ChatOpts *llm.ChatOpts
@@ -199,6 +203,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	// out with OmitSlotInstructions when the host manages the prompt itself.
 	// Computed once; constant across the loop's iterations.
 	system := s.System
+	if s.ToolFormat == ToolFormatHeredoc && len(s.Tools) > 0 {
+		// The grammar enforces the SHAPE; this conveys the intent it cannot —
+		// that a body is literal and must never be escaped — plus the tool list,
+		// which no longer travels in a `tools` array.
+		system += "\n\n" + llm.HeredocSystemPrompt(s.Tools)
+	}
 	if len(s.Tools) > 0 && !s.OmitSlotInstructions {
 		if system == "" {
 			system = SlotSystemNote
@@ -445,7 +455,24 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 		opts = *s.ChatOpts
 	}
 	opts.TraceID = s.ThreadID
-	ch, err := s.Runner.ChatStream(ctx, messages, s.Tools, &opts)
+
+	// HEREDOC transport: tool calls travel as ordinary content, parsed after the
+	// stream, instead of through the provider's tool_calls field.
+	//
+	// This is not a stylistic preference. The native format cannot carry a value
+	// containing its own delimiter — asked for a value holding `</parameter>` the
+	// MODEL truncates at it, silently — and llama.cpp refuses a grammar alongside
+	// `tools`, so leaving the native path is the only way to constrain generation
+	// at the sampler. That constraint is what took a payload-shape matrix from
+	// 25/28 to 28/28.
+	tools := s.Tools
+	heredoc := s.ToolFormat == ToolFormatHeredoc && len(tools) > 0
+	if heredoc {
+		tools = nil
+		opts.Grammar = llm.HeredocGrammar(s.Tools)
+		opts.Stop = llm.HeredocStop()
+	}
+	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -478,9 +505,21 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 			break
 		}
 	}
-	return content.String(), toolCalls, usage, nil
+	if !heredoc {
+		return content.String(), toolCalls, usage, nil
+	}
+	// The stop sequence consumes the terminator, so put it back before parsing.
+	// Deliberately explicit: the parser must keep REFUSING an unterminated block,
+	// because that is what truncated generation looks like.
+	raw := llm.CloseHeredoc(content.String())
+	calls, prose, perr := llm.ParseToolCalls(raw)
+	if perr != nil {
+		// A malformed or cut-off call is reported, not silently dropped. The
+		// caller answers it with a tool result so the model can retry.
+		return prose, nil, usage, perr
+	}
+	return prose, calls, usage, nil
 }
-
 
 // entryUsage projects a provider usage report onto the per-entry record.
 // Returns nil when the provider reported nothing, so the field stays absent

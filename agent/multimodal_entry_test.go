@@ -23,7 +23,7 @@ func TestRenderEntry_UserPartsBecomeMultimodal(t *testing.T) {
 			imgPart("data:image/png;base64,iVBORw=="),
 		},
 	}
-	m := renderEntry(e, e.Content, false)
+	m := renderEntry(e, e.Content, false, ToolFormatNative)
 	if len(m.Parts) != 2 {
 		t.Fatalf("Parts not carried through: got %d", len(m.Parts))
 	}
@@ -39,7 +39,7 @@ func TestRenderEntry_UserPartsBecomeMultimodal(t *testing.T) {
 // before — this change is additive or it is a regression for every existing host.
 func TestRenderEntry_NoPartsUnchanged(t *testing.T) {
 	e := Entry{Kind: KindUser, Content: "plain text"}
-	m := renderEntry(e, e.Content, false)
+	m := renderEntry(e, e.Content, false, ToolFormatNative)
 	if len(m.Parts) != 0 {
 		t.Errorf("unexpected Parts on a text entry: %+v", m.Parts)
 	}
@@ -58,7 +58,7 @@ func TestRenderEntry_SubstitutedContentDropsParts(t *testing.T) {
 		Content: "What shape is this?",
 		Parts:   []llm.ContentPart{imgPart("data:image/png;base64,iVBORw==")},
 	}
-	m := renderEntry(e, "[truncated]", false)
+	m := renderEntry(e, "[truncated]", false, ToolFormatNative)
 	if len(m.Parts) != 0 {
 		t.Errorf("parts survived an LOD stub — truncation defeated: %+v", m.Parts)
 	}
@@ -77,7 +77,7 @@ func TestRenderEntry_NonUserIgnoresParts(t *testing.T) {
 		ToolCallID: "call-1",
 		Parts:      []llm.ContentPart{imgPart("data:image/png;base64,iVBORw==")},
 	}
-	m := renderEntry(e, e.Content, false)
+	m := renderEntry(e, e.Content, false, ToolFormatNative)
 	if len(m.Parts) != 0 {
 		t.Errorf("tool result rendered multimodally: %+v", m.Parts)
 	}

@@ -23,7 +23,7 @@ func sortEntries(es []Entry) {
 // content is passed separately so the shaper can substitute an LOD stub. The
 // assistant + tool_call kinds are handled by groupMessages (they must merge
 // into one assistant message with tool_calls) and never reach here.
-func renderEntry(e Entry, content string, verbatimToolResults bool) llm.Message {
+func renderEntry(e Entry, content string, verbatimToolResults bool, format ToolFormat) llm.Message {
 	switch e.Kind {
 	case KindUser:
 		// Multimodal user turn: hand the parts through so the provider gets an
@@ -51,6 +51,13 @@ func renderEntry(e Entry, content string, verbatimToolResults bool) llm.Message 
 		// bytes cannot open a turn. Byte-identical for any content without `<|`.
 		if !verbatimToolResults {
 			content = NeutralizeSpecialTokens(content)
+		}
+		if format == ToolFormatHeredoc {
+			// No assistant tool_calls exist to correlate against, so a tool_call_id
+			// would dangle. The provider renders a bare tool role fine (Qwen wraps
+			// it in <tool_response>), and the model sees the result where it
+			// expects one.
+			return llm.Message{Role: "tool", Content: content}
 		}
 		return llm.Message{Role: "tool", Content: content, ToolCallID: id}
 	case KindCompaction:
@@ -82,7 +89,7 @@ func toToolCall(e Entry) llm.ToolCall {
 // message carrying tool_calls — so the model sees a valid
 // assistant(tool_calls) → tool(tool_call_id) exchange, not orphan tool
 // messages. contentOf yields the (possibly LOD-truncated) content per entry.
-func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, verbatimToolResults bool) []llm.Message {
+func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, verbatimToolResults bool, format ToolFormat) []llm.Message {
 	out := make([]llm.Message, 0, len(entries)+1)
 	if system != "" {
 		out = append(out, llm.Message{Role: "system", Content: system})
@@ -105,10 +112,21 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 				m := llm.Message{Role: "assistant"}
 				pending = &m
 			}
+			if format == ToolFormatHeredoc {
+				// Replay the call as the TEXT the model wrote. Sending it as
+				// native tool_calls would re-render it through the provider's XML
+				// path — the one this format exists to avoid — and would need a
+				// `tools` array heredoc mode does not send.
+				if pending.Content != "" {
+					pending.Content += "\n"
+				}
+				pending.Content += llm.RenderToolCall(e.ToolName, contentOf(i, e))
+				continue
+			}
 			pending.ToolCalls = append(pending.ToolCalls, toToolCall(e))
 		default:
 			flush()
-			out = append(out, renderEntry(e, contentOf(i, e), verbatimToolResults))
+			out = append(out, renderEntry(e, contentOf(i, e), verbatimToolResults, format))
 		}
 	}
 	flush()
@@ -125,5 +143,20 @@ func DefaultContextBuilder(ctx context.Context, store Store, sessionID, system s
 	}
 	sortEntries(entries)
 	// No policy here: default to the SAFE behavior.
-	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }, false), nil
+	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }, false, ToolFormatNative), nil
+}
+
+// DefaultContextBuilderFormat is DefaultContextBuilder for a specific tool
+// transport. History has to be replayed in the dialect the model writes, so a
+// host running the heredoc transport without a Shaper needs this rather than the
+// plain builder.
+func DefaultContextBuilderFormat(ctx context.Context, store Store, sessionID, system string,
+	format ToolFormat) ([]llm.Message, error) {
+	entries, err := store.Context(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sortEntries(entries)
+	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content },
+		false, format), nil
 }

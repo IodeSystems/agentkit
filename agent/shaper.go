@@ -31,6 +31,10 @@ type ShaperPolicy struct {
 	// grades a template's tier-1 (frame-breaking) behavior, and llm.ProbeToolSurface
 	// checks a live endpoint's tool-call round trip.
 	VerbatimToolResults bool
+
+	// ToolFormat must match the Session's, so replayed history is shown in the
+	// same dialect the model writes.
+	ToolFormat            ToolFormat
 	LODTruncateAboveChars int
 	// LODHeadroomTokens is the runway kept below BudgetTokens. The Shaper
 	// restructures (LOD, then compaction) once the estimated context would
@@ -317,7 +321,7 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 			content = lodStub(e, sh.Policy.LODTruncateAboveChars)
 		}
 		return content
-	}, sh.Policy.VerbatimToolResults)
+	}, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
 }
 
 // lodStub replaces content with a short head + a pointer back to the source
