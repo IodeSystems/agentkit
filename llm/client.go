@@ -11,8 +11,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -507,7 +509,43 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("llm: do: %w", err)
+			// Transport path: the gateway is DOWN, not answering. This never
+			// reaches the 429/5xx branches below, because those classify a
+			// status code and there is no response to classify — so before
+			// this branch retried, a restart of the gateway failed every
+			// in-flight and newly-issued call on attempt 1, with the 5m budget
+			// and the 5xx cap both untouched.
+			//
+			// Treated like 429 rather than 5xx: "the server is not here yet"
+			// is wait-your-turn, not broken, so no attempt cap — the wall-clock
+			// RetryBudget and the caller's ctx are the bounds. A default 5m
+			// budget covers an ordinary restart (stop, rebuild, cold-load)
+			// with room to spare; a caller that wants to ride out longer sets
+			// Client.RetryBudget, or a negative value for no ceiling.
+			//
+			// Scope: this covers failures up to and including response
+			// headers. A stream that dies MID-generation is readStream's
+			// problem and is not resumable — the tokens are already emitted,
+			// so a retry would regenerate from scratch rather than continue.
+			if !transportRetryable(ctx, err) {
+				return nil, fmt.Errorf("llm: do: %w", err)
+			}
+			if time.Now().Add(backoff).After(deadline) {
+				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of transport failures (last: %v)",
+					budget, time.Since(start).Round(time.Second), err)
+			}
+			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
+				log.Printf("llm: cannot reach provider (attempt %d): %v; retrying in %s",
+					attempt+1, err, backoff)
+			}
+			if !sleepOrCancel(ctx, backoff) {
+				return nil, ctx.Err()
+			}
+			backoff *= 2
+			if backoff > retryMaxBackoff {
+				backoff = retryMaxBackoff
+			}
+			continue
 		}
 
 		status := resp.StatusCode
@@ -585,6 +623,43 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			backoff = retryMaxBackoff
 		}
 	}
+}
+
+// transportRetryable reports whether an error from http.Client.Do is worth
+// waiting out. True for the ways a restarting or briefly-unreachable gateway
+// fails — connection refused, reset, EOF, timeouts, DNS blips.
+//
+// False for the two classes where waiting is pure delay before the same
+// failure:
+//
+//   - the caller's ctx ended. Retrying past a cancellation is a bug, and the
+//     ctx error arrives here wrapped in *url.Error rather than as a status.
+//   - configuration faults — a bad scheme or a TLS chain the client will never
+//     accept. These are deterministic; no amount of backoff changes them, and
+//     retrying buries the real error under budget-exhaustion noise.
+func transportRetryable(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		hostnameErr      x509.HostnameError
+		certInvalid      x509.CertificateInvalidError
+	)
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostnameErr) || errors.As(err, &certInvalid) {
+		return false
+	}
+	// net/http reports an unusable URL as a plain string on *url.Error; there is
+	// no sentinel to match against.
+	if strings.Contains(err.Error(), "unsupported protocol scheme") {
+		return false
+	}
+	return true
 }
 
 // retryAfterFrom extracts a retry delay from a throttled/failed response.

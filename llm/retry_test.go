@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -523,5 +524,131 @@ func TestRetryBudgetUnbounded(t *testing.T) {
 	c.RetryBudget = -1
 	if got := c.retryBudget(); got < 365*24*time.Hour {
 		t.Errorf("negative should mean unbounded, got %s", got)
+	}
+}
+
+// --- transport failures (the gateway is DOWN, not answering) ---
+//
+// The case these cover is a corrallm restart. It never reaches the 429/5xx
+// branches, because those classify a status code and a refused connection has
+// none — so before this was handled, every call during a restart failed on
+// attempt 1 with the retry budget entirely unspent.
+
+// TestPostWithRetry_RidesOutServerRestart: the listener is closed (connection
+// refused), then a new one comes up on the SAME address. The call must survive
+// the gap and return the eventual 200 without the caller seeing an error.
+func TestPostWithRetry_RidesOutServerRestart(t *testing.T) {
+	fastBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `up`)
+	}))
+	addr := srv.Listener.Addr().String()
+	srv.Close() // down: nothing is listening on addr
+
+	// Bring the same address back after a few failed attempts, the way a
+	// restart does.
+	restarted := make(chan struct{})
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			close(restarted)
+			return
+		}
+		srv2 := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `up`)
+		})}
+		go func() { _ = srv2.Serve(l) }()
+		t.Cleanup(func() { _ = srv2.Close() })
+		close(restarted)
+	}()
+
+	c := NewClient("http://"+addr, "", "m")
+	resp, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), "")
+	<-restarted
+	if err != nil {
+		t.Fatalf("want the call to ride out the restart, got %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if string(b) != "up" {
+		t.Errorf("body = %q, want %q", b, "up")
+	}
+}
+
+// A dead server must not be retried past the budget: an operator has to hear
+// about a real outage rather than watch a caller hang forever.
+func TestPostWithRetry_TransportGivesUpAtBudget(t *testing.T) {
+	fastBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.Listener.Addr().String()
+	srv.Close() // stays down
+
+	c := NewClient("http://"+addr, "", "m")
+	c.RetryBudget = 80 * time.Millisecond
+
+	start := time.Now()
+	_, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), "")
+	if err == nil {
+		t.Fatal("want an error once the budget is spent")
+	}
+	if !strings.Contains(err.Error(), "retry budget") {
+		t.Errorf("err = %v, want it to name the exhausted retry budget", err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("took %s — budget did not bound the retries", el)
+	}
+}
+
+// A cancelled ctx must abort immediately rather than retrying to the budget:
+// the transport error arrives wrapped in *url.Error, not as a bare ctx error,
+// so it has to be unwrapped rather than string-matched.
+func TestPostWithRetry_TransportHonorsCtxCancel(t *testing.T) {
+	fastBackoff(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.Listener.Addr().String()
+	srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	c := NewClient("http://"+addr, "", "m")
+	c.RetryBudget = time.Hour // budget must NOT be what stops this
+
+	start := time.Now()
+	_, err := c.postWithRetry(ctx, "http://"+addr, []byte(`{}`), "")
+	if err == nil {
+		t.Fatal("want an error on cancellation")
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("took %s — cancellation did not short-circuit the retry loop", el)
+	}
+}
+
+// A config fault is deterministic: retrying only buries the real error under
+// budget-exhaustion noise.
+func TestPostWithRetry_DoesNotRetryConfigFaults(t *testing.T) {
+	fastBackoff(t)
+	c := NewClient("gopher://nope", "", "m")
+	c.RetryBudget = time.Hour
+
+	start := time.Now()
+	_, err := c.postWithRetry(context.Background(), "gopher://nope", []byte(`{}`), "")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), "retry budget") {
+		t.Errorf("err = %v, want the underlying fault, not budget exhaustion", err)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("took %s — a config fault was retried", el)
 	}
 }
