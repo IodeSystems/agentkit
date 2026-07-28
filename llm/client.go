@@ -123,6 +123,17 @@ type StreamChunk struct {
 	Done     bool
 	Error    string
 	Usage    *Usage
+
+	// PartialToolCalls carries whatever tool-call arguments had accumulated
+	// when an Error chunk was produced. Providers stream tool arguments
+	// incrementally, so a call cut off mid-argument (a context window filling
+	// mid-write) is already buffered client-side — the caller can salvage the
+	// work instead of making the model regenerate it.
+	//
+	// These are INCOMPLETE and deliberately NOT delivered as ToolCall chunks:
+	// dispatching a truncated call would run it with half its arguments.
+	// Only ever set alongside Error.
+	PartialToolCalls []ToolCall
 }
 
 // Usage carries provider-reported token counts for one chat
@@ -444,6 +455,14 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				sleep = d
 			}
 
+			// A 5xx that reports unparseable tool-call arguments is NOT
+			// transient: the model produced them deterministically from this
+			// exact context, so every retry reproduces the same bytes. Observed
+			// on llama.cpp — five attempts, all failing at the identical column,
+			// 15s of backoff spent on an outcome that could not change.
+			if bodyIsTruncatedToolCall(string(bodyBytes)) {
+				return nil, &TruncatedToolCallError{Status: status, Body: string(bodyBytes)}
+			}
 			if fiveXXAttempts >= retry5xxMaxAttempts {
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
@@ -794,7 +813,10 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			continue
 		}
 		if event.Error.Message != "" {
-			ch <- StreamChunk{Error: event.Error.Message}
+			// Hand back whatever arguments had accumulated. The buffer holds the
+			// partial write at exactly this moment; returning without it drops
+			// work the caller could otherwise resume from.
+			ch <- StreamChunk{Error: event.Error.Message, PartialToolCalls: partialTools(toolBuf, toolOrder)}
 			return
 		}
 		// Usage-only chunk (no choices) — providers using
@@ -876,4 +898,85 @@ func StreamChunkToSSE(chunk StreamChunk) string {
 func jsonString(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// partialTools snapshots the tool-call accumulator for an error chunk. The
+// entries are incomplete by construction — the point is to let a caller see how
+// far a cut-off write got, not to execute them.
+func partialTools(buf map[int]*ToolCall, order []int) []ToolCall {
+	if len(buf) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(buf))
+	for _, idx := range order {
+		if tc := buf[idx]; tc != nil {
+			out = append(out, *tc)
+		}
+	}
+	return out
+}
+
+// TruncatedToolCallError reports a response whose tool-call arguments could not
+// be parsed because generation was CUT OFF — typically the context window
+// filling mid-argument while the model writes a large file.
+//
+// It is separated from ordinary 5xx precisely so a caller does not retry it: at
+// temperature 0 the same context reproduces the same truncation byte for byte.
+// The useful responses are to compact the context and re-issue, or to ask for a
+// smaller edit — not to try again unchanged.
+type TruncatedToolCallError struct {
+	Status int
+	Body   string
+}
+
+func (e *TruncatedToolCallError) Error() string {
+	return fmt.Sprintf("llm: tool-call arguments truncated (status %d) — context likely exhausted mid-write", e.Status)
+}
+
+// bodyIsTruncatedToolCall recognises the provider's complaint that it could not
+// parse tool-call arguments. Deliberately narrow: a generic 5xx stays retryable,
+// since only THIS shape is known to be deterministic.
+func bodyIsTruncatedToolCall(body string) bool {
+	if body == "" {
+		return false
+	}
+	b := strings.ToLower(body)
+	if !strings.Contains(b, "tool call") && !strings.Contains(b, "tool_call") {
+		return false
+	}
+	return strings.Contains(b, "parse") &&
+		(strings.Contains(b, "unexpected end") ||
+			strings.Contains(b, "missing closing quote") ||
+			strings.Contains(b, "parse_error") ||
+			strings.Contains(b, "invalid string"))
+}
+
+// PartialWritePreview extracts the fragment of the cut-off arguments the
+// provider echoed back, so a caller can show the model how far it got.
+//
+// Best-effort and usually INCOMPLETE: llama.cpp reports the JSON parser's
+// "last read" context, which elides the middle of a long value (measured: a
+// 7.4 KB error body for a write that failed at column 19,315). It is a preview
+// to orient the model, not the file. The complete partial, when the transport
+// streamed it, is on llm.StreamChunk.PartialToolCalls.
+func (e *TruncatedToolCallError) PartialWritePreview() string {
+	if e == nil {
+		return ""
+	}
+	const marker = "last read: '"
+	i := strings.Index(e.Body, marker)
+	if i < 0 {
+		return ""
+	}
+	frag := e.Body[i+len(marker):]
+	if j := strings.LastIndex(frag, "'"); j > 0 {
+		frag = frag[:j]
+	}
+	const max = 2000
+	if len(frag) > max {
+		// Keep the TAIL: the model needs to know where to resume, and the head
+		// it can already see in its own history.
+		frag = "…" + frag[len(frag)-max:]
+	}
+	return frag
 }

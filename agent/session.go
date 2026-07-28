@@ -30,6 +30,15 @@ type Session struct {
 	Tools    []llm.ToolDef
 	Dispatch ToolDispatcher
 
+	// Compactor, if set, folds history ON DEMAND. Turn uses it to recover from
+	// a tool call truncated by a full context window: the Shaper's own
+	// budget-driven compaction runs while BUILDING a prompt, which is too late
+	// once the window filled mid-generation. A *Shaper satisfies this.
+	// Nil → truncation is reported rather than recovered from.
+	Compactor interface {
+		Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error)
+	}
+
 	// ChatOpts forwards LLM-call options on every round-trip. Nil OK. Used
 	// by protocol-bound roles to force tool_choice=required.
 	ChatOpts *llm.ChatOpts
@@ -210,6 +219,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	s.slots = map[string]string{}
 
 	var sawForcedToolCall bool
+	var recoveredTruncation bool
 	for i := 0; i < maxTurns; i++ {
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
@@ -241,6 +251,20 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 
 		resp, toolCalls, usage, e := s.streamChat(ctx, messages)
 		if e != nil {
+			// A tool call cut off mid-argument means the window filled while the
+			// model was writing. Retrying unchanged cannot help — at temperature
+			// 0 the same context reproduces the same truncation — so recover
+			// instead: compact, tell the model what happened, and let it try
+			// again with room. Once per Turn; a second occurrence is a real
+			// failure, not a transient one.
+			var truncated *llm.TruncatedToolCallError
+			if errors.As(e, &truncated) && !recoveredTruncation {
+				recoveredTruncation = true
+				if e2 := s.recoverFromTruncation(ctx, truncated); e2 != nil {
+					return result, fmt.Errorf("agent: chat: %w (recovery failed: %v)", e, e2)
+				}
+				continue
+			}
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
 		if usage != nil {
@@ -267,7 +291,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				ID:        uuid.New().String(),
 				Kind:      KindAssistant,
 				Content:   resp,
-				CreatedAt: now(),
+				CreatedAt: time.Now().UnixNano(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist llm reply: %w", e)
 			}
@@ -432,4 +456,49 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 		}
 	}
 	return content.String(), toolCalls, usage, nil
+}
+
+// recoverFromTruncation handles a tool call that was cut off because the
+// context filled mid-argument.
+//
+// Three steps, in this order:
+//
+//  1. COMPACT. Without freeing space the retry hits the identical wall; this is
+//     the only step that changes the outcome.
+//  2. TELL THE MODEL. Left unsaid, it reissues the same oversized write into the
+//     newly-freed window and may simply succeed by luck, learning nothing — and
+//     the next large file fails the same way.
+//  3. HAND BACK WHAT IT WROTE. Providers stream tool arguments incrementally, so
+//     the partial is already buffered client-side (see llm.StreamChunk's
+//     PartialToolCalls). Quoting how far it got lets the model continue rather
+//     than regenerate thousands of tokens it already paid for.
+//
+// The note is a KindNotification: tail-kept and budget-neutral, so it survives
+// the compaction it follows and does not itself consume the space just freed.
+func (s *Session) recoverFromTruncation(ctx context.Context, tr *llm.TruncatedToolCallError) error {
+	if s.Compactor != nil {
+		if _, ok, err := s.Compactor.Compact(ctx, s.SessionID); err != nil {
+			return fmt.Errorf("compact: %w", err)
+		} else if !ok {
+			// Nothing left to fold — the context is irreducible, so a retry
+			// would fail identically. Surface that rather than looping.
+			return fmt.Errorf("context is already minimal; the single write is too large for the window")
+		}
+	}
+	var b strings.Builder
+	b.WriteString("Your previous tool call was CUT OFF: the context window filled while its " +
+		"arguments were still being written, so the call never completed and was discarded. " +
+		"The history has been compacted to free space.\n\n" +
+		"Make the retry SMALLER — write the file in several successive edits rather than one " +
+		"large one — or the same thing will happen again.")
+	if partial := tr.PartialWritePreview(); partial != "" {
+		b.WriteString("\n\nThis is how far the cut-off write got, so you can continue from it " +
+			"instead of starting over:\n" + partial)
+	}
+	return s.Store.Append(ctx, s.SessionID, Entry{
+		ID:        uuid.New().String(),
+		Kind:      KindNotification,
+		Content:   b.String(),
+		CreatedAt: time.Now().UnixNano(),
+	})
 }
