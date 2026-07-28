@@ -16,6 +16,21 @@ type ShaperPolicy struct {
 	BudgetTokens          int
 	PreserveLastMessages  int
 	PreserveLastToolCalls int
+
+	// VerbatimToolResults passes tool-result content to the model byte for byte,
+	// INCLUDING chat-template control tokens. Off by default.
+	//
+	// Set it only when the server's chat template neutralizes those tokens
+	// itself, which is the right place for the fix: it costs nothing there and
+	// covers every client. Left off against a stock template, `<|im_start|>` in a
+	// file — a log, a README, a document about the template — tokenizes to the
+	// real control token and opens a turn inside the prompt. Verified end to end:
+	// the rendered turn sequence gains a SYSTEM message that came from disk.
+	//
+	// Probe a server before turning this on: ml-kit/templates/probe.py render
+	// grades a template's tier-1 (frame-breaking) behavior, and llm.ProbeToolSurface
+	// checks a live endpoint's tool-call round trip.
+	VerbatimToolResults bool
 	LODTruncateAboveChars int
 	// LODHeadroomTokens is the runway kept below BudgetTokens. The Shaper
 	// restructures (LOD, then compaction) once the estimated context would
@@ -302,7 +317,7 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 			content = lodStub(e, sh.Policy.LODTruncateAboveChars)
 		}
 		return content
-	})
+	}, sh.Policy.VerbatimToolResults)
 }
 
 // lodStub replaces content with a short head + a pointer back to the source

@@ -23,7 +23,7 @@ func sortEntries(es []Entry) {
 // content is passed separately so the shaper can substitute an LOD stub. The
 // assistant + tool_call kinds are handled by groupMessages (they must merge
 // into one assistant message with tool_calls) and never reach here.
-func renderEntry(e Entry, content string) llm.Message {
+func renderEntry(e Entry, content string, verbatimToolResults bool) llm.Message {
 	switch e.Kind {
 	case KindUser:
 		// Multimodal user turn: hand the parts through so the provider gets an
@@ -44,6 +44,13 @@ func renderEntry(e Entry, content string) llm.Message {
 		id := e.ToolCallID
 		if id == "" {
 			id = e.ID
+		}
+		// A tool result is not data to the tokenizer, it is prompt. Unless the
+		// server's chat template already neutralizes them (see
+		// ShaperPolicy.VerbatimToolResults), escape control tokens here so file
+		// bytes cannot open a turn. Byte-identical for any content without `<|`.
+		if !verbatimToolResults {
+			content = NeutralizeSpecialTokens(content)
 		}
 		return llm.Message{Role: "tool", Content: content, ToolCallID: id}
 	case KindCompaction:
@@ -75,7 +82,7 @@ func toToolCall(e Entry) llm.ToolCall {
 // message carrying tool_calls — so the model sees a valid
 // assistant(tool_calls) → tool(tool_call_id) exchange, not orphan tool
 // messages. contentOf yields the (possibly LOD-truncated) content per entry.
-func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string) []llm.Message {
+func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, verbatimToolResults bool) []llm.Message {
 	out := make([]llm.Message, 0, len(entries)+1)
 	if system != "" {
 		out = append(out, llm.Message{Role: "system", Content: system})
@@ -101,7 +108,7 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 			pending.ToolCalls = append(pending.ToolCalls, toToolCall(e))
 		default:
 			flush()
-			out = append(out, renderEntry(e, contentOf(i, e)))
+			out = append(out, renderEntry(e, contentOf(i, e), verbatimToolResults))
 		}
 	}
 	flush()
@@ -117,5 +124,6 @@ func DefaultContextBuilder(ctx context.Context, store Store, sessionID, system s
 		return nil, err
 	}
 	sortEntries(entries)
-	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }), nil
+	// No policy here: default to the SAFE behavior.
+	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }, false), nil
 }
