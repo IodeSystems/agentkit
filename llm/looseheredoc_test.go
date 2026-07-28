@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -255,5 +256,47 @@ func TestCloseHeredocLeavesProseAlone(t *testing.T) {
 	started := "@@call w\n{a: 1}"
 	if got := CloseHeredoc(started); !strings.Contains(got, HeredocEnd) {
 		t.Errorf("a started call should be closed: %q", got)
+	}
+}
+
+// The grammar must permit a BATCH: the parser always accepted many calls, and
+// restricting generation to one silently gave up the native format's parallel
+// calls. Independent work then costs one round trip per call.
+func TestGrammarAllowsBoundedBatch(t *testing.T) {
+	g := HeredocGrammar([]ToolDef{tdef("read_file", `{"type":"object","properties":{"path":{}}}`)})
+	if !strings.Contains(g, "anycall1 anycall2?") {
+		t.Errorf("root should allow more than one call:\n%s", g)
+	}
+	// Bounded, not `+`: unbounded repetition is what made the model re-emit the
+	// same call to the token cap.
+	if strings.Contains(g, "anycall+") || strings.Contains(g, "anycall*") {
+		t.Errorf("batch must be bounded, not unbounded:\n%s", g)
+	}
+	if strings.Contains(g, fmt.Sprintf("anycall%d", MaxBatchedCalls+1)) {
+		t.Errorf("batch exceeded MaxBatchedCalls:\n%s", g)
+	}
+}
+
+// Parsing a batch yields separate calls with their own arguments.
+func TestParsesABatch(t *testing.T) {
+	in := "@@call read_file\n{path: \"a.txt\"}\n@@end\n" +
+		"@@call read_file\n{path: \"b.txt\"}\n@@end\n" +
+		"@@call list_dir\n{path: \".\", recursive: true}\n@@end\n"
+	calls, _, err := ParseToolCalls(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("want 3 calls, got %d", len(calls))
+	}
+	if calls[2].Function.Name != "list_dir" {
+		t.Errorf("third call = %q", calls[2].Function.Name)
+	}
+	var a map[string]any
+	if err := json.Unmarshal([]byte(calls[1].Function.Arguments), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a["path"] != "b.txt" {
+		t.Errorf("second call args = %#v", a)
 	}
 }

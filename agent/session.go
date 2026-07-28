@@ -470,7 +470,11 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	if heredoc {
 		tools = nil
 		opts.Grammar = llm.HeredocGrammar(s.Tools)
-		opts.Stop = llm.HeredocStop()
+		// No stop sequence. It used to end generation at the first "@@end", which
+		// silently capped every reply at ONE call once the grammar learned to
+		// batch. It was added when an unbounded grammar let the model re-emit a
+		// call forever; that cause was the unbounded pair list, since bounded, and
+		// the grammar now terminates on its own.
 	}
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {

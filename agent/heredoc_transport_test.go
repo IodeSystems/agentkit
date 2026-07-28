@@ -86,8 +86,11 @@ func TestHeredocTransport_SendsGrammarNotTools(t *testing.T) {
 	if runner.opts == nil || runner.opts.Grammar == "" {
 		t.Fatal("grammar not sent")
 	}
-	if len(runner.opts.Stop) == 0 {
-		t.Error("stop sequence not sent; a completed grammar does not force EOS")
+	// No stop sequence: it ended generation at the first "@@end", capping every
+	// reply at ONE call once the grammar learned to batch. The bounded grammar
+	// terminates on its own (verified live: "@@end" then EOS, no loop).
+	if len(runner.opts.Stop) != 0 {
+		t.Errorf("a stop sequence would cap the batch at one call: %v", runner.opts.Stop)
 	}
 	sys := runner.msgs[0].Content
 	if !strings.Contains(sys, "write_file") || !strings.Contains(sys, llm.HeredocOpen) {

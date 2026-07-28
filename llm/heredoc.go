@@ -56,6 +56,19 @@ const HeredocSentinel = "~~~AGENTKIT_EOF_7F3A"
 // HeredocOpen introduces a raw body: `key: <ext>` + this + newline.
 const HeredocOpen = "~~~"
 
+// MaxBatchedCalls caps how many tool calls one response may carry.
+//
+// More than one is the point: the native format can emit parallel calls and the
+// heredoc parser always could, so restricting the grammar to one silently gave
+// that up. Independent work — read three files, list two directories — costs one
+// round trip instead of three.
+//
+// Capped rather than unbounded because unbounded repetition is precisely what
+// made the model loop: once a call completes the grammar accepts, but another
+// call is equally legal, and nothing forces EOS. Four covers the realistic
+// fan-out; a fifth is another turn.
+const MaxBatchedCalls = 4
+
 // HeredocEnd terminates a call block, and doubles as the stop sequence.
 //
 // A grammar does not force EOS when it completes: measured with `root ::= call`,
@@ -195,7 +208,12 @@ func HeredocGrammar(tools []ToolDef) string {
 		// Measured: without it, an object whose pair-list allows repetition let
 		// the model emit `path`/`content` over and over to the token cap. `}`
 		// was always legal, but so was another pair, and nothing forced the end.
-		fmt.Fprintf(&rules, "%scall  ::= \"%s%s\\n\" %sobj \"\\n%s\"\n",
+		// The trailing newline after the terminator is load-bearing for BATCHING.
+		// Without it the grammar permits "@@end@@call" but forbids "@@end\n@@call",
+		// and the model — which wants the newline — takes the EOS path instead.
+		// Measured: identical prompt, one call with "\n@@end", three with
+		// "\n@@end\n". A missing character class cost a whole capability.
+		fmt.Fprintf(&rules, "%scall  ::= \"%s%s\\n\" %sobj \"\\n%s\\n\"\n",
 			id, CallPrefix, t.Function.Name, id, HeredocEnd)
 		if len(keys) == 0 {
 			fmt.Fprintf(&rules, "%sobj   ::= \"{\" ws \"}\"\n", id)
@@ -223,7 +241,27 @@ func HeredocGrammar(tools []ToolDef) string {
 		rules.WriteString(`key     ::= [a-zA-Z_] [a-zA-Z0-9_]*` + "\n")
 	}
 
-	b.WriteString("root    ::= " + strings.Join(alts, " | ") + "\n")
+	// BATCHED: up to MaxBatchedCalls calls in one response, not one.
+	//
+	// The parser has always accepted many; the grammar allowed one, which quietly
+	// threw away the native format's parallel-call ability. An agent that reads
+	// three files pays three full round trips for it — three prompt evaluations
+	// of the whole conversation, three latencies — to express something the model
+	// could have said once.
+	//
+	// BOUNDED, not `+`. Unbounded repetition is what made the model re-emit the
+	// same call to the token cap: after a valid call the grammar is in an
+	// accepting state, but another call is equally legal and nothing pushes it
+	// toward EOS. A ceiling makes the batch finite while leaving the common
+	// single-call case untouched.
+	b.WriteString("root    ::= anycall1")
+	for i := 2; i <= MaxBatchedCalls; i++ {
+		fmt.Fprintf(&b, " anycall%d?", i)
+	}
+	b.WriteString("\n")
+	for i := 1; i <= MaxBatchedCalls; i++ {
+		fmt.Fprintf(&b, "anycall%d ::= %s\n", i, strings.Join(alts, " | "))
+	}
 	b.WriteString(rules.String())
 	// A raw body is a STRING alternative, not a replacement for JSON: numbers,
 	// booleans, arrays and nested objects stay themselves, so a tool whose schema
@@ -265,24 +303,31 @@ func paramKeys(t ToolDef) []string {
 
 func HeredocSystemPrompt(tools []ToolDef) string {
 	var b strings.Builder
-	// Short on purpose. The grammar already forbids unknown tool names and any
-	// other delimiter, so restating those spends tokens on rules the sampler
-	// enforces anyway. What a grammar CANNOT express is the intent: that a body
-	// is literal and must never be escaped. That is what this says.
-	b.WriteString("Call a tool by emitting this and nothing else:\n\n")
+	// ORDER AND PLURALITY ARE LOAD-BEARING. An earlier version opened with
+	// "Call a tool by emitting this" and put the batch example below the escaping
+	// rules. Same grammar, same request: that prompt produced ONE call where this
+	// one produces three, and the native tools path produced three. Singular
+	// framing plus a buried example cost the model a capability it has.
+	b.WriteString("Call tools by emitting call blocks and nothing else:\n\n")
+	b.WriteString(CallPrefix + "read_file\n{ path: \"src/Hello.java\" }\n" + HeredocEnd + "\n\n")
+	// The batch example goes HERE, second, before any prose. Twice in this format
+	// the example beat the instruction; this is the example doing the work.
+	fmt.Fprintf(&b, "Up to %d calls in one reply, back to back, when the work is "+
+		"INDEPENDENT:\n\n", MaxBatchedCalls)
+	b.WriteString(CallPrefix + "read_file\n{ path: \"a.txt\" }\n" + HeredocEnd + "\n" +
+		CallPrefix + "read_file\n{ path: \"b.txt\" }\n" + HeredocEnd + "\n\n")
+	b.WriteString("Emit ONE and wait when a later step depends on an earlier result.\n\n")
+	b.WriteString("Arguments are ordinary JSON, so numbers, booleans, arrays and " +
+		"nested objects are written as themselves:\n\n")
 	b.WriteString(CallPrefix + "write_file\n" +
 		"{\n" +
 		"  path: \"src/Hello.java\",\n" +
-		"  overwrite: true,\n" +
 		"  content: " + HeredocOpen + "java\n" +
 		"public class Hello {\n" +
 		"    System.out.println(\"hi\");\n" +
 		"}\n" +
 		HeredocOpen + "java\n" +
-		"}\n" +
-		HeredocEnd + "\n\n")
-	b.WriteString("The arguments are ordinary JSON, so numbers, booleans, arrays " +
-		"and nested objects are written as themselves.\n")
+		"}\n" + HeredocEnd + "\n\n")
 	b.WriteString("For a STRING that is long or contains quotes, newlines or " +
 		"backslashes, use a " + HeredocOpen + "tag body instead of a quoted string " +
 		"and write the text EXACTLY as it should be, escaping nothing. Close it " +
@@ -290,7 +335,7 @@ func HeredocSystemPrompt(tools []ToolDef) string {
 	b.WriteString("ALWAYS put a tag after " + HeredocOpen + " (its type: md, java, " +
 		"json, sh). A bare " + HeredocOpen + " would be closed by any " + HeredocOpen +
 		" the text itself contains.\n")
-	b.WriteString("Short plain strings stay quoted: `path: \"a.java\"`.\n\n")
+	b.WriteString("Short plain strings stay quoted: path: \"a.java\".\n\n")
 	if len(tools) > 0 {
 		b.WriteString("Tools:\n")
 		for _, t := range tools {
