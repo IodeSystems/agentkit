@@ -238,3 +238,33 @@ func TestChatStreamCutsALoopInToolArguments(t *testing.T) {
 		t.Errorf("emitted %d tool call(s) from a looping argument buffer; want 0", calls)
 	}
 }
+
+// A cut is not a cure: it stops the burn but leaves the CAUSE, and at
+// temperature 0 the cause is deterministic. The sampling knobs are the only
+// thing that gives a retry a different outcome, so they must reach the wire.
+func TestSamplingCarriesRepetitionControls(t *testing.T) {
+	f, p, r := 0.5, 0.2, 1.1
+	body := map[string]any{}
+	applySampling(body, &ChatOpts{FrequencyPenalty: &f, PresencePenalty: &p, RepeatPenalty: &r})
+	for k, want := range map[string]float64{
+		"frequency_penalty": 0.5, "presence_penalty": 0.2, "repeat_penalty": 1.1,
+	} {
+		got, ok := body[k]
+		if !ok {
+			t.Errorf("%s never reached the request body", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", k, got, want)
+		}
+	}
+	// Unset must stay absent — sending a 0 would silently DISABLE a penalty the
+	// server was configured with.
+	empty := map[string]any{}
+	applySampling(empty, &ChatOpts{})
+	for _, k := range []string{"frequency_penalty", "presence_penalty", "repeat_penalty"} {
+		if _, ok := empty[k]; ok {
+			t.Errorf("%s was sent despite being unset", k)
+		}
+	}
+}

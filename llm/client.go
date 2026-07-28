@@ -797,6 +797,24 @@ type ChatOpts struct {
 	// request can run to the context limit instead of finishing — observed as a
 	// hang, not an error.
 	MaxTokens int
+
+	// Repetition controls. Pointers for the same reason as Temperature: 0 is a
+	// meaningful value (it is "off"), and a plain float64 could not distinguish
+	// "the caller wants it off" from "the caller had no opinion".
+	//
+	// These exist because a CUT is not a cure. RepetitionGuard stops a runaway
+	// after the fact; it does nothing about the cause, and at temperature 0 the
+	// cause is deterministic — measured on one survey page, the same generation
+	// was cut three times in 34 seconds with byte-identical output, because a
+	// greedy decoder in a repeating basin has no way out. Only sampling does.
+	//
+	// FrequencyPenalty and PresencePenalty are the OpenAI-standard pair
+	// (penalize by count seen, and by seen-at-all). RepeatPenalty is
+	// llama.cpp's own multiplicative penalty over a trailing window, ignored by
+	// providers that do not implement it — 1.0 is off, ~1.1 is a light touch.
+	FrequencyPenalty *float64
+	PresencePenalty  *float64
+	RepeatPenalty    *float64
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.
@@ -815,6 +833,15 @@ func applySampling(body map[string]any, opts *ChatOpts) {
 	}
 	if len(opts.Stop) > 0 {
 		body["stop"] = opts.Stop
+	}
+	if opts.FrequencyPenalty != nil {
+		body["frequency_penalty"] = *opts.FrequencyPenalty
+	}
+	if opts.PresencePenalty != nil {
+		body["presence_penalty"] = *opts.PresencePenalty
+	}
+	if opts.RepeatPenalty != nil {
+		body["repeat_penalty"] = *opts.RepeatPenalty
 	}
 }
 
