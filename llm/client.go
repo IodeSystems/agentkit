@@ -315,10 +315,32 @@ type Client struct {
 	// Nothing can spin forever on an outcome that cannot change.
 	RetryBudget time.Duration
 
+	// Retry5xxAttempts caps how many times a 5xx is retried. 0 → default (5).
+	//
+	// The default is tuned for a chat turn, where five failures means the
+	// upstream is genuinely broken and an operator should hear about it. It is
+	// wrong for a long BATCH: transcribing a 33-page document is ~33 requests,
+	// and a single upstream blip outlasting ~15s of backoff fails the whole
+	// document. Measured on a real corpus, every document over 20 pages failed
+	// this way and no document over 20 pages ever completed.
+	//
+	// Raising it is safe because RetryBudget still bounds the wall clock — the
+	// attempt cap and the budget are two different guards, and for batch work the
+	// budget is the one that should bind.
+	Retry5xxAttempts int
+
 	// Repetition configures degenerate-loop detection on streamed output. The
 	// zero value is ON with defaults; set Repetition.Off to disable. See
 	// RepetitionGuard for why this is not opt-in.
 	Repetition RepetitionGuard
+}
+
+// retry5xxAttempts is the effective 5xx attempt cap.
+func (c *Client) retry5xxAttempts() int {
+	if c.Retry5xxAttempts > 0 {
+		return c.Retry5xxAttempts
+	}
+	return retry5xxMaxAttempts
 }
 
 func NewClient(baseURL, apiKey, model string) *Client {
@@ -617,7 +639,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if bodyIsTruncatedToolCall(string(bodyBytes)) {
 				return nil, &TruncatedToolCallError{Status: status, Body: string(bodyBytes)}
 			}
-			if fiveXXAttempts >= retry5xxMaxAttempts {
+			if fiveXXAttempts >= c.retry5xxAttempts() {
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
 			if time.Now().Add(sleep).After(deadline) {
@@ -625,7 +647,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					budget, time.Since(start).Round(time.Second), status)
 			}
 			log.Printf("llm: upstream returned %d (5xx attempt %d/%d); retrying in %s",
-				status, fiveXXAttempts, retry5xxMaxAttempts, sleep)
+				status, fiveXXAttempts, c.retry5xxAttempts(), sleep)
 			if !sleepOrCancel(ctx, sleep) {
 				return nil, ctx.Err()
 			}

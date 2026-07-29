@@ -652,3 +652,56 @@ func TestPostWithRetry_DoesNotRetryConfigFaults(t *testing.T) {
 		t.Errorf("took %s — a config fault was retried", el)
 	}
 }
+
+// A long batch is not a chat turn. Transcribing a 33-page document is ~33
+// requests, and a single upstream blip outlasting the default ~15s of backoff
+// failed the whole document — measured on a real corpus, where nothing over 20
+// pages ever completed. The cap has to be raisable per client.
+func TestRetry5xxAttemptsIsConfigurablePerClient(t *testing.T) {
+	saveInitial, saveMax := retryInitialBackoff, retryMaxBackoff
+	retryInitialBackoff, retryMaxBackoff = time.Millisecond, 2*time.Millisecond
+	defer func() { retryInitialBackoff, retryMaxBackoff = saveInitial, saveMax }()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if hits < 8 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "k", "m")
+	c.Retry5xxAttempts = 10
+	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("a raised cap should ride out 7 failures: %v", err)
+	}
+	if hits != 8 {
+		t.Errorf("want 8 attempts, got %d", hits)
+	}
+}
+
+// The default is unchanged for everyone who does not opt in.
+func TestRetry5xxAttemptsDefaultsToFive(t *testing.T) {
+	saveInitial, saveMax := retryInitialBackoff, retryMaxBackoff
+	retryInitialBackoff, retryMaxBackoff = time.Millisecond, 2*time.Millisecond
+	defer func() { retryInitialBackoff, retryMaxBackoff = saveInitial, saveMax }()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "k", "m")
+	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err == nil {
+		t.Fatal("a permanently failing upstream must still stop")
+	}
+	if hits != retry5xxMaxAttempts {
+		t.Errorf("want the default %d attempts, got %d", retry5xxMaxAttempts, hits)
+	}
+}
