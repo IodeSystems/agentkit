@@ -639,6 +639,17 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if bodyIsTruncatedToolCall(string(bodyBytes)) {
 				return nil, &TruncatedToolCallError{Status: status, Body: string(bodyBytes)}
 			}
+			// A 5xx that says the INPUT was too large is not transient either: the
+			// request is the same bytes every time, so every retry reproduces it.
+			// Observed as llama.cpp's "input (35871 tokens) is too large to
+			// process. increase the physical batch size (current batch size:
+			// 8192)" — five attempts and ~15s of backoff spent on an outcome that
+			// could not change, and reported as an upstream fault when the caller
+			// had simply sent too much at once.
+			if bodyIsInputTooLarge(string(bodyBytes)) {
+				return nil, fmt.Errorf("llm: input too large for this endpoint (status %d, not retried): %s",
+					status, strings.TrimSpace(firstLineOfBody(string(bodyBytes))))
+			}
 			if fiveXXAttempts >= c.retry5xxAttempts() {
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
@@ -1324,6 +1335,32 @@ type TruncatedToolCallError struct {
 
 func (e *TruncatedToolCallError) Error() string {
 	return fmt.Sprintf("llm: tool-call arguments truncated (status %d) — context likely exhausted mid-write", e.Status)
+}
+
+// bodyIsInputTooLarge recognises the endpoint complaining that the REQUEST did
+// not fit — a batch or context overflow. Deterministic: the same bytes fail the
+// same way, so retrying is pure delay before an identical failure. The fix is in
+// the caller (send less), which it cannot learn while this looks transient.
+func bodyIsInputTooLarge(body string) bool {
+	b := strings.ToLower(body)
+	if b == "" {
+		return false
+	}
+	return strings.Contains(b, "too large to process") ||
+		strings.Contains(b, "physical batch size") ||
+		strings.Contains(b, "exceeds the available context") ||
+		strings.Contains(b, "exceed_context_size")
+}
+
+// firstLineOfBody trims a provider error body to something loggable.
+func firstLineOfBody(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }
 
 // bodyIsTruncatedToolCall recognises the provider's complaint that it could not

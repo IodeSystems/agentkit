@@ -705,3 +705,30 @@ func TestRetry5xxAttemptsDefaultsToFive(t *testing.T) {
 		t.Errorf("want the default %d attempts, got %d", retry5xxMaxAttempts, hits)
 	}
 }
+
+// A 5xx that says the input did not fit is deterministic: the same bytes fail
+// the same way. Retrying it spent ~15s per occurrence and reported a caller bug
+// (batching by item count against a server that bounds the whole request) as an
+// upstream fault.
+func TestInputTooLargeIsNotRetried(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"input (35871 tokens) is too large to process. increase the physical batch size (current batch size: 8192)"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "k", "m")
+	c.Retry5xxAttempts = 9
+	_, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	if err == nil {
+		t.Fatal("an over-large input must still be an error")
+	}
+	if n := atomic.LoadInt64(&hits); n != 1 {
+		t.Errorf("made %d attempts; an unfittable request must not be retried", n)
+	}
+	if !strings.Contains(err.Error(), "input too large") {
+		t.Errorf("the error should name the cause, got: %v", err)
+	}
+}
