@@ -651,6 +651,16 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					status, strings.TrimSpace(firstLineOfBody(string(bodyBytes))))
 			}
 			if fiveXXAttempts >= c.retry5xxAttempts() {
+				// Carry the SERVER'S OWN MESSAGE. Reporting only the status code
+				// discards the one thing that says what to do about it: a corpus
+				// spent hours on "llm: status 500 (after 4 retries)" repeated in
+				// every failed job, while the endpoint had been saying "input
+				// (35871 tokens) is too large to process. increase the physical
+				// batch size (current batch size: 8192)" the whole time. The body
+				// is already read for retry-after and is capped at 8 KiB.
+				if body := strings.TrimSpace(firstLineOfBody(string(bodyBytes))); body != "" {
+					return nil, fmt.Errorf("llm: status %d (after %d retries): %s", status, fiveXXAttempts-1, body)
+				}
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
 			if time.Now().Add(sleep).After(deadline) {

@@ -732,3 +732,26 @@ func TestInputTooLargeIsNotRetried(t *testing.T) {
 		t.Errorf("the error should name the cause, got: %v", err)
 	}
 }
+
+// Giving up on a 5xx must carry the server's own message. Reporting only the
+// status code throws away the one thing that says what to do about it.
+func TestFiveXXGiveUpIncludesTheServerMessage(t *testing.T) {
+	saveInitial, saveMax := retryInitialBackoff, retryMaxBackoff
+	retryInitialBackoff, retryMaxBackoff = time.Millisecond, 2*time.Millisecond
+	defer func() { retryInitialBackoff, retryMaxBackoff = saveInitial, saveMax }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"backend worker crashed: cuda oom on device 0"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "k", "m")
+	_, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "cuda oom") {
+		t.Errorf("the server's message was discarded: %v", err)
+	}
+}
