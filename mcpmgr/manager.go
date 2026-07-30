@@ -81,6 +81,9 @@ type MCPServer struct {
 	// branches in StartServer / StartThreadServer) os.RemoveAll's it so
 	// app-password files don't leak across restarts.
 	secretDir string
+	// stderr is the bounded tail of what the process wrote to stderr — the
+	// only place a server that refuses to run explains why. See stderr.go.
+	stderr *stderrTail
 }
 
 // Manager manages MCP server connections, both project-scoped
@@ -297,8 +300,14 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
 		}
-		return nil, fmt.Errorf("mcp: start %s: %w", cfg.Name, err)
+		tail := watchStderr(tp.Stderr())
+		tail.settle()
+		return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
 	}
+
+	// Drain stderr for the life of the process: it is where a server explains
+	// itself when it refuses to start, and nobody else reads the pipe.
+	tail := watchStderr(tp.Stderr())
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -314,7 +323,8 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
 		}
-		return nil, fmt.Errorf("mcp: initialize %s: %w", cfg.Name, err)
+		tail.settle()
+		return nil, fmt.Errorf("mcp: initialize %s: %w%s", cfg.Name, err, tail.suffix())
 	}
 
 	srv := &MCPServer{
@@ -322,6 +332,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		Client:    mc,
 		ready:     make(chan struct{}),
 		secretDir: secretDir,
+		stderr:    tail,
 	}
 
 	go func() {
@@ -330,7 +341,8 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 
 		result, err := mc.ListTools(toolsCtx, mcp.ListToolsRequest{})
 		if err != nil {
-			srv.readyErr = fmt.Errorf("mcp: list tools %s: %w", cfg.Name, err)
+			tail.settle()
+			srv.readyErr = fmt.Errorf("mcp: list tools %s: %w%s", cfg.Name, err, tail.suffix())
 			close(srv.ready)
 			return
 		}
@@ -443,6 +455,42 @@ func (m *Manager) StopServer(id string) {
 
 	srv.close()
 	log.Printf("mcp: stopped %s", srv.Config.Name)
+}
+
+// ServerReadyErr reports why a project-scoped server discovered no tools, once
+// discovery has finished. Returns nil while still discovering, when discovery
+// succeeded, or when no such server is running — a caller that wants to
+// distinguish those cases should pair it with ServerStarted.
+//
+// This exists because tool discovery is async: StartServer returning nil only
+// means the handshake worked, and a server that then fails ListTools otherwise
+// shows up as a silent absence of tools.
+func (m *Manager) ServerReadyErr(id string) error {
+	m.mu.RLock()
+	srv, ok := m.servers[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	select {
+	case <-srv.ready:
+		return srv.readyErr
+	default:
+		return nil
+	}
+}
+
+// ServerStderr returns the tail of what a running server wrote to stderr, or ""
+// when it has said nothing (or is not running). Useful for reporting a server
+// that started but is misbehaving, where no error was ever returned.
+func (m *Manager) ServerStderr(id string) string {
+	m.mu.RLock()
+	srv, ok := m.servers[id]
+	m.mu.RUnlock()
+	if !ok || srv.stderr == nil {
+		return ""
+	}
+	return strings.TrimPrefix(srv.stderr.suffix(), " — server stderr:\n")
 }
 
 // GetTools returns all tools from all connected MCP servers.
