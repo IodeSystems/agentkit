@@ -333,6 +333,15 @@ type Client struct {
 	// zero value is ON with defaults; set Repetition.Off to disable. See
 	// RepetitionGuard for why this is not opt-in.
 	Repetition RepetitionGuard
+
+	// OnRetry, when set, is called once per retry decision (and once when the
+	// loop recovers or gives up), so a caller can SHOW the wait instead of
+	// sitting mute through it. See RetryEvent.
+	//
+	// Called from the goroutine issuing the request, synchronously, while the
+	// caller is blocked in Chat/ChatStream/Embed — so it must not block for long
+	// and must not re-enter the client.
+	OnRetry func(RetryEvent)
 }
 
 // retry5xxAttempts is the effective 5xx attempt cap.
@@ -350,6 +359,19 @@ func NewClient(baseURL, apiKey, model string) *Client {
 		model:   model,
 		http:    &http.Client{},
 	}
+}
+
+// RetryPolicy reports the backoff schedule this client actually uses: the first
+// delay, the ceiling it climbs to, and the wall-clock budget for one call.
+//
+// It exists for a caller that must add an OUTER retry — the client's loop covers
+// everything up to the response headers, but a stream that dies MID-generation
+// is not resumable here, so only the caller can decide to run the turn again.
+// Such a caller should not invent a second schedule out of thin air: the numbers
+// (and any operator override of RetryBudget) are policy, and one policy is
+// better than two that disagree.
+func (c *Client) RetryPolicy() (initial, max, budget time.Duration) {
+	return retryInitialBackoff, retryMaxBackoff, c.retryBudget()
 }
 
 // retryBudget returns the effective retry budget: the field, the default, or
@@ -565,12 +587,21 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			// problem and is not resumable — the tokens are already emitted,
 			// so a retry would regenerate from scratch rather than continue.
 			if !transportRetryable(ctx, err) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Err: err,
+					Elapsed: time.Since(start), Budget: budget,
+					Reason: fmt.Sprintf("cannot reach the provider and retrying will not help: %v", err)})
 				return nil, fmt.Errorf("llm: do: %w", err)
 			}
 			if time.Now().Add(backoff).After(deadline) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Err: err,
+					Elapsed: time.Since(start), Budget: budget,
+					Reason: fmt.Sprintf("gave up after %s of unreachable provider (retry budget %s): %v",
+						time.Since(start).Round(time.Second), budget, err)})
 				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of transport failures (last: %v)",
 					budget, time.Since(start).Round(time.Second), err)
 			}
+			c.emitRetry(RetryEvent{Kind: RetryTransport, Attempt: attempt + 1, Err: err,
+				Delay: backoff, Elapsed: time.Since(start), Budget: budget})
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
 				log.Printf("llm: cannot reach provider (attempt %d): %v; retrying in %s",
 					attempt+1, err, backoff)
@@ -600,17 +631,34 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			if d, ok := retryAfterFrom(resp.Header, bodyBytes); ok {
-				sleep = d
+			// The queue detail (slots busy, requests ahead, why) comes back with the
+			// same parse that yields the delay, so reporting it costs nothing — and
+			// it is the difference between "429" and "4/4 busy, 2 ahead of you".
+			bp, asked := backpressureFrom(resp.Header, bodyBytes)
+			if asked {
+				sleep = bp.RetryAfter
 			}
 
 			if time.Now().Add(sleep).After(deadline) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+					Elapsed: time.Since(start), Budget: budget, BP: &bp,
+					Reason: fmt.Sprintf("gave up after %s of 429 backpressure (retry budget %s)",
+						time.Since(start).Round(time.Second), budget)})
 				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of 429 backpressure",
 					budget, time.Since(start).Round(time.Second))
 			}
+			c.emitRetry(RetryEvent{Kind: Retry429, Attempt: attempt + 1, Status: status,
+				Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
+				Delay: sleep, Elapsed: time.Since(start), Budget: budget,
+				BP: &bp, ServerAsked: asked})
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
-				log.Printf("llm: provider returned 429 (attempt %d); retrying in %s",
-					attempt+1, sleep)
+				if q := bp.String(); q != "" {
+					log.Printf("llm: provider returned 429 — %s (attempt %d); retrying in %s",
+						q, attempt+1, sleep)
+				} else {
+					log.Printf("llm: provider returned 429 (attempt %d); retrying in %s",
+						attempt+1, sleep)
+				}
 			}
 			if !sleepOrCancel(ctx, sleep) {
 				return nil, ctx.Err()
@@ -627,7 +675,8 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			if d, ok := retryAfterFrom(resp.Header, bodyBytes); ok {
+			d, serverAsked := retryAfterFrom(resp.Header, bodyBytes)
+			if serverAsked {
 				sleep = d
 			}
 
@@ -637,6 +686,9 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			// on llama.cpp — five attempts, all failing at the identical column,
 			// 15s of backoff spent on an outcome that could not change.
 			if bodyIsTruncatedToolCall(string(bodyBytes)) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
+					Reason: "not retried: the provider rejected a tool call the model produced, so every retry reproduces it"})
 				return nil, &TruncatedToolCallError{Status: status, Body: string(bodyBytes)}
 			}
 			// A 5xx that says the INPUT was too large is not transient either: the
@@ -647,10 +699,17 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			// could not change, and reported as an upstream fault when the caller
 			// had simply sent too much at once.
 			if bodyIsInputTooLarge(string(bodyBytes)) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
+					Reason: "not retried: the request is too large for this endpoint, so every retry fails identically"})
 				return nil, fmt.Errorf("llm: input too large for this endpoint (status %d, not retried): %s",
 					status, strings.TrimSpace(firstLineOfBody(string(bodyBytes))))
 			}
 			if fiveXXAttempts >= c.retry5xxAttempts() {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
+					Attempts5xx: fiveXXAttempts, Max5xx: c.retry5xxAttempts(),
+					Reason: fmt.Sprintf("gave up after %d attempts against status %d", fiveXXAttempts, status)})
 				// Carry the SERVER'S OWN MESSAGE. Reporting only the status code
 				// discards the one thing that says what to do about it: a corpus
 				// spent hours on "llm: status 500 (after 4 retries)" repeated in
@@ -664,16 +723,32 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
 			if time.Now().Add(sleep).After(deadline) {
+				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
+					Attempts5xx: fiveXXAttempts, Max5xx: c.retry5xxAttempts(),
+					Reason: fmt.Sprintf("gave up after %s against status %d (retry budget %s)",
+						time.Since(start).Round(time.Second), status, budget)})
 				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s (last status %d)",
 					budget, time.Since(start).Round(time.Second), status)
 			}
+			c.emitRetry(RetryEvent{Kind: Retry5xx, Attempt: attempt + 1, Status: status,
+				Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
+				Delay: sleep, Elapsed: time.Since(start), Budget: budget,
+				Attempts5xx: fiveXXAttempts, Max5xx: c.retry5xxAttempts(), ServerAsked: serverAsked})
 			log.Printf("llm: upstream returned %d (5xx attempt %d/%d); retrying in %s",
 				status, fiveXXAttempts, c.retry5xxAttempts(), sleep)
 			if !sleepOrCancel(ctx, sleep) {
 				return nil, ctx.Err()
 			}
 		default:
-			// Anything else (2xx success, 4xx non-429): hand back.
+			// Anything else (2xx success, 4xx non-429): hand back. A retried call
+			// that finally worked says so, so a UI can take its banner down —
+			// only for a real success, since a 400 arriving after five 503s is
+			// the end of the retrying, not a recovery.
+			if attempt > 0 && status < 400 {
+				c.emitRetry(RetryEvent{Kind: RetryRecovered, Attempt: attempt + 1, Status: status,
+					Elapsed: time.Since(start), Budget: budget})
+			}
 			return resp, nil
 		}
 		backoff *= 2
