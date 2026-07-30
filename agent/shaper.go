@@ -13,6 +13,15 @@ import (
 // ShaperPolicy captures per-model context-window policy. A host builds it
 // from its model row at session-resolve time.
 type ShaperPolicy struct {
+	// BudgetTokens is the model's usable context window in tokens.
+	//
+	// ZERO (or negative) means UNBUDGETED: no LOD, no compaction, the
+	// conversation is rendered whole. It cannot mean "a budget of nothing" —
+	// that reading cost a real session 45 compactions in 29 minutes, one per
+	// turn, each spending a summarization call to fold history that had just
+	// been summarized, leaving 5 surviving entries out of 50. A host that has
+	// not been told the window size must not have its history destroyed on
+	// that basis.
 	BudgetTokens          int
 	PreserveLastMessages  int
 	PreserveLastToolCalls int
@@ -120,6 +129,19 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 	}()
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
+	}
+
+	// Unbudgeted: render and return. Every phase below compares against a token
+	// ceiling, and with no ceiling there is nothing to compare — treating 0 as
+	// the ceiling makes every build "over budget" and compacts on every turn.
+	if sh.Policy.BudgetTokens <= 0 {
+		entries, err := sh.Store.Context(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sortEntries(entries)
+		pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+		return sh.render(entries, pristineCount, system, sh.Policy.AlwaysLOD), nil
 	}
 
 	for attempt := 0; attempt < 4; attempt++ {

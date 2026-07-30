@@ -277,3 +277,63 @@ func anyContains(msgs []llm.Message, s string) bool {
 	}
 	return false
 }
+
+// An unset BudgetTokens means "nobody told me the window size", NOT "the window
+// is zero tokens". Read the second way, every Build is over budget and compacts
+// — measured in the wild as 45 compactions in 29 minutes, one per turn, each
+// spending a summarization call to fold history that had just been folded, and
+// leaving 5 of 50 entries alive.
+func TestBuild_ZeroBudgetNeverCompacts(t *testing.T) {
+	store := &memStore{}
+	kinds := []EntryKind{KindUser, KindAssistant, KindToolCall, KindToolResult, KindAssistant}
+	for i, k := range kinds {
+		store.entries = append(store.entries, Entry{
+			ID: string(rune('a' + i)), Kind: k, Content: strings.Repeat("event content here ", 50),
+			CreatedAt: int64(i + 1),
+		})
+	}
+	sh := &Shaper{
+		Store:  store,
+		Runner: &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}}},
+		Policy: ShaperPolicy{BudgetTokens: 0, PreserveLastMessages: 1, LODTruncateAboveChars: 40},
+	}
+	for turn := 0; turn < 3; turn++ {
+		if _, err := sh.Build(context.Background(), "s", "sys"); err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+		if n := markerCount(store); n != 0 {
+			t.Fatalf("turn %d: unbudgeted Build compacted (%d markers)", turn, n)
+		}
+	}
+	// And the history is rendered whole, not folded away.
+	msgs, err := sh.Build(context.Background(), "s", "sys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) < len(kinds) {
+		t.Errorf("history was dropped: %d messages for %d entries", len(msgs), len(kinds))
+	}
+}
+
+// A real budget still compacts — the fix must not disable the feature.
+func TestBuild_RealBudgetStillCompacts(t *testing.T) {
+	store := &memStore{}
+	for i := 0; i < 6; i++ {
+		store.entries = append(store.entries, Entry{
+			ID: string(rune('a' + i)), Kind: KindUser, Content: strings.Repeat("x", 4000),
+			CreatedAt: int64(i + 1),
+		})
+	}
+	sh := &Shaper{
+		Store:  store,
+		Runner: &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}, {{Content: "SUMMARY2"}}}},
+		Policy: ShaperPolicy{BudgetTokens: 500, LODHeadroomTokens: -1, PreserveLastMessages: 1,
+			LODTruncateAboveChars: 100},
+	}
+	if _, err := sh.Build(context.Background(), "s", "sys"); err != nil {
+		t.Fatal(err)
+	}
+	if markerCount(store) == 0 {
+		t.Error("a genuinely over-budget session should still compact")
+	}
+}
