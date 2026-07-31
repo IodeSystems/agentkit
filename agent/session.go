@@ -323,8 +323,21 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				// What this round-trip cost, recorded WITH the reply it produced.
 				// The session log is the durable record, so a replay can answer
 				// "how long, and how much" per turn without a trace sidecar.
-				Usage:     entryUsage(usage),
-				CreatedAt: time.Now().UnixNano(),
+				Usage: entryUsage(usage),
+				// now(), NOT time.Now(): this was the one Append in the loop
+				// that ignored the session clock, and history is ordered by
+				// CreatedAt.
+				//
+				// A host that supplies Now — a counter, a fake clock, a test —
+				// got wall-clock nanoseconds here and small integers everywhere
+				// else, so every assistant reply sorted AFTER the entire rest of
+				// the conversation. The model was then shown tool calls with no
+				// reasoning in front of them, and the replies bunched at the end
+				// in a block. Two of them in a row is a hard error from
+				// llama.cpp ("Cannot have 2 or more assistant messages at the
+				// end of the list"), which is how this surfaced, but the
+				// reordering corrupted every turn before it ever reached that.
+				CreatedAt: now(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist llm reply: %w", e)
 			}
