@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,14 @@ var contextOverflowHints = []string{
 	"context length", "context window", "maximum context", "context_length_exceeded",
 	"n_ctx", "too long", "exceeds", "longer than", "reduce the length",
 	"maximum number of tokens", "maximum prompt",
+	// llama.cpp refuses a prompt larger than the PHYSICAL BATCH, which is a
+	// separate and usually smaller limit than n_ctx, and says so in words this
+	// list did not cover: "input (14969 tokens) is too large to process.
+	// increase the physical batch size (current batch size: 8192)". It is still
+	// a boundary on how much input the endpoint accepts, which is exactly what
+	// this probe measures — so it belongs here, and matching bodyIsInputTooLarge
+	// keeps the two classifiers from disagreeing about the same response.
+	"too large to process", "physical batch size",
 }
 
 // contextProbeCeiling bounds the probe: past this the requests get large and
@@ -68,6 +77,15 @@ func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
 		})
 		resp, err := c.postWithRetry(ctx, c.chatURL(), body, "")
 		if err != nil {
+			// postWithRetry recognises an over-large request itself and returns
+			// early rather than retrying bytes that cannot change. That is the
+			// probe's ANSWER, not a probe failure: the rejection it short-circuits
+			// on never reaches the status check below, so without this the probe
+			// aborts on precisely the endpoints whose limit is worth measuring.
+			var tooLarge *InputTooLargeError
+			if errors.As(err, &tooLarge) {
+				return false, nil
+			}
 			return false, err
 		}
 		defer resp.Body.Close()

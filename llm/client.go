@@ -702,8 +702,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
 					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
 					Reason: "not retried: the request is too large for this endpoint, so every retry fails identically"})
-				return nil, fmt.Errorf("llm: input too large for this endpoint (status %d, not retried): %s",
-					status, strings.TrimSpace(firstLineOfBody(string(bodyBytes))))
+				return nil, &InputTooLargeError{Status: status, Body: string(bodyBytes)}
 			}
 			if fiveXXAttempts >= c.retry5xxAttempts() {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
@@ -1420,6 +1419,28 @@ type TruncatedToolCallError struct {
 
 func (e *TruncatedToolCallError) Error() string {
 	return fmt.Sprintf("llm: tool-call arguments truncated (status %d) — context likely exhausted mid-write", e.Status)
+}
+
+// InputTooLargeError reports that the endpoint refused the REQUEST for its size
+// — llama.cpp's physical batch, or a context that cannot hold the prompt.
+//
+// Typed rather than a bare fmt.Errorf because two callers have to act on it and
+// neither can match a sentence reliably. A caller sending a document has to send
+// less, and DiscoverContext has to read it as "this size does not fit", which is
+// the whole answer the probe is looking for — string-matched, it read as a
+// transport failure and aborted the probe on the exact endpoint that needed it.
+//
+// The Error() text is unchanged: it is already recorded in job rows.
+type InputTooLargeError struct {
+	Status int
+	Body   string
+}
+
+func (e *InputTooLargeError) Error() string {
+	if body := strings.TrimSpace(firstLineOfBody(e.Body)); body != "" {
+		return fmt.Sprintf("llm: input too large for this endpoint (status %d, not retried): %s", e.Status, body)
+	}
+	return fmt.Sprintf("llm: input too large for this endpoint (status %d, not retried)", e.Status)
 }
 
 // bodyIsInputTooLarge recognises the endpoint complaining that the REQUEST did
