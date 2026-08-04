@@ -632,6 +632,124 @@ final though.
   timer closing the body from another goroutine, and its error path currently
   reads as a transport fault. Non-zero default `MaxTokens` also unaddressed.
 
+### ✅ Slice K — drop mark3labs/mcp-go, own the MCP client (`mcpmgr/jsonrpc.go`, `mcpmgr/protocol.go`)
+- **Motivation:** mcp-go was the only heavy dependency in the module — 26,801
+  LOC / 3.6 MB plus five transitive modules (`google/jsonschema-go`,
+  `santhosh-tekuri/jsonschema/v6`, `spf13/cast`, `yosida95/uritemplate/v3`,
+  `golang.org/x/text`) — and `go list -deps ./mcpmgr` also pulled in
+  `mcp-go/server`, the server half, via `client/inprocess.go`. We used three
+  constructors, seven methods and eight DTOs of it, all inside `manager.go`.
+  Unused and paid for: HTTP/SSE/streamable transports, OAuth, sampling,
+  elicitation, roots, in-process transport, OTel tracing.
+- **Prerequisite done first: coverage.** Every pre-existing `mcpmgr` test
+  skipped unless `poly-lsp-mcp` was on PATH, so the protocol layer was
+  effectively untested — no basis for swapping anything. `fakeserver_test.go`
+  re-execs the TEST BINARY as an MCP server (`MCPMGR_FAKE_SERVER=<scenario>`,
+  the os/exec TestHelperProcess pattern): hermetic, no `go build` step, no
+  testdata binary to keep in sync. Scenarios: happy / notify / stderr-die /
+  hang / bad-init / slow-tools.
+- **Order of operations (deliberate):** wrote `protocol_test.go` against the
+  EXISTING mcp-go-backed manager first and got it green, so the tests describe
+  mcpmgr's promises rather than the new implementation's behaviour. The one
+  test that failed at that point — `TestToolSchemaKeepsFullFidelity` — was the
+  bug being fixed, not a flaw in the harness.
+- **The fidelity bug it caught:** mcp-go decodes `inputSchema` into
+  `ToolArgumentsSchema{Defs, Type, Properties, Required, AdditionalProperties}`
+  and `normalizeSchema` read only three of those. Measured loss on a realistic
+  schema: `$defs`, `$schema`, `title` and `additionalProperties` all silently
+  dropped before any caller saw the tool — i.e. a `$ref` that no longer
+  resolves. `inputSchema` is now `map[string]any` round-tripped verbatim;
+  `normalizeSchema(raw)` only fills nil `type`/`properties`/`required` and
+  copies the rest through (and no longer mutates its argument).
+- **Replacement, ~600 lines in two files.** `jsonrpc.go`: subprocess spawn,
+  newline-framed JSON-RPC 2.0, id correlation, notification dispatch, teardown
+  ladder. `protocol.go`: initialize + notifications/initialized + tools/list +
+  tools/call, schema normalization, content rendering.
+- **Bugs deliberately carried over from mcp-go** (they were fixed there for
+  real reasons): cleanup runs under a second `sync.Once` so a server that died
+  on its own still gets its FDs closed and reaped; the read loop closes `done`
+  so in-flight calls unblock instead of hanging; a call woken by `done` drains
+  its response channel first, since a valid reply can land in the same instant
+  as EOF.
+- **Fixed while passing through:** (1) `exec.Command`, not `CommandContext` —
+  the old code needed a comment warning that a caller's `defer cancel()` would
+  kill the server, and now the child's lifetime is owned by `close()` alone;
+  (2) `tools/list` follows pagination cursors (bounded at 100 pages, stops on a
+  repeated cursor, logs if it truncates) — mcp-go's `ListTools` returned page
+  one only; (3) `tools/call` sends `{}` rather than `null` for absent
+  arguments; (4) server→client requests get a method-not-found reply instead of
+  silence, so a server that blocks on one doesn't wedge; (5) the handshake now
+  identifies as `agentkit-mcpmgr`, not the hardcoded `"autowork3"`.
+- **Protocol-version policy, deliberate deviation:** mcp-go rejects any version
+  not in its known list. We accept any non-empty one. We speak a four-method
+  subset that has not changed across revisions, so policing it would break
+  working setups against servers newer than this library to enforce nothing.
+- **Tests** (`mcpmgr/protocol_test.go`, all green under `-race -count=3`):
+  handshake + discovery; no-nulls schema; full schema fidelity; every content
+  kind (text / multi-block / image / unknown→JSON / isError); a **4 MB single
+  frame** (guards `bufio.Reader` over `Scanner` — one frame is one line);
+  24 concurrent calls not crossing wires (guards id correlation, which a
+  single-threaded test can never catch); cancelled context; notifications
+  emitted DURING initialize and after initialized; stderr tail on a refusing
+  server; initialize error; stalled tools/list → `ServerReadyErr`; thread
+  scoping incl. isolation from project scope and other threads; and the full
+  graceful→SIGTERM→SIGKILL ladder verified by PID (measured 5.00s against a
+  server that ignores both, process confirmed reaped).
+- **Real-server check:** the pre-existing `poly-lsp-mcp` tests pass unchanged
+  against the new client.
+- **Result:** `go list -deps ./llm ./mcpmgr` → `gopkg.in/yaml.v3` and nothing
+  else. `mcpmgr`'s remaining dep is yaml purely for `RenderSecret`'s yaml
+  output format.
+- **Not done (icebox):** no `Setpgid` — an MCP server that spawns its own
+  children still orphans them on kill (unchanged from mcp-go, but now ours to
+  fix). No HTTP/SSE/streamable-HTTP transport: `mcpmgr` is stdio-only, and
+  remote MCP would need a second transport under the same `call/notify` seam.
+  No sampling/elicitation/roots (server→client requests are refused, not
+  handled). Dropping `yaml.v3` and `google/uuid` for a truly zero-dep module is
+  separately cheap and separately deferred.
+
+### ✅ Slice L — zero third-party dependencies (`agent/id.go`, `mcpmgr/render.go`)
+- **Result:** `go.mod` is a module path and a Go version, nothing else.
+  `go list -m all` → one line. `go.sum` deleted (it was empty). Every package
+  in the module is stdlib-only apart from internal imports.
+- **`google/uuid` → `agent.NewID`.** The case was not size (1,323 LOC) but that
+  invariant #2 — "`agent` imports ONLY agentkit/llm, agentkit/mcpmgr, and
+  stdlib" — was **documented and false**: `go list -deps ./agent` returned
+  `github.com/google/uuid`. Now ~20 lines of `crypto/rand` + `encoding/hex`.
+  Returns one value, not two: as of Go 1.24 `crypto/rand.Read` never errors.
+- **Format is the compatibility surface, not the implementation.** Hosts store
+  these beside IDs they minted themselves with google/uuid (autowork3:
+  `schema/deployed.sql` documents TEXT columns as "UUID v4 strings", and it
+  still uses google/uuid for its own). Output is byte-identical — lowercase
+  8-4-4-4-12, version nibble 4, variant bits 10 — so the two stay
+  interchangeable in one column. `agent/id_test.go` pins it: canonical-form
+  regex over 1000 draws, plus a bit-level pass over 2000 asserting the fixed
+  positions are fixed (hyphens/version/variant) AND that every other position
+  actually varies — a stuck nibble is what slicing the wrong bytes looks like,
+  and a regex over random samples walks straight past it.
+- **Note:** this does NOT remove uuid from autowork3, which keeps its own. The
+  win is that agentkit is self-contained, not that anything downstream shrinks.
+- **`gopkg.in/yaml.v3` → the `yaml` secret format DELETED.** 11,285 LOC (plus
+  the three indirect test-only entries it put in go.mod) for one branch of
+  `RenderSecret`, on a flat `map[string]string`. Checked before cutting: no
+  user — every secret config in autowork3 is `secret_format: env`.
+- **Why deleted rather than hand-rolled** (user's call; both were costed): a
+  ~15-line emitter was viable — YAML 1.2 is a superset of JSON, so
+  `json.Marshal` per key and value produces a valid double-quoted scalar by
+  construction and there is no escaping logic of ours to get wrong — but it
+  would still have changed the output bytes to `"KEY": "value"`. Deleting an
+  unused format is the smaller surface. Same escape hatch either way: a server
+  that wants YAML takes `json`, since a JSON object IS a YAML document.
+- **Removal is loud, per invariant 4 (no compat shims):** `secret_format: yaml`
+  now errors at spawn with `want env|properties|json`, wrapped by
+  `materializeSecret`, rather than writing a file the server cannot parse.
+  Guarded by `render_test.go`'s "removed yaml format" case.
+- **Guardrail:** `go build ./... && go vet ./... && go test ./... -race` green;
+  offline demos (`notify`, `schema`) run.
+- **Icebox:** nothing left to remove. The standing constraint is now in
+  CLAUDE.md as invariant 0 — adding a `require` is a decision, not a
+  convenience.
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).

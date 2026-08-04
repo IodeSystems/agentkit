@@ -30,10 +30,29 @@ Requires Go 1.26+.
 | package  | what it is | dependencies |
 |----------|------------|--------------|
 | `llm`    | the streaming OpenAI-compatible chat client (tools, tool_choice, grammar, response_format, 429 retry) | stdlib only |
-| `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | `mark3labs/mcp-go` |
+| `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | stdlib only |
 | `agent`  | the tablestakes: `Session.Turn` loop, `Shaper`, injection, lifting, validation, notification lifecycle | `llm` only |
 
-`llm` and `mcpmgr` are deliberately zero-internal-dep — use them standalone.
+**agentkit has no third-party dependencies at all** — `go.mod` declares a
+module path, a Go version, and nothing else:
+
+```
+$ go list -m all
+github.com/iodesystems/agentkit
+```
+
+That is a deliberate constraint, not a brag. This library is meant to sit at
+the bottom of somebody else's dependency tree, where every module it drags in
+is one the host cannot refuse — and where a `go get -u` in an unrelated corner
+can break a build nobody touched. It also keeps the supply-chain surface of an
+agent loop, which by construction executes tool calls, down to code in this
+repo.
+
+Concretely: `mcpmgr` speaks JSON-RPC to MCP servers over stdio itself
+(`jsonrpc.go` + `protocol.go`, ~650 lines) rather than vendoring an MCP SDK,
+and `agent.NewID` mints RFC 4122 v4 UUIDs from `crypto/rand`.
+
+`llm` and `mcpmgr` are also zero-**internal**-dep — use them standalone.
 `agent` imports only `llm` + stdlib; it never sees your storage model.
 
 ## Quickstart — a tool-call loop in ~20 lines
@@ -92,9 +111,14 @@ trying until `--timeout`.
 
 ## Status
 
-Pre-release. Module path `github.com/iodesystems/agentkit` is final. Extracted
-from autowork3 (its first consumer); the interface is deliberately host-neutral
-so a second consumer can implement `Store` over its own storage.
+Pre-release. Module path `github.com/iodesystems/agentkit` is final; nothing
+else is, and there are no compatibility shims — things get edited in place.
+
+Extracted from **autowork3**, which drives `Session` over Postgres event
+streams. **dun**, a coding-agent harness, is the second consumer and the more
+useful test of the seam: it implements `Store` over a local session file and
+composes three MCP servers, so anywhere it had to reach *around* the contract
+rather than wrap it is a place the contract is wrong.
 
 ## License
 
