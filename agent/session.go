@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/iodesystems/agentkit/llm"
 )
 
@@ -53,6 +51,17 @@ type Session struct {
 	// OnUsage, if set, fires after each chat round with the running token tally
 	// (cumulative Total + current Active window). Mirrors TurnResult.Usage.
 	OnUsage func(TokenUsage)
+
+	// OnToolCalls, if set, is called with the tool calls returned by the
+	// model, before they are persisted or dispatched. The callback may add,
+	// remove, or modify the slice. A returned nil or empty slice is treated
+	// as "no tool calls" (the turn ends or checks for pending events).
+	//
+	// This is the seam for injecting host-initiated tool calls that appear
+	// as if the model made them — e.g. a /ship command that forces the
+	// assistant to call the ship tool, so the exchange is persisted as
+	// assistant(tool_calls) → tool(result), not as a disembodied Aside.
+	OnToolCalls func([]llm.ToolCall) []llm.ToolCall
 
 	// Estimate counts tokens for the Active-window figure. Nil → Default()
 	// (chars/4). Set to the same estimator the Shaper uses for consistency.
@@ -160,7 +169,7 @@ func (s *Session) spanName(n string) string {
 // delivery); this is the self-inbox primitive.
 func (s *Session) Inject(ctx context.Context, e Entry) error {
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = NewID()
 	}
 	if e.CreatedAt == 0 {
 		if s.Now != nil {
@@ -285,6 +294,13 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		if e != nil {
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
+
+		// Host hook: transform the tool calls before they are persisted or
+		// dispatched. A returned nil or empty slice is treated as "no tool
+		// calls" (the turn ends or checks for pending events).
+		if s.OnToolCalls != nil {
+			toolCalls = s.OnToolCalls(toolCalls)
+		}
 		if rep != nil {
 			// The transport cut a looping generation. Keep ONE copy of the
 			// repeated block and drop the rest before this reply is persisted:
@@ -317,7 +333,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// token-lean; expand only for display in TurnResult.Reply. A reply
 			// with no known {name}/{OUTPUT} placeholder is unchanged.
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:      uuid.New().String(),
+				ID:      NewID(),
 				Kind:    KindAssistant,
 				Content: resp,
 				// What this round-trip cost, recorded WITH the reply it produced.
@@ -351,7 +367,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// to answer. A notification is tail-kept and budget-neutral, so the
 			// notice survives to the next round without competing with history.
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:   uuid.New().String(),
+				ID:   NewID(),
 				Kind: KindNotification,
 				Tag:  "repetition",
 				Content: fmt.Sprintf(
@@ -418,7 +434,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				args = rejectedArgsPlaceholder(tc.Function.Arguments, refusal)
 			}
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:         uuid.New().String(),
+				ID:         NewID(),
 				Kind:       KindToolCall,
 				Content:    args,
 				ToolCallID: tc.ID,
@@ -473,7 +489,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}
 			results = append(results, toolResult)
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:         uuid.New().String(),
+				ID:         NewID(),
 				Kind:       KindToolResult,
 				Content:    toolResult,
 				ToolCallID: tc.ID,
@@ -515,7 +531,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				// it may have a genuine reason to wait, and only it knows what
 				// the alternative move is.
 				if e := s.Store.Append(ctx, s.SessionID, Entry{
-					ID:   uuid.New().String(),
+					ID:   NewID(),
 					Kind: KindNotification,
 					Tag:  "tool_loop",
 					Content: fmt.Sprintf(

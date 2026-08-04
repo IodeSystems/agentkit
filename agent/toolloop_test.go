@@ -104,3 +104,128 @@ func TestRepeatedExchangeGuardIsDisablable(t *testing.T) {
 		t.Fatalf("with the guard off, only MaxTurns should stop the loop; got %v", err)
 	}
 }
+
+// OnToolCalls hook: a host injects tool calls that appear as if the model
+// made them. The Turn loop persists + dispatches them normally.
+func TestOnToolCalls_InjectsForcedCall(t *testing.T) {
+	store := &memStore{}
+	// Model returns a plain text reply with no tool calls.
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		{{Content: "done with the task"}},
+	}}
+
+	var dispatched []llm.ToolCall
+	var injected bool
+	s := &Session{
+		SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+			dispatched = append(dispatched, tc)
+			return fmt.Sprintf("tool %q executed", tc.Function.Name), nil
+		},
+	}
+	s.OnToolCalls = func(tcs []llm.ToolCall) []llm.ToolCall {
+		if injected {
+			return tcs
+		}
+		injected = true
+		forced := &llm.ToolCall{
+			ID:   "call_forced_ship",
+			Type: "function",
+		}
+		forced.Function.Name = "ship"
+		forced.Function.Arguments = `{"mode":"push"}`
+		return append(tcs, *forced)
+	}
+
+	res, err := s.Turn(context.Background())
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if !strings.Contains(res.Reply, "done with the task") {
+		t.Errorf("reply = %q; want model's text", res.Reply)
+	}
+
+	// The forced tool call should have been dispatched.
+	if len(dispatched) != 1 {
+		t.Fatalf("dispatched %d tool calls, want 1", len(dispatched))
+	}
+	if dispatched[0].Function.Name != "ship" {
+		t.Fatalf("dispatched tool = %q, want ship", dispatched[0].Function.Name)
+	}
+	if !strings.Contains(dispatched[0].Function.Arguments, "push") {
+		t.Errorf("arguments = %q; want push mode", dispatched[0].Function.Arguments)
+	}
+
+	// History should show: assistant(text) → assistant(tool_calls: ship) → tool(result).
+	var kinds []string
+	for _, e := range store.entries {
+		kinds = append(kinds, string(e.Kind))
+	}
+	// Expect: assistant (text reply), tool_call (ship), tool (result).
+	if len(kinds) < 3 {
+		t.Fatalf("history has %d entries (%v), want at least 3", len(kinds), kinds)
+	}
+	if kinds[0] != "assistant" {
+		t.Errorf("first entry kind = %q, want assistant", kinds[0])
+	}
+	if kinds[1] != "tool_call" {
+		t.Errorf("second entry kind = %q, want tool_call", kinds[1])
+	}
+	if kinds[2] != "tool_result" {
+		t.Errorf("third entry kind = %q, want tool", kinds[2])
+	}
+}
+
+// OnToolCalls with existing tool calls: the forced call is added alongside
+// the model's own calls (multi-tool-call).
+func TestOnToolCalls_AddsToExistingCalls(t *testing.T) {
+	store := &memStore{}
+	tc1 := &llm.ToolCall{ID: "call_model_1", Type: "function"}
+	tc1.Function.Name = "node_query"
+	tc1.Function.Arguments = `{"selector":"func"}`
+
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		{{ToolCall: tc1}},
+		{{Content: "thanks"}}, // second round after tool results
+	}}
+
+	var dispatched []string
+	var injected2 bool
+	s := &Session{
+		SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+			dispatched = append(dispatched, tc.Function.Name)
+			return "ok", nil
+		},
+	}
+	s.OnToolCalls = func(tcs []llm.ToolCall) []llm.ToolCall {
+		if injected2 {
+			return tcs
+		}
+		injected2 = true
+		forced := &llm.ToolCall{
+			ID:   "call_forced_ship",
+			Type: "function",
+		}
+		forced.Function.Name = "ship"
+		forced.Function.Arguments = `{"mode":"verify"}`
+		return append(tcs, *forced)
+	}
+
+	_, err := s.Turn(context.Background())
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// Both tool calls should have been dispatched in the same round.
+	if len(dispatched) != 2 {
+		t.Fatalf("dispatched %d calls (%v), want 2", len(dispatched), dispatched)
+	}
+	// Model's call first, forced call second (OnToolCalls appended).
+	if dispatched[0] != "node_query" {
+		t.Errorf("first dispatched = %q, want node_query", dispatched[0])
+	}
+	if dispatched[1] != "ship" {
+		t.Errorf("second dispatched = %q, want ship", dispatched[1])
+	}
+}
