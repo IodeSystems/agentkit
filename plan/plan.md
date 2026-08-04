@@ -371,7 +371,9 @@ final though.
 - **Decisions (user-chosen):**
   - **Lives in a NEW separate module** that depends on agentkit (keeps
     agentkit's dep hygiene — sqlite/PDF deps stay out of llm/mcpmgr/agent).
-    Module name/path: **UNDECIDED — blocking the scaffold.**
+    Module name/path: ✅ **RESOLVED — `github.com/IodeSystems/raglit`**, on
+    `main` with a remote. This entry read "UNDECIDED — blocking the scaffold"
+    long after slices A–I had shipped.
   - **Multimodal `llm` FIRST** (reusable beyond this tool). ✅ DONE — see below.
   - **PDF→image: pure-Go, assume image-PDFs** (extract embedded page images
     via pdfcpu; born-digital vector-text PDFs out of scope for v1). No native
@@ -758,9 +760,10 @@ final though.
 - **End-to-end proactive demo:** wire raglit's DocFinder over a real index into an
   agentkit Session + FinderPreparer — the original "listen + ping relevant docs"
   loop, shown working against raglit. Validates the whole arc.
-- **Repos/publish:** agentkit rides `fix/cached-token-accounting` with a stack of
-  feature commits (multimodal, ragnotify, Embed, DiscoverContext) — wants its own
-  branch/PR. raglit has NO remote yet. Neither pushed.
+- ~~**Repos/publish**~~ ✅ **DONE.** agentkit is on `main` at
+  `github.com/IodeSystems/agentkit`, pushed and green (no
+  `fix/cached-token-accounting` branch — that was stale). raglit has a remote
+  (`github.com/IodeSystems/raglit`) and is on `main`. dun likewise.
 - **Carried from slice 8:** real ragtag search-result JSON for `ragnotify.ParseHits`
   (only matters when pointing ragnotify at actual ragtag; raglit's serve output
   already matches).
@@ -824,21 +827,32 @@ final though.
   it. Acceptable today; tighten to "delete prior non-compacted + insert" if it
   bites.
 
-### ◻ Slice 3 — wire the remaining tablestakes
-- **lifting:** autowork3's `pending_lifts` mechanism → `agent.Lift` (park +
-  resume on tool_result Entry).
-- **injection/batching:** autowork3's inbox (`ListContextDeliveries` /
-  session deliveries) → `Store.Claim`.
-- **grammar/schema Validator:** the existing dispatcher-enforcement retry
-  (protocol-bound roles under `tool_choice=required`) → `agent.Validator`
-  fix loop. JSON-Schema validation + fix loop for structured tool outputs.
+### ◻ Slice 3 — wire the remaining tablestakes (autowork3 side)
+Status re-checked by grepping autowork3, not assumed:
+- ✅ **lifting** — `internal/server/pending_lifts.go` uses
+  `agent.PendingResult`.
+- ✅ **injection/batching** — `internal/harness/session.go` implements
+  `ClaimPending` over `thread_event_deliveries`.
+- ✅ **notification lifecycle** — `agent.NotificationPreparer` +
+  `RevalidateStore`/`Revalidator` wired in `internal/server/notify_revalidate.go`.
+- ◻ **grammar/schema Validator** — the ONLY one still open. No
+  `ValidatingDispatcher` / `agent.Validator` reference anywhere in autowork3;
+  the dispatcher-enforcement retry for protocol-bound roles under
+  `tool_choice=required` has not been moved onto the primitive.
 
 ### ◻ Slice 4 — collapse the harness to a thin adapter
 - Delete the now-moved loop/shaper code from autowork3; `harness` package
   becomes orchestration-only (roles, scheduler, provider lanes stay in
   autowork3). Verify full suite green.
-- Then: point the **claude-openai project** + a future **openai-session-
-  source** at `agentkit/agent` to prove the interface against a 2nd consumer.
+- ✅ **The 2nd consumer already exists: `dun`** (`../dun`, coding-agent harness,
+  `replace` directive). It implements `Store` over a local session file, drives
+  `Session.Turn` over three MCP servers, and is in daily use — a stronger test
+  of host-neutrality than a purpose-built second consumer would have been.
+  What it proved: the seams that are func types (`ToolDispatcher`) took
+  wrappers cleanly (`withLiftedQueue`); the one gap it had to route around was
+  server→client MCP push, since fixed. **Still open:** the deliberate reread —
+  walk dun for places it reaches AROUND the contract rather than wrapping it,
+  because those mark the contract being wrong. Not yet done.
 
 ## Decisions / conventions
 - Module path `github.com/iodesystems/agentkit` is FINAL.
