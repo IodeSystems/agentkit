@@ -2,6 +2,7 @@ package mcpmgr
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -24,10 +25,6 @@ func TestRenderSecret(t *testing.T) {
 		{
 			format: "properties",
 			want:   "GMAIL_APP_PASSWORD=abcd efgh ijkl mnop\nGMAIL_IMAP_ADDR=imap.gmail.com:993\nGMAIL_USER=a@b.com\n",
-		},
-		{
-			format: "yaml",
-			want:   "GMAIL_APP_PASSWORD: abcd efgh ijkl mnop\nGMAIL_IMAP_ADDR: imap.gmail.com:993\nGMAIL_USER: a@b.com\n",
 		},
 	}
 
@@ -64,7 +61,7 @@ func TestRenderSecret(t *testing.T) {
 
 	t.Run("deterministic", func(t *testing.T) {
 		// Same input renders byte-identical across calls (sorted keys).
-		for _, format := range []string{"env", "properties", "json", "yaml"} {
+		for _, format := range []string{"env", "properties", "json"} {
 			a, _ := RenderSecret(format, kv)
 			b, _ := RenderSecret(format, kv)
 			if string(a) != string(b) {
@@ -76,6 +73,20 @@ func TestRenderSecret(t *testing.T) {
 	t.Run("unknown format", func(t *testing.T) {
 		if _, err := RenderSecret("toml", kv); err == nil {
 			t.Fatal("expected error for unknown format")
+		}
+	})
+
+	// "yaml" was a supported format and is not one any more. A config left
+	// over in the field must fail LOUDLY at spawn — materializeSecret wraps
+	// this error — rather than writing a file the server cannot parse, and
+	// the message has to name what is actually accepted now.
+	t.Run("removed yaml format", func(t *testing.T) {
+		_, err := RenderSecret("yaml", kv)
+		if err == nil {
+			t.Fatal("yaml still renders; it was removed")
+		}
+		if !strings.Contains(err.Error(), "env|properties|json") {
+			t.Errorf("err = %v; want it to list the supported formats", err)
 		}
 	})
 }

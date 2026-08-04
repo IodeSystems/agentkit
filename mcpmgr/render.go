@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-
-	"gopkg.in/yaml.v3"
 )
 
 // RenderSecret serialises a flat key/value secret map into one of the
@@ -18,7 +16,12 @@ import (
 //   - "env"        — KEY=VALUE lines (gmcpail consumes this)
 //   - "properties" — key=value lines (java .properties variant)
 //   - "json"       — a JSON object
-//   - "yaml"       — KEY: VALUE mapping
+//
+// There was a "yaml" format. It was removed with gopkg.in/yaml.v3, which was
+// 11k LOC carried for that one branch and had no users — every config in the
+// field renders env. A server that genuinely needs YAML can take "json"
+// instead: YAML 1.2 is a superset of JSON, so a JSON object IS a YAML
+// document, and any conforming parser reads it unchanged.
 //
 // Keys are sorted so output is deterministic.
 func RenderSecret(format string, kv map[string]string) ([]byte, error) {
@@ -52,18 +55,7 @@ func RenderSecret(format string, kv map[string]string) ([]byte, error) {
 		}
 		return b, nil
 
-	case "yaml":
-		ordered := make(map[string]string, len(kv))
-		for _, k := range keys {
-			ordered[k] = kv[k]
-		}
-		b, err := yaml.Marshal(ordered)
-		if err != nil {
-			return nil, fmt.Errorf("mcpmgr: render yaml secret: %w", err)
-		}
-		return b, nil
-
 	default:
-		return nil, fmt.Errorf("mcpmgr: unknown secret_format %q (want env|properties|json|yaml)", format)
+		return nil, fmt.Errorf("mcpmgr: unknown secret_format %q (want env|properties|json)", format)
 	}
 }

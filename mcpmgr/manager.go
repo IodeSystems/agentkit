@@ -60,8 +60,9 @@ type MCPConfig struct {
 	// integration's JSONB config (type=mcp); no schema column.
 	SecretRef string `json:"secret_ref"`
 	// SecretFormat selects the on-disk encoding of the rendered secret
-	// file: one of env|properties|json|yaml. Only consulted when
-	// SecretRef is set.
+	// file: one of env|properties|json. Only consulted when SecretRef is
+	// set. A server wanting YAML takes json — YAML 1.2 is a superset of
+	// JSON.
 	SecretFormat string `json:"secret_format"`
 }
 
