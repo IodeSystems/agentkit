@@ -234,6 +234,19 @@ final though.
   - Tests: `TestRetryAfterFrom`, `TestPostChatWithRetry_RespectsBodyRetryAfter`,
     `TestPostChatWithRetry_GivesUpAfterRetryBudget`,
     `TestChatStream_ForwardsConstrainedDecoding`.
+  - ✅ **Retry sleeps are jittered** (`retryJitterFraction` = 0.20, `jittered()`
+    in `llm/client.go`; all three sleep sites — transport, 429, 5xx). Without
+    it the schedule was a synchronization primitive: corrallm hands every
+    caller rejected in one moment the SAME `Retry-After` (lane state, rounded
+    to whole seconds — `writeBackpressure` in corrallm
+    `internal/proxy/proxy.go`), and the client slept it exactly, so N callers
+    woke together and each re-POSTed a FULL payload (`postWithRetry` resends
+    the same bytes every attempt) into the box that had just rejected them.
+    **Additive only** — `[d, d*1.2)`, never earlier than the server asked,
+    since a draw below `Retry-After` buys a guaranteed second 429. Drawn from
+    the clean `backoff` before the deadline check, so budget accounting matches
+    the real sleep and the slack never compounds with the doubling. Tests:
+    `llm/jitter_test.go`.
 - **corrallm side (ml-kit/corrallm.yaml):** added a random-minted interactive
   key `sk-agentkit-…25` for the demo. corrallm loads keys once at boot →
   **needs a restart to activate** (not done: can't fully reconstruct the live

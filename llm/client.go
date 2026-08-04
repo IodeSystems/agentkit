@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -370,6 +371,11 @@ func NewClient(baseURL, apiKey, model string) *Client {
 // Such a caller should not invent a second schedule out of thin air: the numbers
 // (and any operator override of RetryBudget) are policy, and one policy is
 // better than two that disagree.
+//
+// These are the UNJITTERED schedule. This client adds random slack to each of
+// its own sleeps (retryJitterFraction) so concurrent callers don't retry in
+// lockstep; an outer retrier that fans out across sessions wants the same
+// property and should jitter what it builds from these numbers.
 func (c *Client) RetryPolicy() (initial, max, budget time.Duration) {
 	return retryInitialBackoff, retryMaxBackoff, c.retryBudget()
 }
@@ -459,7 +465,10 @@ func (c *Client) Embed(ctx context.Context, model string, input []string) ([][]f
 //
 // First few attempts climb 1s → 2s → 4s → 8s → 16s → 30s → 30s → …
 // so a transient burst clears fast while a sustained limit doesn't
-// flood the provider.
+// flood the provider. Each individual sleep then gets additive random
+// jitter on top (retryJitterFraction) so concurrent callers on one
+// schedule don't wake and re-POST in lockstep; the schedule itself is
+// what doubles, never the jittered value.
 //
 // var (not const) so tests can swap to millisecond timings via
 // retry_test.go::retryInitialBackoffSet; production never mutates
@@ -468,6 +477,42 @@ var (
 	retryInitialBackoff = 1 * time.Second
 	retryMaxBackoff     = 30 * time.Second
 )
+
+// retryJitterFraction is how much random slack is ADDED to every retry sleep,
+// as a fraction of that sleep. 0 disables jitter.
+//
+// Without it the retry schedule is a synchronization primitive. corrallm hands
+// every caller rejected in the same moment the SAME Retry-After — it is derived
+// from lane state and rounded to whole seconds, not computed per caller — and
+// this client sleeps it exactly. So N callers that queue-timeout together wake
+// together and re-POST together, each re-uploading a FULL conversation payload
+// (postWithRetry resends the same bytes every attempt), precisely when the box
+// is already saturated. The exponential fallback has the same defect from the
+// other direction: with no server hint, everyone doubles in lockstep.
+//
+// ADDITIVE only, never subtractive. Textbook "full jitter" (uniform over [0,d))
+// spreads a herd better, but half its draws retry EARLIER than the server asked
+// — a guaranteed second 429, since the delay is the one thing the proxy
+// actually knows. So a sleep lands in [d, d*(1+fraction)): never before the
+// server's word, and spread wide enough that admission serializes the arrivals.
+//
+// 20% is picked against the granularity that matters: corrallm floors
+// Retry-After at 1s, so a herd spreads over ~200ms — tens of ms between
+// arrivals at realistic fan-out — while the 30s ceiling grows to at most 36s.
+//
+// var (not const) so tests can zero it for deterministic timings; production
+// never mutates it.
+var retryJitterFraction = 0.20
+
+// jittered returns d plus up to retryJitterFraction of extra random slack.
+// Non-positive durations pass through: a zero sleep means "retry now" and there
+// is nothing to spread.
+func jittered(d time.Duration) time.Duration {
+	if d <= 0 || retryJitterFraction <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Float64()*retryJitterFraction*float64(d))
+}
 
 // defaultRetryBudget bounds the TOTAL wall-clock a single postChatWithRetry
 // spends retrying (429 + 5xx) before it gives up with a clear error, when the
@@ -592,7 +637,13 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					Reason: fmt.Sprintf("cannot reach the provider and retrying will not help: %v", err)})
 				return nil, fmt.Errorf("llm: do: %w", err)
 			}
-			if time.Now().Add(backoff).After(deadline) {
+			// Jitter here, not at the doubling below: `backoff` must stay the
+			// clean schedule or the slack compounds exponentially with it.
+			// Drawn BEFORE the deadline check so the budget is measured against
+			// the sleep actually taken, and reported on the event so a UI shows
+			// the real wait.
+			sleep := jittered(backoff)
+			if time.Now().Add(sleep).After(deadline) {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Err: err,
 					Elapsed: time.Since(start), Budget: budget,
 					Reason: fmt.Sprintf("gave up after %s of unreachable provider (retry budget %s): %v",
@@ -601,12 +652,12 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					budget, time.Since(start).Round(time.Second), err)
 			}
 			c.emitRetry(RetryEvent{Kind: RetryTransport, Attempt: attempt + 1, Err: err,
-				Delay: backoff, Elapsed: time.Since(start), Budget: budget})
+				Delay: sleep, Elapsed: time.Since(start), Budget: budget})
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
 				log.Printf("llm: cannot reach provider (attempt %d): %v; retrying in %s",
-					attempt+1, err, backoff)
+					attempt+1, err, sleep)
 			}
-			if !sleepOrCancel(ctx, backoff) {
+			if !sleepOrCancel(ctx, sleep) {
 				return nil, ctx.Err()
 			}
 			backoff *= 2
@@ -638,6 +689,12 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if asked {
 				sleep = bp.RetryAfter
 			}
+			// Additive jitter — the herd-breaker. Applied to the server's own
+			// Retry-After too, because that is where the lockstep actually comes
+			// from: every caller rejected in one moment is handed the identical
+			// value. Only ever later than asked, so the proxy's word is still
+			// honored. See retryJitterFraction.
+			sleep = jittered(sleep)
 
 			if time.Now().Add(sleep).After(deadline) {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
@@ -679,6 +736,10 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if serverAsked {
 				sleep = d
 			}
+			// Same additive jitter as the 429 path: a 5xx blip hits every
+			// in-flight caller at once, so an unjittered schedule marches them
+			// back in together. See retryJitterFraction.
+			sleep = jittered(sleep)
 
 			// A 5xx that reports unparseable tool-call arguments is NOT
 			// transient: the model produced them deterministically from this

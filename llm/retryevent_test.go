@@ -104,8 +104,12 @@ func TestOnRetry_429CarriesQueueDetail(t *testing.T) {
 	if !ev.ServerAsked {
 		t.Error("ServerAsked = false; the server sent Retry-After, so the wait is its estimate")
 	}
-	if ev.Delay != time.Second {
-		t.Errorf("Delay = %s; want the server's 1s, not our schedule", ev.Delay)
+	// The server's 1s, not our own schedule — plus additive jitter, which is
+	// what keeps a queue-timeout from marching every rejected caller back in on
+	// the same tick. Never below the server's ask; never more than the fraction
+	// above it. See retryJitterFraction.
+	if maxDelay := time.Second + time.Duration(retryJitterFraction*float64(time.Second)); ev.Delay < time.Second || ev.Delay > maxDelay {
+		t.Errorf("Delay = %s; want the server's 1s plus jitter (≤ %s), not our schedule", ev.Delay, maxDelay)
 	}
 	for _, want := range []string{"4/4 slots busy", "2 waiting ahead", "queue-timeout"} {
 		if !strings.Contains(ev.Reason, want) {

@@ -80,6 +80,17 @@ plan/     living plan (plan.md = active, done.md = archive, icebox.md = deferred
   caps total wall-clock spent retrying 429/5xx; ctx deadline still wins if
   shorter. The api key is the scheduling IDENTITY (Authorization Bearer →
   priority), not the trace header.
+- **Every retry sleep is jittered, additively.** `jittered()` adds a random
+  `[0, retryJitterFraction)` of the sleep — never subtracts. corrallm hands
+  every caller rejected in the same moment the IDENTICAL `Retry-After`, and an
+  exact sleep turns the schedule into a synchronization primitive: N callers
+  wake together and each re-POSTs a FULL payload (`postWithRetry` resends the
+  same bytes every attempt) at the worst possible instant. Subtractive jitter is
+  wrong here — a draw below `Retry-After` is a guaranteed second 429. The slack
+  is drawn from the CLEAN `backoff` (so it never compounds with the doubling)
+  and BEFORE the deadline check (so the budget measures the real sleep). An
+  outer retrier built on `RetryPolicy()` gets the unjittered numbers and should
+  jitter them itself.
 
 ## Build / test guardrail (run after every change)
 
