@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/iodesystems/agentkit/llm"
 )
 
@@ -56,7 +54,7 @@ func TestClassifyPristineCount(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			entries := make([]Entry, len(c.kinds))
 			for i, k := range c.kinds {
-				entries[i] = Entry{ID: uuid.New().String(), Kind: k}
+				entries[i] = Entry{ID: NewID(), Kind: k}
 			}
 			got := classifyPristineCount(entries, c.maxMsgs, c.maxTools)
 			if got != c.want {

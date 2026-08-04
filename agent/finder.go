@@ -6,8 +6,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Proactive document surfacing — the "RAG-notify" finder.
@@ -213,7 +211,7 @@ func FinderPreparer(store Store, finder DocFinder, opts FinderOpts) Notification
 				break
 			}
 			if err := store.Append(ctx, sessionID, Entry{
-				ID:        uuid.New().String(),
+				ID:        NewID(),
 				Kind:      KindNotification,
 				Tag:       opts.Tag,
 				Content:   opts.Render(h),

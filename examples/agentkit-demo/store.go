@@ -5,8 +5,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"github.com/iodesystems/agentkit/agent"
 )
 
@@ -163,5 +161,5 @@ func (s *demoStore) liveNoticeCount() int {
 
 // entry is a small constructor stamping ID + CreatedAt so demos read cleanly.
 func entry(kind agent.EntryKind, content string, at int64) agent.Entry {
-	return agent.Entry{ID: uuid.New().String(), Kind: kind, Content: content, CreatedAt: at}
+	return agent.Entry{ID: agent.NewID(), Kind: kind, Content: content, CreatedAt: at}
 }

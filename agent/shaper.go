@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/iodesystems/agentkit/llm"
 )
 
@@ -255,7 +253,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (Compacti
 	}
 	if err := sh.Store.Compact(ctx, sessionID, Compaction{
 		Marker: Entry{
-			ID:        uuid.New().String(),
+			ID:        NewID(),
 			Kind:      KindCompaction,
 			Content:   summary,
 			CreatedAt: markerCreatedAt,
