@@ -4,13 +4,11 @@ package mcpmgr
 // against the in-repo fake server (fakeserver_test.go) so they need no
 // external binary.
 //
-// Written against the CURRENT mark3labs/mcp-go-backed client, and deliberately
-// asserting only what mcpmgr promises its callers — never a detail of the
-// JSON-RPC plumbing underneath. That is what lets the client be swapped with
-// these tests as the check on the swap rather than a casualty of it.
-//
-// Until this file existed the protocol layer had no coverage at all: every
-// test in the package skipped unless poly-lsp-mcp happened to be on PATH.
+// These exist to be implementation-independent: they were written and made
+// green against the mark3labs/mcp-go client, then had to stay green when that
+// dependency was replaced by the stdlib-only client in jsonrpc.go. Anything
+// asserted here is a promise mcpmgr makes to its callers, not a detail of
+// whichever JSON-RPC plumbing is underneath.
 
 import (
 	"context"
@@ -122,6 +120,51 @@ func TestSchemaNeverAdvertisesNulls(t *testing.T) {
 	}
 	if ping.InputSchema["required"] == nil {
 		t.Error("required is nil; want an empty array")
+	}
+}
+
+// The reason this package stopped decoding inputSchema into a fixed struct.
+// A JSON Schema is an open vocabulary: $defs, oneOf, additionalProperties and
+// per-property descriptions all steer a constrained decoder, and a client that
+// keeps only {type, properties, required} throws them away before the caller
+// ever sees the tool.
+func TestToolSchemaKeepsFullFidelity(t *testing.T) {
+	m := startFake(t, "happy", "happy", 10)
+	s := toolNamed(t, waitTools(t, m, 3), "rich").InputSchema
+
+	if _, ok := s["$defs"]; !ok {
+		t.Error("$defs dropped: a $ref'd schema is now unresolvable")
+	}
+	if v, ok := s["additionalProperties"]; !ok || v != false {
+		t.Errorf("additionalProperties = %v, present=%v; want false", v, ok)
+	}
+	if s["$schema"] == nil {
+		t.Error("$schema dropped")
+	}
+	if s["title"] != "RichArgs" {
+		t.Errorf("title = %v; want RichArgs", s["title"])
+	}
+
+	props, ok := s["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %#v; want a map", s["properties"])
+	}
+	mode, ok := props["mode"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties.mode = %#v; want a map", props["mode"])
+	}
+	if _, ok := mode["oneOf"]; !ok {
+		t.Error("properties.mode.oneOf dropped")
+	}
+	target, ok := props["target"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties.target = %#v; want a map", props["target"])
+	}
+	if target["$ref"] != "#/$defs/target" {
+		t.Errorf("properties.target.$ref = %v; want #/$defs/target", target["$ref"])
+	}
+	if target["description"] != "what to operate on" {
+		t.Errorf("properties.target.description = %v; want the server's", target["description"])
 	}
 }
 

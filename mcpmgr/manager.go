@@ -10,15 +10,20 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/client/transport"
-	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // secretFilePlaceholder is the literal token substituted in an MCP
 // config's Args/Env with the path of the rendered 0600 secret file.
 const secretFilePlaceholder = "{{secret_file}}"
+
+// How we identify in the initialize handshake. Servers log this and a few
+// gate behaviour on it. It names the LIBRARY, not the host: this used to say
+// "autowork3", which meant every consumer of the package announced itself as
+// somebody else's daemon.
+const (
+	clientName    = "agentkit-mcpmgr"
+	clientVersion = "0"
+)
 
 // MCPConfig holds the configuration for an MCP server connection.
 //
@@ -71,7 +76,7 @@ type MCPTool struct {
 // MCPServer wraps a connected MCP client.
 type MCPServer struct {
 	Config   MCPConfig
-	Client   *client.Client
+	client   *stdioClient
 	Tools    []MCPTool
 	ready    chan struct{}
 	readyErr error
@@ -335,16 +340,9 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		}
 	}
 
-	var tp *transport.CommandTransport
-	if len(env) > 0 {
-		tp = transport.NewCommandWithEnv(cfg.Command, env, args...)
-	} else {
-		tp = transport.NewCommand(cfg.Command, args...)
-	}
+	mc := newStdioClient(cfg.Command, env, args)
 
-	mc := client.NewClient(tp)
-
-	// Server→client push. Registered before Start so nothing a server emits
+	// Server→client push. Registered before start() so nothing a server emits
 	// during initialization is missed. The handler runs on the client's read
 	// goroutine, so it hands off and returns rather than doing work here —
 	// blocking it would stall every response on this connection.
@@ -353,46 +351,32 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	m.mu.RUnlock()
 	if onNotify != nil {
 		id := cfg.ID
-		mc.OnNotification(func(n mcp.JSONRPCNotification) {
-			onNotify(Notification{
-				ServerID: id,
-				Method:   n.Notification.Method,
-				Params:   n.Notification.Params.AdditionalFields,
-			})
+		mc.setNotificationHandler(func(method string, params map[string]any) {
+			onNotify(Notification{ServerID: id, Method: method, Params: params})
 		})
 	}
 
-	// IMPORTANT: pass context.Background() to Start, NOT a timed-out
-	// derivative of ctx. mark3labs's stdio transport calls
-	// exec.CommandContext(ctx, …), so when this ctx is canceled the
-	// subprocess gets killed — and `defer cancel()` would fire as
-	// soon as the caller returns, killing the MCP server we just
-	// started. The subprocess lives as long as the Manager does;
-	// Manager.Close() and StopThreadServers tear it down.
-	if err := mc.Start(context.Background()); err != nil {
+	// The subprocess is NOT tied to ctx — see stdioClient.start. It lives as
+	// long as the Manager does; Manager.Close() and StopThreadServers tear it
+	// down. ctx bounds the handshake below, nothing more.
+	if err := mc.start(); err != nil {
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
 		}
-		tail := watchStderr(tp.Stderr())
+		tail := watchStderr(mc.stderrPipe())
 		tail.settle()
 		return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
 	}
 
 	// Drain stderr for the life of the process: it is where a server explains
 	// itself when it refuses to start, and nobody else reads the pipe.
-	tail := watchStderr(tp.Stderr())
+	tail := watchStderr(mc.stderrPipe())
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "autowork3",
-		Version: "0",
-	}
-	if _, err := mc.Initialize(handshakeCtx, initReq); err != nil {
-		mc.Close()
+	if _, err := mc.initialize(handshakeCtx, clientName, clientVersion); err != nil {
+		mc.close()
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
 		}
@@ -402,7 +386,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 
 	srv := &MCPServer{
 		Config:    cfg,
-		Client:    mc,
+		client:    mc,
 		ready:     make(chan struct{}),
 		secretDir: secretDir,
 		stderr:    tail,
@@ -412,7 +396,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		toolsCtx, toolsCancel := context.WithTimeout(ctx, timeout)
 		defer toolsCancel()
 
-		result, err := mc.ListTools(toolsCtx, mcp.ListToolsRequest{})
+		tools, err := mc.listTools(toolsCtx, cfg.Name)
 		if err != nil {
 			tail.settle()
 			srv.readyErr = fmt.Errorf("mcp: list tools %s: %w%s", cfg.Name, err, tail.suffix())
@@ -420,11 +404,11 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 			return
 		}
 
-		for _, t := range result.Tools {
+		for _, t := range tools {
 			srv.Tools = append(srv.Tools, MCPTool{
 				Name:        t.Name,
 				Description: t.Description,
-				InputSchema: normalizeSchema(t.InputSchema.Type, t.InputSchema.Properties, t.InputSchema.Required),
+				InputSchema: normalizeSchema(t.InputSchema),
 				ServerID:    cfg.ID,
 			})
 		}
@@ -475,30 +459,6 @@ func (m *Manager) materializeSecret(ctx context.Context, cfg MCPConfig) (args, e
 	args = substitutePlaceholder(cfg.Args, secretFilePlaceholder, path)
 	env = substitutePlaceholder(cfg.Env, secretFilePlaceholder, path)
 	return args, env, dir, nil
-}
-
-// normalizeSchema builds the JSON-Schema object advertised for a tool, filling
-// nil sub-fields with their empty forms. An MCP tool with no required fields
-// yields a nil Required, which marshals to `"required": null` — invalid JSON
-// Schema that breaks strict tool-grammar generators. Notably llama.cpp rejects
-// the whole request with `type must be array, but is null`. Defaulting
-// nil→empty ([] / {}) and an empty type→"object" keeps the schema valid for
-// every downstream consumer.
-func normalizeSchema(typ string, properties map[string]any, required []string) map[string]any {
-	if typ == "" {
-		typ = "object"
-	}
-	if properties == nil {
-		properties = map[string]any{}
-	}
-	if required == nil {
-		required = []string{}
-	}
-	return map[string]any{
-		"type":       typ,
-		"properties": properties,
-		"required":   required,
-	}
 }
 
 // substitutePlaceholder returns a copy of in with every occurrence of
@@ -619,39 +579,16 @@ func (m *Manager) CallTool(ctx context.Context, serverID string, toolName string
 		return "", fmt.Errorf("mcp server %s not connected", serverID)
 	}
 
-	req := mcp.CallToolRequest{}
-	req.Params.Name = toolName
-	req.Params.Arguments = args
-
-	result, err := srv.Client.CallTool(ctx, req)
+	result, err := srv.client.callTool(ctx, toolName, args)
 	if err != nil {
 		return "", fmt.Errorf("mcp call %s: %w", toolName, err)
 	}
 
 	if result.IsError {
-		var msgs []string
-		for _, c := range result.Content {
-			if tc, ok := c.(mcp.TextContent); ok {
-				msgs = append(msgs, tc.Text)
-			}
-		}
-		return "", fmt.Errorf("mcp tool error: %v", msgs)
+		return "", fmt.Errorf("mcp tool error: %v", contentText(result.Content))
 	}
 
-	var texts []string
-	for _, c := range result.Content {
-		switch v := c.(type) {
-		case mcp.TextContent:
-			texts = append(texts, v.Text)
-		case mcp.ImageContent:
-			texts = append(texts, fmt.Sprintf("[image: %s]", v.Data))
-		default:
-			data, _ := json.Marshal(v)
-			texts = append(texts, string(data))
-		}
-	}
-
-	return joinStrings(texts), nil
+	return renderContent(result.Content), nil
 }
 
 // Close disconnects all MCP servers (project + thread scope).
@@ -671,19 +608,10 @@ func (m *Manager) Close() {
 // close tears down the MCP client and removes any per-server secret
 // temp dir. Safe to call when secretDir is empty.
 func (s *MCPServer) close() {
-	s.Client.Close()
+	if err := s.client.close(); err != nil {
+		log.Printf("mcp: closing %s: %v", s.Config.Name, err)
+	}
 	if s.secretDir != "" {
 		os.RemoveAll(s.secretDir)
 	}
-}
-
-func joinStrings(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += "\n"
-		}
-		result += s
-	}
-	return result
 }
