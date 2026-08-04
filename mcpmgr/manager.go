@@ -108,6 +108,61 @@ type Manager struct {
 	// absent); spawn() errors clearly if a config sets SecretRef in
 	// that mode. Set via NewManagerWithSecrets / SetSecretResolver.
 	secrets SecretResolver
+	// onNotify receives server→client notifications. Until this existed the
+	// manager was request/response only — CallTool and nothing else — so a
+	// server could observe something (a file changing under it, a merge
+	// conflict appearing) and have no way to say so until the next call.
+	// Consumers routed around it instead: dun made sub-agents in-process
+	// PURELY so a child could notify its parent.
+	//
+	// Nil is the safe default and stays the common case: a manager that
+	// registers no handler simply drops notifications, exactly as before.
+	onNotify func(Notification)
+}
+
+// Notification is one server→client message, flattened to what a consumer
+// acts on. The raw params are kept because MCP's notification methods are
+// open-ended and this package should not become a bottleneck on which ones
+// mean something.
+type Notification struct {
+	ServerID string
+	Method   string
+	Params   map[string]any
+}
+
+// Level is the notifications/message severity, when the method carries one.
+// Empty for methods that do not.
+func (n Notification) Level() string {
+	s, _ := n.Params["level"].(string)
+	return s
+}
+
+// Text renders the human-readable payload of a notifications/message, which
+// is where servers put anything they want a person or a model to read. `data`
+// is by spec any JSON value; a bare string is the common case and is returned
+// as-is rather than re-encoded with quotes around it.
+func (n Notification) Text() string {
+	switch v := n.Params["data"].(type) {
+	case string:
+		return v
+	case nil:
+		return ""
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+}
+
+// SetNotificationHandler registers the sink for server→client notifications.
+// Call before StartServer: handlers are attached at spawn, so a server
+// already running keeps whatever sink it was spawned with.
+func (m *Manager) SetNotificationHandler(fn func(Notification)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onNotify = fn
 }
 
 func NewManager() *Manager {
@@ -288,6 +343,24 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	}
 
 	mc := client.NewClient(tp)
+
+	// Server→client push. Registered before Start so nothing a server emits
+	// during initialization is missed. The handler runs on the client's read
+	// goroutine, so it hands off and returns rather than doing work here —
+	// blocking it would stall every response on this connection.
+	m.mu.RLock()
+	onNotify := m.onNotify
+	m.mu.RUnlock()
+	if onNotify != nil {
+		id := cfg.ID
+		mc.OnNotification(func(n mcp.JSONRPCNotification) {
+			onNotify(Notification{
+				ServerID: id,
+				Method:   n.Notification.Method,
+				Params:   n.Notification.Params.AdditionalFields,
+			})
+		})
+	}
 
 	// IMPORTANT: pass context.Background() to Start, NOT a timed-out
 	// derivative of ctx. mark3labs's stdio transport calls
