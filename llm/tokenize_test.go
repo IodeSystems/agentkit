@@ -2,6 +2,9 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -93,13 +96,25 @@ func TestCountTokens_AbsenceIsRememberedNotRetried(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := NewClient(ts.URL+"/v1", "", "m")
-	for i := 0; i < 5; i++ {
+	if _, ok := c.CountTokens(context.Background(), "x"); ok {
+		t.Fatal("reported a tokenizer that is not there")
+	}
+	// Whatever discovery cost, it is paid ONCE. Asserted as "does not grow"
+	// rather than against a fixed number, which was one-probe-per-candidate and
+	// therefore broke the moment a candidate was added — a true property
+	// reported as a regression.
+	afterFirst := calls
+	for i := 0; i < 4; i++ {
 		if _, ok := c.CountTokens(context.Background(), "x"); ok {
 			t.Fatal("reported a tokenizer that is not there")
 		}
 	}
-	if calls > 3 {
-		t.Fatalf("%d probe requests for 5 calls — absence is not being remembered", calls)
+	if calls != afterFirst {
+		t.Fatalf("probes grew %d -> %d across 5 calls — absence is not being remembered",
+			afterFirst, calls)
+	}
+	if afterFirst == 0 {
+		t.Fatal("no probe was made at all; the test proves nothing")
 	}
 }
 
@@ -144,5 +159,98 @@ func TestTokenizeCandidatesCoverTheKnownShapes(t *testing.T) {
 		if !slices.Contains(urls, want) {
 			t.Errorf("candidate %q missing from %v", want, urls)
 		}
+	}
+}
+
+// anthropicStub serves only Anthropic's count_tokens shape — every other
+// candidate 404s — and records the last body it was handed.
+func anthropicStub(t *testing.T, n int, seen *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages/count_tokens" {
+			http.Error(w, "no", http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var got map[string]any
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Errorf("unparseable request: %s", body)
+		}
+		*seen = got
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"input_tokens":%d}`, n)
+	}))
+}
+
+// CountPrompt must send Anthropic's OWN tool spelling. The two formats express
+// the same schema differently (`input_schema` vs `parameters`), and counting the
+// wrong spelling returns a plausible number for a prompt that was never sent.
+func TestCountPrompt_SendsAnthropicToolShape(t *testing.T) {
+	resetTokenizeCache()
+	var seen map[string]any
+	ts := anthropicStub(t, 551, &seen)
+	defer ts.Close()
+
+	var td ToolDef
+	td.Type = "function"
+	td.Function.Name = "search"
+	td.Function.Description = "search the corpus"
+	td.Function.Parameters = map[string]any{"type": "object"}
+
+	c := NewClient(ts.URL+"/v1", "", "claude-haiku-4-5")
+	n, ok := c.CountPrompt(context.Background(), "you are an agent", []ToolDef{td})
+	if !ok || n != 551 {
+		t.Fatalf("CountPrompt = %d, %v; want 551, true", n, ok)
+	}
+	if seen["system"] != "you are an agent" {
+		t.Errorf("system not sent: %v", seen["system"])
+	}
+	tools, _ := seen["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("want 1 tool, got %v", seen["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if _, ok := tool["input_schema"]; !ok {
+		t.Errorf("tool sent in OpenAI shape; Anthropic needs input_schema: %v", tool)
+	}
+	if _, ok := tool["parameters"]; ok {
+		t.Errorf("OpenAI's `parameters` leaked into an Anthropic request: %v", tool)
+	}
+}
+
+// An empty tool list must not send `tools` at all: an empty array still turns
+// the provider's tool-use preamble on, which measured ~497 tokens — so a prompt
+// that declares no tools would be charged for tooling it does not have.
+func TestCountPrompt_NoToolsSendsNoToolsKey(t *testing.T) {
+	resetTokenizeCache()
+	var seen map[string]any
+	ts := anthropicStub(t, 20, &seen)
+	defer ts.Close()
+
+	c := NewClient(ts.URL+"/v1", "", "claude-haiku-4-5")
+	if _, ok := c.CountPrompt(context.Background(), "you are an agent", nil); !ok {
+		t.Fatal("CountPrompt failed on a system-only prompt")
+	}
+	if _, present := seen["tools"]; present {
+		t.Errorf("sent a tools key for a prompt with no tools: %v", seen)
+	}
+}
+
+// A structured-only endpoint has no answer to "how many tokens is this string".
+// Reporting one would be a count of the whole envelope, which is not what the
+// caller asked about.
+func TestCountTokens_RefusesAStructuredOnlyEndpoint(t *testing.T) {
+	resetTokenizeCache()
+	var seen map[string]any
+	ts := anthropicStub(t, 551, &seen)
+	defer ts.Close()
+
+	c := NewClient(ts.URL+"/v1", "", "claude-haiku-4-5")
+	if n, ok := c.CountTokens(context.Background(), "hello world"); ok {
+		t.Errorf("raw-string count reported on a structured-only endpoint: %d", n)
+	}
+	// ...but the endpoint IS a counter, and CountPrompt must still work.
+	if _, ok := c.CountPrompt(context.Background(), "hello world", nil); !ok {
+		t.Error("CountPrompt refused an endpoint that answers count_tokens")
 	}
 }

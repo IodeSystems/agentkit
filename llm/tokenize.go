@@ -31,11 +31,17 @@ import (
 
 // tokenizeRoute is a discovered tokenizer: where it lives and which dialect it
 // speaks.
+// anthropic marks a route that counts a RENDERED PROMPT rather than a string:
+// system + tools + messages in, one number out, including the provider's own
+// tool-use preamble. Measured against Anthropic 2026-08-10, that preamble is
+// ~497 tokens the moment any tool is declared — which is why a structured
+// counter cannot be reached through a string-shaped one.
 type tokenizeRoute struct {
-	url     string
-	vllm    bool // vLLM wants {"model","prompt"} and answers {"count"}
-	checked bool
-	ok      bool
+	url       string
+	vllm      bool // vLLM wants {"model","prompt"} and answers {"count"}
+	anthropic bool // counts a rendered prompt; answers {"input_tokens"}
+	checked   bool
+	ok        bool
 }
 
 // CountTokens returns the exact number of tokens `text` becomes for this
@@ -49,6 +55,13 @@ type tokenizeRoute struct {
 func (c *Client) CountTokens(ctx context.Context, text string) (int, bool) {
 	r := c.tokenizeRoute(ctx)
 	if !r.ok {
+		return 0, false
+	}
+	// A structured-only endpoint cannot answer "how many tokens is this string".
+	// It can only price a whole rendered prompt, envelope included. Returning
+	// that number here would be a count of something the caller did not ask
+	// about, so this reports no raw-string tokenizer and points at CountPrompt.
+	if r.anthropic {
 		return 0, false
 	}
 	n, err := c.countAt(ctx, r, text)
@@ -72,7 +85,13 @@ func (c *Client) tokenizeRoute(ctx context.Context) *tokenizeRoute {
 	found := &tokenizeRoute{}
 	for _, cand := range c.tokenizeCandidates() {
 		if _, err := c.countAt(ctx, &cand, "probe"); err == nil {
-			found = &tokenizeRoute{url: cand.url, vllm: cand.vllm, checked: true, ok: true}
+			// Copy the CANDIDATE, don't rebuild it field by field. The rebuild
+			// silently dropped the dialect flag when one was added, so a
+			// discovered structured endpoint came back out of the cache looking
+			// like a string tokenizer and answered the wrong question.
+			hit := cand
+			hit.checked, hit.ok = true, true
+			found = &hit
 			break
 		}
 	}
@@ -96,11 +115,23 @@ func (c *Client) tokenizeCandidates() []tokenizeRoute {
 		{url: root + "/tokenize"},
 		{url: root + "/upstream/" + c.model + "/tokenize"},
 		{url: v1 + "/tokenize", vllm: true},
+		// Anthropic's own shape, reachable directly or through a proxy that
+		// forwards the path (corrallm mounts it outside admission). Last because
+		// it counts a different thing: a rendered prompt, not a string.
+		{url: v1 + "/messages/count_tokens", anthropic: true},
 	}
 }
 
+// probeMessages is the minimal `messages` an Anthropic count needs. Its cost is
+// constant, which is the property CountPrompt relies on: every count carries the
+// same envelope, so a DIFFERENCE between two counts cancels it exactly.
+var probeMessages = []map[string]any{{"role": "user", "content": "."}}
+
 func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (int, error) {
 	var payload map[string]any
+	if r.anthropic {
+		return c.countPromptAt(ctx, r, text, nil)
+	}
 	if r.vllm {
 		payload = map[string]any{"model": c.model, "prompt": text}
 	} else {
@@ -139,11 +170,15 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 	// cannot decide that a tokenizer exists. corrallm answers /tokenize and
 	// /props with its own index.html; only parsing the body tells them apart.
 	var out struct {
-		Tokens []json.RawMessage `json:"tokens"`
-		Count  *int              `json:"count"`
+		Tokens      []json.RawMessage `json:"tokens"`
+		Count       *int              `json:"count"`
+		InputTokens *int              `json:"input_tokens"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return 0, fmt.Errorf("llm: tokenize %s: not a tokenizer response", r.url)
+	}
+	if out.InputTokens != nil {
+		return *out.InputTokens, nil
 	}
 	if out.Count != nil {
 		return *out.Count, nil
@@ -205,4 +240,112 @@ func (c *Client) propsContext(ctx context.Context, url string) (int, error) {
 		return out.Defaults.NCtx, nil
 	}
 	return out.NCtx, nil
+}
+
+// CountPrompt returns the exact token count of a system prompt plus a set of
+// tool definitions, as this endpoint's model would actually see them, and
+// ok=false when the endpoint cannot count.
+//
+// This exists because the two kinds of endpoint count different things and the
+// difference is not a detail. llama.cpp and vLLM tokenize a STRING: hand them
+// text, get its tokens. Anthropic prices a RENDERED PROMPT — and the moment any
+// tool is declared it adds its own tool-use preamble, measured at ~497 tokens
+// on 2026-08-10 against a preamble-free baseline of 9:
+//
+//	no tools   9      1 tool   551      2 tools   596
+//
+// So on Anthropic the parts of a prompt are NOT independently countable and
+// summable: counting each MCP server's schemas alone charges that preamble once
+// per server. A caller wanting per-part costs has to take DIFFERENCES between
+// whole-prompt counts, which is what the constant envelope in probeMessages
+// makes exact.
+//
+// On a string tokenizer this falls back to counting the concatenation, so one
+// caller works against both and only the residual differs.
+func (c *Client) CountPrompt(ctx context.Context, system string, tools []ToolDef) (int, bool) {
+	r := c.tokenizeRoute(ctx)
+	if !r.ok {
+		return 0, false
+	}
+	if r.anthropic {
+		n, err := c.countPromptAt(ctx, r, system, tools)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	var b strings.Builder
+	b.WriteString(system)
+	for _, t := range tools {
+		raw, err := json.Marshal(t)
+		if err != nil {
+			// A schema that will not marshal cannot be sent either; skipping it
+			// undercounts by one tool rather than failing the whole measurement.
+			continue
+		}
+		b.Write(raw)
+	}
+	return c.CountTokens(ctx, b.String())
+}
+
+// countPromptAt posts Anthropic's count_tokens shape. Tools are sent only when
+// present: an empty `tools` array still turns the provider's tool-use preamble
+// on, so passing one unconditionally would put ~497 tokens into a measurement
+// of a prompt that declares no tools.
+func (c *Client) countPromptAt(ctx context.Context, r *tokenizeRoute, system string, tools []ToolDef) (int, error) {
+	payload := map[string]any{"model": c.model, "messages": probeMessages}
+	if system != "" {
+		payload["system"] = system
+	}
+	if len(tools) > 0 {
+		payload["tools"] = anthropicTools(tools)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("llm: count_tokens %s: status %d", r.url, resp.StatusCode)
+	}
+	var out struct {
+		InputTokens *int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out.InputTokens == nil {
+		// Same trap as /tokenize: a proxy with a UI answers 200 and HTML for an
+		// unknown path, so only the parsed body proves the route exists.
+		return 0, fmt.Errorf("llm: count_tokens %s: not a count response", r.url)
+	}
+	return *out.InputTokens, nil
+}
+
+// anthropicTools converts OpenAI-shaped tool definitions to Anthropic's, which
+// is what the count has to price — the two spell the same schema differently and
+// counting the wrong spelling is a plausible wrong number.
+func anthropicTools(tools []ToolDef) []map[string]any {
+	out := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, map[string]any{
+			"name":         t.Function.Name,
+			"description":  t.Function.Description,
+			"input_schema": t.Function.Parameters,
+		})
+	}
+	return out
 }
