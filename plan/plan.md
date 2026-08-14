@@ -752,6 +752,50 @@ final though.
   CLAUDE.md as invariant 0 — adding a `require` is a decision, not a
   convenience.
 
+### ✅ Slice M — reasoning budgets, mapped per provider (`llm/reasoning.go`)
+- **Why it is a library concern at all:** the two providers use different fields
+  and **neither rejects the other's**. Measured 2026-08-14 — llama.cpp b10380 and
+  Anthropic's OpenAI-compat endpoint were each sent the wrong field and each
+  answered **200 with a normal completion**. A misspelled `reasoning_budget`
+  behaves exactly like one that worked, so the mapping has to live where a typo
+  is a compile error.
+
+      llama.cpp   reasoning_budget_tokens: N  (+ reasoning_budget_message)
+      Anthropic   thinking: {type: "enabled", budget_tokens: N}
+
+- **Dialect is detected, not probed** (`anthropicDialect`), unlike
+  `tokenizeRoute`. There is nothing to probe for: both dialects share
+  `/v1/chat/completions` and both swallow the foreign field, so a probe returns
+  200 either way and learns nothing. Keyed on a `claude-*` model id or an
+  `api.anthropic.com` host — the same globs corrallm's passthrough uses.
+- **`AutoReasoningBudget` sizes from the real window**, using the two discovery
+  paths that already existed: `ContextWindow` (`/props`, or corrallm's
+  `/upstream/<model>/props`) and `CountPrompt`. Verified live against corrallm:
+  window **188160** → budget **122705** (65%).
+- **The 2/3 share is Qwen3.8's own ratio**, not a guess: its card recommends
+  262,144 reasoning against 131,072 final response. Those absolutes are quoted
+  "within the 1M context length" and do not survive a smaller window; the ratio
+  does, and that is the only part carried over.
+- **ok=false sends NO budget.** When the window or the prompt size cannot be
+  learned, an estimate would be worse than nothing — it inflates the budget, the
+  request overruns the context, and the failure surfaces on the request rather
+  than at the guess.
+- **`ReasoningBudgetMessage` is worth sending on every budgeted llama.cpp
+  request.** The cut is HARD: measured on Qwen3.8-27B the reasoning stopped
+  mid-word and the message was appended to the fragment. llama.cpp PR #25961
+  adds a soft ratio (warn at a fraction of the budget, wait for a newline) but
+  is a DRAFT and not upstream; until it merges the message is the only thing
+  that tells the model what happened.
+- **`EnableThinking` exists because the server flag is only a default.**
+  Qwen3.8 ships thinking ON; a deployment may launch with `--reasoning off`, and
+  llama.cpp reads `chat_template_kwargs.enable_thinking` off each request to
+  override it. Anthropic has no separate toggle — a budget IS the toggle — so
+  the field is unused on that dialect.
+- **Not verified:** whether Anthropic's compat layer honours the budget
+  *precisely*. Evidence that it honours it at all: the same message with
+  `thinking` set returned prompt_tokens 46 / completion 182 against 17 / 53
+  without it. Thinking content is not surfaced in the OpenAI response shape.
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).

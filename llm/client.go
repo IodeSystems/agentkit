@@ -993,13 +993,41 @@ type ChatOpts struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	RepeatPenalty    *float64
+
+	// Reasoning budget. See reasoning.go for the provider mapping — the two
+	// dialects use different fields and NEITHER rejects the other's, so a
+	// hand-written body cannot tell a working budget from a dropped one.
+	//
+	// Pointer for the same reason as the penalties: 0 is a meaningful value
+	// (llama.cpp reads it as "end reasoning immediately") and -1 means
+	// disabled, so a plain int could not express either without also forcing a
+	// choice on callers that have none.
+	ReasoningBudgetTokens *int
+
+	// ReasoningBudgetMessage is injected at the cut. Only llama.cpp has this;
+	// Anthropic ends thinking without saying so. Empty sends nothing.
+	ReasoningBudgetMessage string
+
+	// EnableThinking overrides the SERVER's default mode per request, via
+	// chat_template_kwargs. Needed because the server flag is only a default:
+	// Qwen3.8 ships thinking ON, a deployment may launch it with
+	// --reasoning off, and a caller that wants thinking has to ask for it.
+	//
+	// Meaningless to a template that does not read the kwarg, and unused on the
+	// Anthropic dialect, where a budget is itself the toggle.
+	EnableThinking *bool
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.
-func applySampling(body map[string]any, opts *ChatOpts) {
+//
+// A method rather than a free function because the reasoning knobs it forwards
+// are dialect-dependent, and the dialect is a property of the client (its model
+// and base URL), not of the options.
+func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 	if opts == nil {
 		return
 	}
+	c.applyReasoning(body, opts)
 	if opts.Temperature != nil {
 		body["temperature"] = *opts.Temperature
 	}
@@ -1060,7 +1088,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	if opts != nil && opts.ResponseFormat != nil {
 		body["response_format"] = opts.ResponseFormat
 	}
-	applySampling(body, opts)
+	c.applySampling(body, opts)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -1118,7 +1146,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
-	applySampling(body, opts)
+	c.applySampling(body, opts)
 
 	payload, err := json.Marshal(body)
 	if err != nil {

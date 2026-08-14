@@ -245,7 +245,7 @@ func TestChatStreamCutsALoopInToolArguments(t *testing.T) {
 func TestSamplingCarriesRepetitionControls(t *testing.T) {
 	f, p, r := 0.5, 0.2, 1.1
 	body := map[string]any{}
-	applySampling(body, &ChatOpts{FrequencyPenalty: &f, PresencePenalty: &p, RepeatPenalty: &r})
+	NewClient("http://x/v1", "", "m").applySampling(body, &ChatOpts{FrequencyPenalty: &f, PresencePenalty: &p, RepeatPenalty: &r})
 	for k, want := range map[string]float64{
 		"frequency_penalty": 0.5, "presence_penalty": 0.2, "repeat_penalty": 1.1,
 	} {
@@ -261,7 +261,7 @@ func TestSamplingCarriesRepetitionControls(t *testing.T) {
 	// Unset must stay absent — sending a 0 would silently DISABLE a penalty the
 	// server was configured with.
 	empty := map[string]any{}
-	applySampling(empty, &ChatOpts{})
+	NewClient("http://x/v1", "", "m").applySampling(empty, &ChatOpts{})
 	for _, k := range []string{"frequency_penalty", "presence_penalty", "repeat_penalty"} {
 		if _, ok := empty[k]; ok {
 			t.Errorf("%s was sent despite being unset", k)
