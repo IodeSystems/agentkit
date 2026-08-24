@@ -63,6 +63,22 @@ type Session struct {
 	// assistant(tool_calls) → tool(result), not as a disembodied Aside.
 	OnToolCalls func([]llm.ToolCall) []llm.ToolCall
 
+	// OnOverflow, if set, fires when the provider ended a round with
+	// finish_reason="length" — it ran out of room mid-response. The host decides
+	// what to say and whether to retry; see overflow.go for why the policy
+	// cannot live here.
+	//
+	// Nil means the previous behaviour: a cut tool call is still answered with
+	// an error result (the model can retry smaller), and a cut REPLY still ends
+	// the turn half-finished. The second of those is the one worth setting this
+	// for.
+	OnOverflow func(context.Context, Overflow) OverflowDecision
+
+	// MaxOverflowRetries bounds consecutive length-cut rounds in one Turn before
+	// the Turn fails with the evidence. 0 → 2. Negative → unbounded, which is
+	// only sane if OnOverflow sheds context on every pass.
+	MaxOverflowRetries int
+
 	// Estimate counts tokens for the Active-window figure. Nil → Default()
 	// (chars/4). Set to the same estimator the Shaper uses for consistency.
 	Estimate TokenEstimator
@@ -213,6 +229,11 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	if maxTurns <= 0 {
 		maxTurns = 100
 	}
+	maxOverTrips := s.MaxOverflowRetries
+	if maxOverTrips == 0 {
+		maxOverTrips = 2
+	}
+	overTrips := 0
 	maxRepTrips := s.MaxRepetitionRetries
 	if maxRepTrips == 0 {
 		maxRepTrips = 2
@@ -290,7 +311,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// LOD + tool-result truncation). The last build of the Turn wins.
 		result.Usage.Active = s.estimateTokens(messages)
 
-		resp, toolCalls, usage, rep, e := s.streamChat(ctx, messages)
+		resp, toolCalls, usage, rep, cut, e := s.streamChat(ctx, messages)
 		if e != nil {
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
@@ -393,6 +414,47 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// so a model that loops, recovers, and loops again much later is not
 		// killed for the sum.
 		repTrips = 0
+
+		if cut != nil {
+			// The provider ended this round for room. Ask the host what to do,
+			// append whatever it wants the model to read, and only then decide
+			// whether the round is worth re-running. See overflow.go.
+			overTrips++
+			cut.Attempt = overTrips
+			var dec OverflowDecision
+			if s.OnOverflow != nil {
+				dec = s.OnOverflow(ctx, *cut)
+			}
+			if dec.Note != "" {
+				if e := s.Store.Append(ctx, s.SessionID, Entry{
+					ID:        NewID(),
+					Kind:      KindNotification,
+					Tag:       OverflowTag,
+					Content:   dec.Note,
+					CreatedAt: now(),
+				}); e != nil {
+					return result, fmt.Errorf("agent: persist overflow notice: %w", e)
+				}
+			}
+			if maxOverTrips > 0 && overTrips > maxOverTrips {
+				// Past this the host is not shedding anything that helps, and
+				// another pass is the same wall at the same speed.
+				return result, fmt.Errorf(
+					"agent: the provider cut generation for room %d rounds in a row (last: %s); "+
+						"giving up rather than retrying into the same wall", overTrips, cut)
+			}
+			// A cut TOOL CALL already has a recovery path: it is persisted with
+			// a placeholder, answered with an error result, and the model sees
+			// both. Re-running the round on top of that would ask the same
+			// question twice, so fall through to the normal dispatch. A cut
+			// REPLY has no such path — without a retry the Turn ends on half a
+			// sentence — so that is the case Retry is consulted for.
+			if !cut.InToolCall() && dec.Retry {
+				continue
+			}
+		} else {
+			overTrips = 0
+		}
 
 		if len(toolCalls) == 0 {
 			// Idle. If new events arrived between the chat call and now, loop
@@ -603,7 +665,7 @@ func (s *Session) estimateTokens(msgs []llm.Message) int {
 // streamChat consumes the streaming response, accumulates content, collects
 // tool calls, captures token usage (when reported), and emits per-token
 // notifications.
-func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, err error) {
+func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, cut *Overflow, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("streamChat"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID).Set("n_messages", len(messages))
 	defer func() {
@@ -656,16 +718,21 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	}
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 	var content strings.Builder
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), toolCalls, usage, nil, fmt.Errorf("%s", chunk.Error)
+			return content.String(), toolCalls, usage, nil, nil, fmt.Errorf("%s", chunk.Error)
 		}
 		if chunk.StopReason == llm.StopReasonRepetition {
 			rep = chunk.Repetition
+		}
+		if chunk.StopReason == llm.StopReasonLength {
+			// The provider ran out of room. Recorded, not acted on: what to do
+			// depends on which ceiling was hit, and only the host knows that.
+			cut = &Overflow{TruncatedToolCalls: chunk.TruncatedToolCalls}
 		}
 		if chunk.Content != "" {
 			content.WriteString(chunk.Content)
@@ -690,15 +757,18 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 			break
 		}
 	}
+	if cut != nil && usage != nil {
+		cut.PromptTokens, cut.Generated = usage.PromptTokens, usage.CompletionTokens
+	}
 	if rep != nil {
 		// The stream was cut mid-generation, so anything still open is
 		// incomplete BY CONSTRUCTION — a heredoc block here would fail to parse
 		// and abort the Turn with a message about truncation, blaming the wrong
 		// cause. Hand back the prose and the finding; the caller answers it.
-		return content.String(), nil, usage, rep, nil
+		return content.String(), nil, usage, rep, cut, nil
 	}
 	if !heredoc {
-		return content.String(), toolCalls, usage, nil, nil
+		return content.String(), toolCalls, usage, nil, cut, nil
 	}
 	// The stop sequence consumes the terminator, so put it back before parsing.
 	// Deliberately explicit: the parser must keep REFUSING an unterminated block,
@@ -706,11 +776,25 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	raw := llm.CloseHeredoc(content.String())
 	calls, prose, perr := llm.ParseToolCalls(raw)
 	if perr != nil {
+		// A cut-off heredoc block is not a malformed call, it is the SAME cut
+		// the provider already reported — and returning it as an error aborts
+		// the Turn, blaming the parser for running out of room. When the round
+		// was length-cut, hand back the overflow instead and let the host's
+		// policy retry it; the parse error carries no information the cut does
+		// not already carry.
+		//
+		// The native transport names the truncated calls; heredoc cannot, since
+		// the block never got far enough to be a call. Naming the shape is
+		// enough for InToolCall, which is all the distinction is used for.
+		if cut != nil {
+			cut.TruncatedToolCalls = []string{"unterminated heredoc block"}
+			return prose, nil, usage, nil, cut, nil
+		}
 		// A malformed or cut-off call is reported, not silently dropped. The
 		// caller answers it with a tool result so the model can retry.
-		return prose, nil, usage, nil, perr
+		return prose, nil, usage, nil, nil, perr
 	}
-	return prose, calls, usage, nil, nil
+	return prose, calls, usage, nil, cut, nil
 }
 
 // entryUsage projects a provider usage report onto the per-entry record.

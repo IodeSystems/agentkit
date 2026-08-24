@@ -130,3 +130,99 @@ func TestCleanFinishWithTruncatedArgumentsIsEmittedForTheCallerToRefuse(t *testi
 		t.Error("fixture should be unparseable")
 	}
 }
+
+// The same clean finish, read for the OTHER fact it carries. Emitting the call
+// lets the model retry smaller; it does not tell anyone WHY the call was cut,
+// and "retry smaller" against a window that is already full is the loop this
+// reports to break.
+//
+// Measured, yscr 2026-08-24: a tool call cut after 1278 characters of arguments
+// on a 188,160-token window with no max_tokens sent, retried, and cut again at
+// the same place. Nothing in the loop knew a wall existed.
+func TestLengthFinishIsReportedAsAStopReason(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"exec","arguments":"{\"command\":\"python3 - <<"}}]}}]}`,
+		`data: {"choices":[{"finish_reason":"length","index":0,"delta":{}}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	c := &Client{}
+	ch := make(chan StreamChunk, 16)
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+
+	// The FIRST Done chunk: finish_reason and [DONE] each produce one, and only
+	// the first carries what the provider said. A consumer reads the stream, not
+	// the last chunk of it — agent.Session latches the reason as it goes by.
+	var done *StreamChunk
+	for chunk := range ch {
+		if chunk.Done && done == nil {
+			d := chunk
+			done = &d
+		}
+	}
+	if done == nil {
+		t.Fatal("no Done chunk")
+	}
+	if done.StopReason != StopReasonLength {
+		t.Errorf("StopReason = %q, want %q", done.StopReason, StopReasonLength)
+	}
+	if got := done.TruncatedToolCalls; len(got) != 1 || got[0] != "exec" {
+		t.Errorf("TruncatedToolCalls = %v, want [exec] — the caller distinguishes a cut CALL "+
+			"(already answered by an error result) from a cut REPLY (answered by nothing)", got)
+	}
+}
+
+// A cut in PROSE names no tool calls. That emptiness is the signal a consumer
+// acts on: without a retry the turn ends on half a sentence, and nothing else in
+// the loop would notice.
+func TestLengthFinishInProseNamesNoToolCalls(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"Here is the plan: first we"}}]}`,
+		`data: {"choices":[{"finish_reason":"length","index":0,"delta":{}}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	c := &Client{}
+	ch := make(chan StreamChunk, 16)
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+
+	// The FIRST Done chunk: finish_reason and [DONE] each produce one, and only
+	// the first carries what the provider said. A consumer reads the stream, not
+	// the last chunk of it — agent.Session latches the reason as it goes by.
+	var done *StreamChunk
+	for chunk := range ch {
+		if chunk.Done && done == nil {
+			d := chunk
+			done = &d
+		}
+	}
+	if done == nil || done.StopReason != StopReasonLength {
+		t.Fatalf("want a Done chunk reporting length, got %+v", done)
+	}
+	if len(done.TruncatedToolCalls) != 0 {
+		t.Errorf("a prose cut must name no calls, got %v", done.TruncatedToolCalls)
+	}
+}
+
+// A normal completion reports nothing, so every consumer that ignores StopReason
+// is unaffected.
+func TestNormalFinishReportsNoStopReason(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"finish_reason":null,"index":0,"delta":{"content":"done"}}]}`,
+		`data: {"choices":[{"finish_reason":"stop","index":0,"delta":{}}]}`,
+		`data: [DONE]`,
+		"",
+	}, "\n\n")
+
+	c := &Client{}
+	ch := make(chan StreamChunk, 16)
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+
+	for chunk := range ch {
+		if chunk.Done && chunk.StopReason != "" {
+			t.Errorf("StopReason = %q on a clean stop; want empty", chunk.StopReason)
+		}
+	}
+}

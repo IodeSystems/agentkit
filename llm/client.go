@@ -212,8 +212,16 @@ type StreamChunk struct {
 
 	// StopReason names a non-model reason the stream ended — set on the Done
 	// chunk. Empty on a normal completion, so consumers that ignore it are
-	// unaffected. Today the only value is StopReasonRepetition.
+	// unaffected. StopReasonRepetition (this client cut a loop) and
+	// StopReasonLength (the provider ran out of room) are the values.
 	StopReason StopReason
+
+	// TruncatedToolCalls names the calls whose arguments the cut left
+	// unparseable, when StopReason is StopReasonLength. Empty when the cut
+	// landed in prose — which is the distinction a consumer needs, because a
+	// truncated CALL already gets an error result to answer it and a truncated
+	// REPLY gets nothing at all.
+	TruncatedToolCalls []string
 
 	// Repetition describes the degenerate loop that was cut, when StopReason is
 	// StopReasonRepetition. It carries what to log, what to tell the model, and
@@ -329,6 +337,17 @@ type Client struct {
 	// attempt cap and the budget are two different guards, and for batch work the
 	// budget is the one that should bind.
 	Retry5xxAttempts int
+
+	// TurnRetryBudget is the wall-clock budget for a CALLER's outer, turn-scope
+	// retry (a caller that re-runs the whole turn after a mid-stream death —
+	// see agentkit/agent or dun). 0 means unset: the caller falls back to this
+	// client's request-scope RetryBudget. To DISABLE the caller's turn retry,
+	// set DisableTurnRetry, because "0" here means "no opinion".
+	TurnRetryBudget time.Duration
+
+	// DisableTurnRetry tells a turn-scope caller not to retry at all: a
+	// mid-stream death then fails the turn immediately.
+	DisableTurnRetry bool
 
 	// Repetition configures degenerate-loop detection on streamed output. The
 	// zero value is ON with defaults; set Repetition.Off to disable. See
@@ -1260,7 +1279,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	// by the context window or a token cap terminates cleanly — measured
 	// finish_reason="length" WITH [DONE], carrying 450 chars of unterminated
 	// JSON. So the log below fires on every path, not just an abrupt end.
-	flushTools := func(reason string) {
+	flushTools := func(reason string) (truncated []string) {
 		for _, idx := range toolOrder {
 			tc := toolBuf[idx]
 			if tc == nil {
@@ -1272,6 +1291,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				tc.Type = "function"
 			}
 			if !json.Valid([]byte(tc.Function.Arguments)) {
+				truncated = append(truncated, tc.Function.Name)
 				why := "the stream ended before they were complete"
 				if reason != "" {
 					why = "generation stopped early (finish_reason=" + reason + ")"
@@ -1286,6 +1306,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		}
 		toolBuf = map[int]*ToolCall{}
 		toolOrder = nil
+		return truncated
 	}
 
 	for scanner.Scan() {
@@ -1300,7 +1321,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		events++
 		if data == "[DONE]" {
 			sawDone = true
-			flushTools("")
+			_ = flushTools("")
 			ch <- StreamChunk{Done: true}
 			return
 		}
@@ -1419,8 +1440,16 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// for "stop" with no tool calls accumulated, just done.
 		if choice.FinishReason != "" {
 			sawFinish = true
-			flushTools(choice.FinishReason)
+			truncated := flushTools(choice.FinishReason)
 			done := StreamChunk{Done: true}
+			// "length" is the provider saying it ran out of room. Reported on
+			// the Done chunk rather than swallowed, because the caller is the
+			// only party that knows which ceiling was hit — the max_tokens it
+			// sent, or the window. See StopReasonLength.
+			if choice.FinishReason == "length" {
+				done.StopReason = StopReasonLength
+				done.TruncatedToolCalls = truncated
+			}
 			if event.Usage != nil {
 				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 				done.Usage = event.Usage

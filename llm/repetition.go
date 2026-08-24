@@ -33,6 +33,23 @@ type StopReason string
 // what follows would have been more copies of the same bytes.
 const StopReasonRepetition StopReason = "repetition"
 
+// StopReasonLength means the PROVIDER ended the generation because it ran out of
+// room: finish_reason="length". Not a transport fault and not a model decision —
+// the response hit a ceiling, either a max_tokens the caller sent or, when none
+// was sent, the context window itself.
+//
+// It is reported rather than handled here because the transport cannot tell
+// those two apart, and the remedy differs: a cap the caller chose is raised or
+// the reply is continued; a window that filled has to be SHED before anything
+// else is tried. Only the caller knows which number it sent.
+//
+// The failure it exists to make visible: with no max_tokens set, llama.cpp's
+// n_predict defaults to -1, so generation runs until prompt + output fills the
+// slot. Measured on a 188,160-token window — a tool call cut off after 1278
+// characters of arguments, the model retried, and the retry hit the same wall,
+// because nothing in the loop knew the wall was there.
+const StopReasonLength StopReason = "length"
+
 // RepetitionInfo describes the loop that was cut: enough to log it, to tell the
 // model what it did, and to trim the redundant copies before they are persisted
 // into the next context (which would otherwise TEACH the loop).
