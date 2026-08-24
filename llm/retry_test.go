@@ -61,7 +61,7 @@ func TestPostChatWithRetry_RetriesOn429(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestPostChatWithRetry_KeepsRetryingUntilCtx(t *testing.T) {
 	c := NewClient(srv.URL, "", "m")
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	_, err := c.postChatWithRetry(ctx, []byte(`{}`), "test")
+	_, err := c.postChatWithRetry(ctx, []byte(`{}`), callIdent{traceID: "test"})
 	if err == nil {
 		t.Fatal("postChatWithRetry: nil error after ctx timeout; want ctx error")
 	}
@@ -133,7 +133,7 @@ func TestPostChatWithRetry_RespectsRetryAfter(t *testing.T) {
 
 	c := NewClient(srv.URL, "", "m")
 	start := time.Now()
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
@@ -170,7 +170,7 @@ func TestPostChatWithRetry_RespectsRetryAfterCap(t *testing.T) {
 
 	c := NewClient(srv.URL, "", "m")
 	start := time.Now()
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
@@ -245,7 +245,7 @@ func TestPostChatWithRetry_RespectsBodyRetryAfter(t *testing.T) {
 
 	c := NewClient(srv.URL, "", "m")
 	start := time.Now()
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
@@ -278,7 +278,7 @@ func TestPostChatWithRetry_GivesUpAfterRetryBudget(t *testing.T) {
 	// be what stops it.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := c.postChatWithRetry(ctx, []byte(`{}`), "test")
+	_, err := c.postChatWithRetry(ctx, []byte(`{}`), callIdent{traceID: "test"})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -309,7 +309,7 @@ func TestPostChatWithRetry_SendsAPIKeyAndTrace(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "sk-aw3", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "thread-abc")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "thread-abc"})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestPostChatWithRetry_OmitsTraceWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestPostChatWithRetry_CtxCancelMidBackoff(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.postChatWithRetry(ctx, []byte(`{}`), "test")
+		_, err := c.postChatWithRetry(ctx, []byte(`{}`), callIdent{traceID: "test"})
 		done <- err
 	}()
 
@@ -395,7 +395,7 @@ func TestPostChatWithRetry_4xxPassesThrough(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestPostChatWithRetry_5xx_RetriesThenRecovers(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestPostChatWithRetry_5xx_GivesUpAfterMaxAttempts(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	_, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	_, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	if err == nil {
 		t.Fatal("postChatWithRetry: nil error after sustained 5xx; want error")
 	}
@@ -497,7 +497,7 @@ func TestPostChatWithRetry_429_DoesNotCountAgainst5xxCap(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "test")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestPostWithRetry_RidesOutServerRestart(t *testing.T) {
 	}()
 
 	c := NewClient("http://"+addr, "", "m")
-	resp, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), "")
+	resp, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), callIdent{})
 	<-restarted
 	if err != nil {
 		t.Fatalf("want the call to ride out the restart, got %v", err)
@@ -592,7 +592,7 @@ func TestPostWithRetry_TransportGivesUpAtBudget(t *testing.T) {
 	c.RetryBudget = 80 * time.Millisecond
 
 	start := time.Now()
-	_, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), "")
+	_, err := c.postWithRetry(context.Background(), "http://"+addr, []byte(`{}`), callIdent{})
 	if err == nil {
 		t.Fatal("want an error once the budget is spent")
 	}
@@ -624,7 +624,7 @@ func TestPostWithRetry_TransportHonorsCtxCancel(t *testing.T) {
 	c.RetryBudget = time.Hour // budget must NOT be what stops this
 
 	start := time.Now()
-	_, err := c.postWithRetry(ctx, "http://"+addr, []byte(`{}`), "")
+	_, err := c.postWithRetry(ctx, "http://"+addr, []byte(`{}`), callIdent{})
 	if err == nil {
 		t.Fatal("want an error on cancellation")
 	}
@@ -641,7 +641,7 @@ func TestPostWithRetry_DoesNotRetryConfigFaults(t *testing.T) {
 	c.RetryBudget = time.Hour
 
 	start := time.Now()
-	_, err := c.postWithRetry(context.Background(), "gopher://nope", []byte(`{}`), "")
+	_, err := c.postWithRetry(context.Background(), "gopher://nope", []byte(`{}`), callIdent{})
 	if err == nil {
 		t.Fatal("want an error")
 	}

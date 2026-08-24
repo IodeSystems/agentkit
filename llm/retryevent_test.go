@@ -35,7 +35,7 @@ func TestOnRetry_429ThenRecovered(t *testing.T) {
 	var evs []RetryEvent
 	c := NewClient(srv.URL, "", "m")
 	c.OnRetry = func(ev RetryEvent) { evs = append(evs, ev) }
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestOnRetry_429CarriesQueueDetail(t *testing.T) {
 	var evs []RetryEvent
 	c := NewClient(srv.URL, "", "m")
 	c.OnRetry = func(ev RetryEvent) { evs = append(evs, ev) }
-	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), "")
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
 	if err != nil {
 		t.Fatalf("postChatWithRetry: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestOnRetry_5xxCarriesServerMessage(t *testing.T) {
 	c := NewClient(srv.URL, "", "m")
 	c.Retry5xxAttempts = 2
 	c.OnRetry = func(ev RetryEvent) { evs = append(evs, ev) }
-	if _, err := c.postChatWithRetry(context.Background(), []byte(`{}`), ""); err == nil {
+	if _, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{}); err == nil {
 		t.Fatal("postChatWithRetry: want error after the 5xx cap")
 	}
 	if len(evs) == 0 {
@@ -197,7 +197,7 @@ func TestOnRetry_TransportDown(t *testing.T) {
 			cancel() // seen enough; don't sit out the whole budget
 		}
 	}
-	_, _ = c.postChatWithRetry(ctx, []byte(`{}`), "")
+	_, _ = c.postChatWithRetry(ctx, []byte(`{}`), callIdent{})
 	cancel()
 
 	if len(evs) < 2 {
@@ -224,7 +224,7 @@ func TestOnRetry_NoHookNoPanic(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL, "", "m")
 	c.Retry5xxAttempts = 1
-	if _, err := c.postChatWithRetry(context.Background(), []byte(`{}`), ""); err == nil {
+	if _, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{}); err == nil {
 		t.Fatal("want error")
 	}
 }

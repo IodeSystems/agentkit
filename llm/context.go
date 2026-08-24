@@ -75,7 +75,7 @@ func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
 			"max_tokens": 1,
 			"stream":     false,
 		})
-		resp, err := c.postWithRetry(ctx, c.chatURL(), body, "")
+		resp, err := c.postWithRetry(ctx, c.chatURL(), body, callIdent{})
 		if err != nil {
 			// postWithRetry recognises an over-large request itself and returns
 			// early rather than retrying bytes that cannot change. That is the

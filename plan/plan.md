@@ -898,6 +898,32 @@ Status re-checked by grepping autowork3, not assumed:
   walk dun for places it reaches AROUND the contract rather than wrapping it,
   because those mark the contract being wrong. Not yet done.
 
+### ✅ Slice N — fair-share tickets: a retry that is the same caller (`llm/backpressure.go`, `llm/client.go`)
+
+- **The problem is on the server's side of the wire, but only the client can fix
+  it.** corrallm cannot tell a caller returning for the fourth time from one
+  arriving for the first, so on a one-slot backend the returning caller starves:
+  every retry is outranked by somebody's first attempt. Measured on the live box
+  before this landed — **dun 175 queue-timeouts in 7 days, yscr 157**, all
+  against `maxConcurrent: 1`.
+- **`Backpressure.Ticket`** reads the id corrallm mints on a 429 (header
+  `X-Corrallm-Ticket` wins over `error.ticket`; an intermediary can rewrite one
+  and not the other). `postWithRetry` echoes it as `X-Corrallm-Request-Id` on
+  every later attempt, and never clears it once set: a 429 that omits it must
+  not silently turn this caller back into a stranger.
+- **`ChatOpts.RequestID`** seeds that from OUTSIDE the loop, which is the case
+  the echo alone misses: a turn-scope retry (host re-runs the whole turn after a
+  mid-stream death) builds a fresh `postWithRetry` and would arrive as a
+  stranger having forfeited the waiting it already did. `callIdent` carries it
+  beside `TraceID` so two optional strings cannot be swapped positionally.
+- **Pass back the SERVER's ticket, not an id of your own.** corrallm signs what
+  it mints and grants queue age only to those; an arbitrary id groups its log —
+  worth having — but earns no priority, since otherwise priority would be a
+  header anyone can write. Hosts learn it from `RetryEvent.BP.Ticket`.
+- Nothing is required of a server that does not issue tickets: the header is
+  only sent once one arrives, so a plain OpenAI endpoint never sees it. No new
+  dependency; one field on `Backpressure`, one on `ChatOpts`.
+
 ## Decisions / conventions
 - Module path `github.com/iodesystems/agentkit` is FINAL.
 - `llm` + `mcpmgr` MUST stay zero-internal-dep (verified via `go list -deps`).

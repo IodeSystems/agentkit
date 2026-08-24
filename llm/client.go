@@ -444,7 +444,7 @@ func (c *Client) Embed(ctx context.Context, model string, input []string) ([][]f
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal embed: %w", err)
 	}
-	resp, err := c.postWithRetry(ctx, c.embedURL(), payload, "")
+	resp, err := c.postWithRetry(ctx, c.embedURL(), payload, callIdent{})
 	if err != nil {
 		return nil, err
 	}
@@ -592,24 +592,35 @@ var retry5xxMaxAttempts = 5
 // every consumer wants the same recovery (wait and retry, give up on
 // ctx cancel, RetryBudget exhaustion, or repeated 5xx). Pushing this
 // into the harness would duplicate the loop in every role.
-func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, traceID string) (*http.Response, error) {
-	return c.postWithRetry(ctx, c.chatURL(), payload, traceID)
+func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, ident callIdent) (*http.Response, error) {
+	return c.postWithRetry(ctx, c.chatURL(), payload, ident)
+}
+
+// callIdent is who this call says it is: a thread (TraceID) and an attempt
+// (RequestID). Passed as one value rather than two bare strings so a call site
+// cannot silently swap them — they are both optional and both strings, which is
+// exactly the pair positional arguments get wrong.
+type callIdent struct {
+	traceID   string
+	requestID string
 }
 
 // postWithRetry POSTs payload to url with the same auth headers and 429/5xx
 // retry policy as the chat path — shared by Chat/ChatStream and Embed so every
 // endpoint honors the fair-share backpressure + retry budget identically.
-func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, traceID string) (*http.Response, error) {
+func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, ident callIdent) (*http.Response, error) {
 	backoff := retryInitialBackoff
 	fiveXXAttempts := 0
 	budget := c.retryBudget()
 	start := time.Now()
 	deadline := start.Add(budget)
 	// ticket identifies this ATTEMPT to a fair-share proxy across every
-	// rejection it takes. Empty until the server issues one on a 429; from then
-	// on every retry carries it, which is what makes the retries one caller
-	// waiting rather than a stream of strangers. See Backpressure.Ticket.
-	var ticket string
+	// rejection it takes. Seeded from the caller (ChatOpts.RequestID) when this
+	// call CONTINUES an earlier attempt, otherwise empty until the server issues
+	// one on a 429; from then on every retry carries it, which is what makes the
+	// retries one caller waiting rather than a stream of strangers. See
+	// Backpressure.Ticket.
+	ticket := ident.requestID
 	for attempt := 0; ; attempt++ {
 		// Cheap ctx check before each attempt so a cancellation that
 		// arrived between the last sleep and now short-circuits
@@ -625,8 +636,8 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		// X-Trace-Id (thread id, optional) lets the server logs attribute
 		// requests back to an autowork3 thread for debugging. Skipped when
 		// empty so an ad-hoc probe doesn't emit a header with no value.
-		if traceID != "" {
-			req.Header.Set("X-Trace-Id", traceID)
+		if ident.traceID != "" {
+			req.Header.Set("X-Trace-Id", ident.traceID)
 		}
 		// The API key IS autowork3's scheduling identity to the llama-swap
 		// fork: it maps the key to a priority. Configure the key on the
@@ -978,8 +989,29 @@ func sleepOrCancel(ctx context.Context, sleep time.Duration) bool {
 //
 // Nil opts behaves as the default.
 type ChatOpts struct {
-	ToolChoice     string
-	TraceID        string
+	ToolChoice string
+	TraceID    string
+	// RequestID identifies this ATTEMPT to a fair-share proxy, and is what lets
+	// a retry keep the place in line the previous attempt earned.
+	//
+	// Distinct from TraceID, which says WHICH THREAD this belongs to and lives
+	// for the life of a conversation. A request id names one attempt to get one
+	// answer, and its whole purpose is to be reused across the retries of that
+	// attempt — including retries this client cannot see.
+	//
+	// That is the case it exists for. postWithRetry already carries the ticket
+	// across its own 429 retries, but a TURN-SCOPE retry (a host re-running the
+	// whole turn after a mid-stream death — see TurnRetryBudget) starts a fresh
+	// loop, and the caller arrives as a stranger having forfeited the waiting it
+	// already did. Setting this from the ticket the previous attempt was given
+	// (RetryEvent.BP.Ticket) makes the new call the same customer.
+	//
+	// PASS BACK THE SERVER'S TICKET, not an id of your own. corrallm signs the
+	// ones it mints and grants queue age only to those; an arbitrary id still
+	// groups the attempts in its log — which is worth having — but earns no
+	// priority, because otherwise priority would be a header anyone can write.
+	// Empty means "no id": the server mints one if it turns us away.
+	RequestID      string
 	Grammar        string
 	ResponseFormat any
 
@@ -1131,15 +1163,15 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		return nil, fmt.Errorf("llm: marshal: %w", err)
 	}
 
-	traceID := ""
+	var ident callIdent
 	if opts != nil {
-		traceID = opts.TraceID
+		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
 	}
 	// Measured from BEFORE the request so latency includes retries, queueing and
 	// a cold model load — the parts that make a call slow are exactly the parts
 	// a server-side number would omit.
 	callStart := time.Now()
-	resp, err := c.postChatWithRetry(ctx, payload, traceID)
+	resp, err := c.postChatWithRetry(ctx, payload, ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1191,7 +1223,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 
 	// Chat is the non-streaming path; today no caller passes a trace
 	// id here, so X-Trace-Id stays unset.
-	resp, err := c.postChatWithRetry(ctx, payload, "")
+	resp, err := c.postChatWithRetry(ctx, payload, callIdent{})
 	if err != nil {
 		return "", nil, err
 	}
