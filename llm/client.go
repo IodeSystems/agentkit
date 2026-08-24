@@ -586,6 +586,11 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 	budget := c.retryBudget()
 	start := time.Now()
 	deadline := start.Add(budget)
+	// ticket identifies this ATTEMPT to a fair-share proxy across every
+	// rejection it takes. Empty until the server issues one on a 429; from then
+	// on every retry carries it, which is what makes the retries one caller
+	// waiting rather than a stream of strangers. See Backpressure.Ticket.
+	var ticket string
 	for attempt := 0; ; attempt++ {
 		// Cheap ctx check before each attempt so a cancellation that
 		// arrived between the last sleep and now short-circuits
@@ -610,6 +615,11 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		// priority.
 		if c.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		// Echo the ticket the server gave us when it turned this same request
+		// away. A server that does not issue them never sees this header.
+		if ticket != "" {
+			req.Header.Set("X-Corrallm-Request-Id", ticket)
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -689,6 +699,13 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if asked {
 				sleep = bp.RetryAfter
 			}
+			// Keep the ticket for the next attempt. Never cleared once set: a
+			// later 429 that omits it (a different proxy in the path, a
+			// restart) must not silently turn this caller back into a stranger
+			// and forfeit the waiting it has already done.
+			if bp.Ticket != "" {
+				ticket = bp.Ticket
+			}
 			// Additive jitter — the herd-breaker. Applied to the server's own
 			// Retry-After too, because that is where the lockstep actually comes
 			// from: every caller rejected in one moment is handed the identical
@@ -705,7 +722,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					budget, time.Since(start).Round(time.Second))
 			}
 			c.emitRetry(RetryEvent{Kind: Retry429, Attempt: attempt + 1, Status: status,
-				Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
+				Body:  strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
 				Delay: sleep, Elapsed: time.Since(start), Budget: budget,
 				BP: &bp, ServerAsked: asked})
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
@@ -792,7 +809,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 					budget, time.Since(start).Round(time.Second), status)
 			}
 			c.emitRetry(RetryEvent{Kind: Retry5xx, Attempt: attempt + 1, Status: status,
-				Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
+				Body:  strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
 				Delay: sleep, Elapsed: time.Since(start), Budget: budget,
 				Attempts5xx: fiveXXAttempts, Max5xx: c.retry5xxAttempts(), ServerAsked: serverAsked})
 			log.Printf("llm: upstream returned %d (5xx attempt %d/%d); retrying in %s",

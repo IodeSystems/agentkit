@@ -33,6 +33,16 @@ type Backpressure struct {
 	Capacity, InFlight, Waiting int
 	// Message is the server's human-readable line, when it sent one.
 	Message string
+	// Ticket identifies THIS ATTEMPT to the server, across every rejection it
+	// takes. corrallm mints one when it turns away a request that carried no id
+	// of its own, and hands it back on the 429; echoing it on the retry is what
+	// lets the server tell a caller returning for the fourth time from a caller
+	// arriving for the first — which is the difference between waiting your turn
+	// and starving behind an endless supply of newcomers.
+	//
+	// The client echoes this automatically (see postWithRetry). Empty for a
+	// server that does not issue tickets.
+	Ticket string
 }
 
 // Queued reports whether the server described a queue we are standing in, i.e.
@@ -67,6 +77,8 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 	bp.InFlight = headerInt(h, "X-RateLimit-InFlight")
 	bp.Waiting = headerInt(h, "X-RateLimit-Waiting")
 
+	bp.Ticket = strings.TrimSpace(h.Get("X-Corrallm-Ticket"))
+
 	var parsed struct {
 		RetryAfter int `json:"retry_after"`
 		Error      struct {
@@ -76,6 +88,7 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 			Capacity   int    `json:"capacity"`
 			InFlight   int    `json:"in_flight"`
 			Waiting    int    `json:"waiting"`
+			Ticket     string `json:"ticket"`
 		} `json:"error"`
 	}
 	if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {
@@ -89,6 +102,9 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 		}
 		if bp.Waiting == 0 {
 			bp.Waiting = parsed.Error.Waiting
+		}
+		if bp.Ticket == "" {
+			bp.Ticket = strings.TrimSpace(parsed.Error.Ticket)
 		}
 	}
 	d, ok := retryAfterFrom(h, body)
