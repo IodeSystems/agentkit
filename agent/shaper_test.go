@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -333,5 +334,70 @@ func TestBuild_RealBudgetStillCompacts(t *testing.T) {
 	}
 	if markerCount(store) == 0 {
 		t.Error("a genuinely over-budget session should still compact")
+	}
+}
+
+// summarizeErr must carry the turn's budget cause out so the jsonl says WHY the
+// fold died, not just "context canceled". A named cause (errTurnBudget in
+// dun) reads as the real reason; a bare context.Canceled cause (ctrl-C, or the
+// parent going down) says so instead of masquerading as a transient fault.
+func TestSummarizeErr_CarriesCause(t *testing.T) {
+	// Named cause: the budget clock set it.
+	causeErr := fmt.Errorf("the turn ran past its 30m budget")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	cancel(causeErr)
+	got := summarizeErr(ctx, ctx.Err())
+	if !strings.Contains(got.Error(), "compaction aborted") {
+		t.Errorf("want 'compaction aborted', got %q", got)
+	}
+	if !strings.Contains(got.Error(), "30m budget") {
+		t.Errorf("want the cause named, got %q", got)
+	}
+
+	// Bare Canceled cause: says it's ctrl-C / parent-down, not a fault.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	cancel2()
+	got2 := summarizeErr(ctx2, ctx2.Err())
+	if !strings.Contains(got2.Error(), "no turn-budget cause") {
+		t.Errorf("want 'no turn-budget cause', got %q", got2)
+	}
+
+	// A non-cancel error is returned unchanged (a real 500 keeps its message).
+	ctx3, cancel3 := context.WithCancel(context.Background())
+	defer cancel3()
+	plain := fmt.Errorf("upstream 500")
+	if got3 := summarizeErr(ctx3, plain); got3 != plain {
+		t.Errorf("non-cancel error must pass through unchanged, got %v", got3)
+	}
+}
+
+// The Pause hook must be called around the compaction LLM call and resumed
+// afterwards, so a slow endpoint + a long fold cannot burn the turn's budget.
+func TestSummarize_PausesClock(t *testing.T) {
+	store := &memStore{}
+	kinds := []EntryKind{KindUser, KindAssistant, KindToolCall, KindToolResult, KindAssistant}
+	for i, k := range kinds {
+		store.entries = append(store.entries, Entry{
+			ID: string(rune('a' + i)), Kind: k, Content: "event content here", CreatedAt: int64(i + 1),
+		})
+	}
+	store.entries = append(store.entries, Entry{ID: "z", Kind: KindUser, Content: "recap?", CreatedAt: 100})
+
+	var paused, resumed bool
+	sh := newCompactShaper(store)
+	sh.Pause = func() func() {
+		paused = true
+		return func() { resumed = true }
+	}
+	if _, _, err := sh.Compact(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if !paused {
+		t.Error("Pause was not called around the compaction LLM call")
+	}
+	if !resumed {
+		t.Error("the resume func was not called after the compaction")
 	}
 }

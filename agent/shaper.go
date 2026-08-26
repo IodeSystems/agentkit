@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -102,6 +103,15 @@ type Shaper struct {
 	// is "<prefix>.Shaper.Build". A host sets this to keep its labels stable.
 	SpanPrefix string
 	Tracer     Tracer // optional; nil = no spans
+	// Pause, if set, is called before the compaction LLM call and returns the
+	// resume func. A host uses it to STOP the turn's budget clock for the
+	// duration of the summarize call: compaction is bookkeeping, not model
+	// work, so it must not burn the turn's time budget. Without this, a slow
+	// endpoint + a long compaction can run the turn past its budget MID-fold,
+	// cancelling the compaction worker with a bare "context canceled" that
+	// reads as a crash. nil = no pause (the call runs on the caller's context
+	// and budget as-is).
+	Pause func() (resume func())
 }
 
 func (sh *Shaper) spanName(n string) string {
@@ -368,6 +378,25 @@ func ifThen(cond bool, then string) string {
 	return ""
 }
 
+// summarizeErr wraps a compaction failure so the jsonl says WHY the fold died,
+// not just "context canceled". A cancelled context is inherited from the turn
+// clock, so the same two words cover a real budget expiry, a deferred Stop()
+// from a turn that already ended, and a user ctrl-C — all three read as an
+// unexplained crash at the error site. The context's CAUSE distinguishes them
+// when the clock set one (errTurnBudget); we carry it out so turnErr and the
+// event log can name the decision rather than let "context canceled" masquerade
+// as a transient fault.
+func summarizeErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		cause := context.Cause(ctx)
+		if cause != nil && !errors.Is(cause, context.Canceled) {
+			return fmt.Errorf("agent/shaper: summarize: compaction aborted — %v (the turn's budget clock cancelled it)", cause)
+		}
+		return fmt.Errorf("agent/shaper: summarize: compaction aborted — %v (no turn-budget cause: ctrl-C, or the parent context went down)", ctxErr)
+	}
+	return err
+}
+
 // summarize calls the model on the oldest contiguous prefix of entries and
 // asks for a concise summary. The returned text becomes the marker content.
 func (sh *Shaper) summarize(ctx context.Context, entries []Entry) (string, error) {
@@ -381,17 +410,24 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry) (string, error
 		fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, label, e.Content)
 	}
 
+	// Stop the turn's budget clock for the fold: compaction is bookkeeping, not
+	// model work, so it must not burn the turn's time budget. See Pause.
+	resume := func() {}
+	if sh.Pause != nil {
+		resume = sh.Pause()
+	}
+	defer resume()
 	ch, err := sh.Runner.ChatStream(ctx, []llm.Message{
 		{Role: "system", Content: "You are a compaction worker. Summarize event logs concisely."},
 		{Role: "user", Content: b.String()},
 	}, nil, nil)
 	if err != nil {
-		return "", err
+		return "", summarizeErr(ctx, err)
 	}
 	var summary strings.Builder
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return "", fmt.Errorf("%s", chunk.Error)
+			return "", summarizeErr(ctx, fmt.Errorf("%s", chunk.Error))
 		}
 		summary.WriteString(chunk.Content)
 		if chunk.Done {
