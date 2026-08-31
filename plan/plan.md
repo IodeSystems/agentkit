@@ -17,6 +17,7 @@ TABLESTAKES every real agent client needs, so consumers don't re-wrap them:
 - **lifting**: async tool results (a tool parks the turn, resumes on resolve)
 - queued-message **batching** (coalesce inbox into one turn)
 - grammar / JSON-Schema **validation** with a retry/fix loop
+- turn **lifecycle** — `OnTurnStart` / `OnTurnEnd` carrying WHY a turn ended
 
 It does NOT own **orchestration** (roles, task DAG, scheduling, when/why to
 run). That's the harness's job. autowork3 is one consumer; the user's
@@ -43,6 +44,32 @@ in `autowork3/go.mod`. NOT yet a git repo, NOT yet published — module path is
 final though.
 
 ## Active work
+
+### ✅ Turn lifecycle hooks — `OnTurnStart` / `OnTurnEnd` (2026-08-31)
+
+Requested by aw4, which needs turn boundaries as events in its own log and a
+reason it can key on without parsing error text.
+
+- `TurnEndReason`: `reply`, `terminal_tool`, `max_turns`, `overflow`,
+  `repetition`, `canceled`, `error`. `Failed()` splits the two clean exits from
+  the rest.
+- `Session.OnTurnStart(TurnStart)` fires once before the first chat round;
+  `Session.OnTurnEnd(TurnEnd)` fires exactly once on every exit, carrying reason,
+  err, rounds, usage and wall-clock duration.
+- Why a reason and not just the error: the loop has six exits and two observable
+  states. `terminal_tool` and `reply` BOTH return nil, so a host could not
+  distinguish a session that closed deliberately from one that stopped talking.
+- Reason is set at the exits that know it; the deferred reporter classifies the
+  rest, so a `return` added later still reports something honest. Cancellation is
+  classified from `ctx.Err()`, not from the error's text, because it arrives
+  wrapped in whatever call failed.
+- Tests: `agent/turnhooks_test.go` — both clean exits, max_turns, cancellation,
+  a plain transport error (guards against classifying everything as canceled),
+  and hooks-unset.
+- ⚠️ `TurnEnd.Duration` is wall clock: it includes tool execution AND client-side
+  429 backoff. A host billing anyone for it must subtract `Client.OnRetry` time,
+  and STILL cannot recover time corrallm spent holding a queued request — no
+  client can see that. See the note on the type.
 
 ### ✅ Slice 1 — extraction + neutral contract
 - `llm` + `mcpmgr` moved into agentkit; all 22 autowork3 import sites
