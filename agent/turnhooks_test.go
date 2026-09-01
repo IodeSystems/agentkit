@@ -202,3 +202,67 @@ func TestTurnHooksAreOptional(t *testing.T) {
 		t.Errorf("Reply = %q", res.Reply)
 	}
 }
+
+// toolRound is a round that calls a tool AND reports the proxy's overhead.
+func toolRound(id, name string, queuedMS, loadMS int64) []llm.StreamChunk {
+	u := &llm.Usage{PromptTokens: 10, CompletionTokens: 2}
+	u.Server = llm.ServerTiming{QueuedMS: queuedMS, LoadMS: loadMS, Reported: true}
+	return []llm.StreamChunk{{ToolCall: call(id, name)}, {Done: true, Usage: u}}
+}
+
+// replyRound is a final round: content, no tool calls, so the loop ends.
+func replyRound(content string, queuedMS, loadMS int64) []llm.StreamChunk {
+	u := &llm.Usage{PromptTokens: 10, CompletionTokens: 2}
+	u.Server = llm.ServerTiming{QueuedMS: queuedMS, LoadMS: loadMS, Reported: true}
+	return []llm.StreamChunk{{Content: content}, {Done: true, Usage: u}}
+}
+
+// A turn's cost is the sum of its round-trips, so overhead must accumulate
+// across rounds — a host budgets the turn, not the round. Two rounds here: a
+// tool call that queued 4.5s, then the reply that queued 3s.
+func TestTurnEndSumsServerOverheadAcrossRounds(t *testing.T) {
+	s := &Session{SessionID: "s", Store: &memStore{}, MaxTurns: 5,
+		Runner: &scriptRunner{turns: [][]llm.StreamChunk{
+			toolRound("1", "look", 4000, 500),
+			replyRound("done.", 3000, 0),
+		}},
+		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+	_, ends := collect(s)
+
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	e := onlyEnd(t, ends)
+	if e.Rounds != 2 {
+		t.Fatalf("Rounds = %d, want 2 — this test is meaningless with one round", e.Rounds)
+	}
+	if !e.ServerTimingSeen {
+		t.Fatal("ServerTimingSeen false — the proxy's report was dropped before TurnEnd")
+	}
+	if e.ServerOverheadMS != 7500 {
+		t.Errorf("ServerOverheadMS = %d, want 7500 (4000+500 then 3000+0)", e.ServerOverheadMS)
+	}
+	if e.Duration <= 0 {
+		t.Error("Duration must be set")
+	}
+}
+
+// The distinction a host cannot afford to lose: an endpoint that reports
+// nothing must leave ServerTimingSeen false, so nobody subtracts an overhead
+// that was never measured.
+func TestTurnEndDoesNotInventOverhead(t *testing.T) {
+	s := &Session{SessionID: "s", Store: &memStore{}, MaxTurns: 5,
+		Runner: &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "done."}}}}}
+	_, ends := collect(s)
+
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	e := onlyEnd(t, ends)
+	if e.ServerTimingSeen {
+		t.Error("ServerTimingSeen must be false when nothing reported")
+	}
+	if e.ServerOverheadMS != 0 {
+		t.Errorf("ServerOverheadMS = %d, want 0", e.ServerOverheadMS)
+	}
+}

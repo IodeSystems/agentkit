@@ -66,10 +66,30 @@ reason it can key on without parsing error text.
 - Tests: `agent/turnhooks_test.go` — both clean exits, max_turns, cancellation,
   a plain transport error (guards against classifying everything as canceled),
   and hooks-unset.
-- ⚠️ `TurnEnd.Duration` is wall clock: it includes tool execution AND client-side
-  429 backoff. A host billing anyone for it must subtract `Client.OnRetry` time,
-  and STILL cannot recover time corrallm spent holding a queued request — no
-  client can see that. See the note on the type.
+- `TurnEnd.Duration` is wall clock: it includes tool execution, client-side 429
+  backoff, AND proxy queue time. The type comment says which lever recovers each.
+
+### ✅ Server timing — stop billing callers for the queue (2026-08-31)
+
+corrallm has stamped `X-Corrallm-Queued-Ms` / `-Load-Ms` / `-Upstream-Ttfb-Ms` on
+every SERVED response for a while, precisely so a caller can subtract the
+proxy's overhead from its own wall clock. agentkit read the ticket header and
+ignored these, so the information was on the wire and thrown away.
+
+- `llm.ServerTiming` parses the three headers; `Usage.Server` carries them;
+  `Usage.WorkMS()` is latency minus overhead.
+- `Reported` distinguishes "the proxy said zero" from "nothing told us". A plain
+  OpenAI endpoint says nothing, and a confident zero there would let a host
+  discount an overhead it never measured. WorkMS falls back to the full latency
+  in that case — unmeasured overhead counts as work.
+- TTFB is deliberately NOT overhead: it is the model's prompt-eval latency, which
+  is execution.
+- `TurnEnd.ServerOverheadMS` sums it across the turn's rounds, with
+  `ServerTimingSeen` carrying the same known/unknown distinction.
+- Tests: `llm/servertiming_test.go` (parse, absent≠zero, malformed ignored,
+  WorkMS floors at zero), `llm/servertiming_wire_test.go` (headers survive an
+  actual HTTP round-trip into Usage; a plain endpoint reports nothing),
+  `agent/turnhooks_test.go` (sums across two rounds; does not invent overhead).
 
 ### ✅ Slice 1 — extraction + neutral contract
 - `llm` + `mcpmgr` moved into agentkit; all 22 autowork3 import sites

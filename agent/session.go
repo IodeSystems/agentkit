@@ -47,7 +47,8 @@ type Session struct {
 	// round. Paired with OnTurnEnd, which fires on every exit path.
 	OnTurnStart func(TurnStart)
 
-	// OnTurnEnd, if set, fires exactly once per Turn with WHY the loop stopped.
+	// OnTurnEnd, if set, fires exactly once per Turn with WHY the loop stopped,
+	// and with how much of its wall clock the proxy admits was not the model.
 	//
 	// The reason is the point. Without it a host distinguishes six exits by the
 	// text of an error, so "a terminal tool closed the session" and "the store
@@ -225,6 +226,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	// something honest rather than silently going unreported.
 	var endReason TurnEndReason
 	var rounds int
+	// serverOverheadMS accumulates what the PROXY said it spent not running the
+	// model — queueing and cold loads. Reported separately from Duration rather
+	// than subtracted from it: a host that wants wall clock must still be able
+	// to get it, and the two answer different questions.
+	var serverOverheadMS int64
+	var sawServerTiming bool
 	startedAt := time.Now()
 	if s.OnTurnStart != nil {
 		s.OnTurnStart(TurnStart{
@@ -257,13 +264,15 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}
 		}
 		s.OnTurnEnd(TurnEnd{
-			SessionID: s.SessionID,
-			ThreadID:  s.ThreadID,
-			Reason:    reason,
-			Err:       err,
-			Rounds:    rounds,
-			Usage:     result.Usage,
-			Duration:  time.Since(startedAt),
+			SessionID:        s.SessionID,
+			ThreadID:         s.ThreadID,
+			Reason:           reason,
+			Err:              err,
+			Rounds:           rounds,
+			Usage:            result.Usage,
+			Duration:         time.Since(startedAt),
+			ServerOverheadMS: serverOverheadMS,
+			ServerTimingSeen: sawServerTiming,
 		})
 	}()
 
@@ -391,6 +400,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			s.usageProcessed += usage.NewPromptTokens()
 			s.usageGenerated += usage.CompletionTokens
 			s.usageTurns++
+			// Summed across the turn's rounds, because a Turn's cost is the sum
+			// of its round-trips and a host budgets the turn, not the round.
+			serverOverheadMS += usage.Server.OverheadMS()
+			if usage.Server.Reported {
+				sawServerTiming = true
+			}
 		}
 		result.Usage.Total = s.usageTotal
 		result.Usage.Cached = s.usageCached

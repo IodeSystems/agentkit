@@ -288,12 +288,19 @@ type TurnStart struct {
 // TurnEnd is delivered to Session.OnTurnEnd exactly once per Turn, on every
 // exit path including a panic-free error return.
 //
-// Duration is wall clock across the whole loop, which is NOT the same as time
-// the model spent working: it includes tool execution, and it includes any time
-// the client spent backing off against a busy endpoint. A host that needs those
-// separated reads Client.OnRetry for the backoff and subtracts it — and cannot
-// recover time the SERVER spent holding a queued request, which no client can
-// see. Say what this number is before charging anyone for it.
+// Duration is wall clock and is NOT time the model spent working. It includes
+// tool execution, client-side 429 backoff, and any time the proxy held the
+// request in its admission queue. Anything charging a budget against elapsed
+// time must decompose it or it prices the same work differently depending on
+// how busy the box was — which is what a budget exists to factor out.
+//
+// What each part needs:
+//
+//   - proxy queueing and cold loads → ServerOverheadMS, below.
+//   - client-side 429 backoff → Client.OnRetry (RetryEvent.Delay/Elapsed).
+//   - tool execution → the host's own dispatcher timing; agent does not measure
+//     it, because only the host knows which tools are its own work and which
+//     are another wait.
 type TurnEnd struct {
 	SessionID string
 	ThreadID  string
@@ -305,8 +312,20 @@ type TurnEnd struct {
 	Rounds int
 	// Usage is the running tally as of the end of the turn.
 	Usage TokenUsage
-	// Duration is wall clock from OnTurnStart to here. See the type comment.
+	// Duration is wall clock from OnTurnStart to here. See the type comment
+	// before charging anyone for it.
 	Duration time.Duration
+
+	// ServerOverheadMS is what the proxy reported spending NOT running the
+	// model — admission queueing plus cold loads — summed over the turn's
+	// rounds. Subtract it from Duration to stop billing a caller for the queue
+	// it waited in.
+	ServerOverheadMS int64
+	// ServerTimingSeen distinguishes "the proxy reported no overhead" from
+	// "nothing reported". A plain OpenAI endpoint says nothing, and a host that
+	// read a confident zero there would subtract an overhead it never measured.
+	// False means ServerOverheadMS is unknown, not zero.
+	ServerTimingSeen bool
 }
 
 // compactionSinkKey carries a compaction reporter through the ctx, so the Shaper
