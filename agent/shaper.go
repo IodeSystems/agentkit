@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/iodesystems/agentkit/llm"
 )
@@ -185,7 +186,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
 		// entries into a summary marker. If nothing summarizable remains, return
 		// what we have.
-		info, didCompact, err := sh.compactOldest(ctx, sessionID)
+		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target)
 		if err != nil {
 			return nil, err
 		}
@@ -193,7 +194,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 			return messages, nil
 		}
 		// Surface the compaction (summary + meta) to whoever installed a sink —
-		// the Session records it into TurnResult + fires OnCompaction.
+		// the Session records it into TurnResult + fires OnCompactionComplete.
 		reportCompaction(ctx, info)
 
 		// Loop: Context picks up the marker in place of the subsumed rows and
@@ -216,7 +217,12 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 // single implementation shared by Build's Phase 2 and the public Compact.
 // TokensBefore/After mirror Build: a full (no-LOD) render before, an LOD render
 // of the post-compaction window after.
-func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
+// tokensBefore/target are what the CALLER measured, passed in rather than
+// recomputed: Build already rendered the window to decide a fold was needed, and
+// re-measuring here would report a different number than the one that triggered
+// it. Zero from a caller that has no measurement (the public Compact) means the
+// start report carries what it knows and no more.
+func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target int) (CompactionInfo, bool, error) {
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
 	}
@@ -245,6 +251,17 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (Compacti
 	}
 
 	before := sh.tokens(sh.render(entries, pristineCount, "", false))
+
+	// Announced only now: everything above can still decide there is nothing to
+	// fold, and a start with no matching completion is worse than no start.
+	startedAt := time.Now()
+	reportCompactionStart(ctx, CompactionStart{
+		SessionID:    sessionID,
+		TokensBefore: tokensBefore,
+		Target:       target,
+		Subsuming:    len(subsumed),
+		At:           startedAt,
+	})
 
 	summary, err := sh.summarize(ctx, entries[:olderEnd])
 	if err != nil {
@@ -287,6 +304,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (Compacti
 		SubsumedCount: len(subsumed),
 		TokensBefore:  before,
 		TokensAfter:   after,
+		Duration:      time.Since(startedAt),
 	}, true, nil
 }
 
@@ -299,7 +317,9 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string) (Compacti
 // once history is fully folded. Hosts use this to force a deterministic fold
 // (e.g. a benchmark that must exercise history compaction, then measure recall).
 func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
-	return sh.compactOldest(ctx, sessionID)
+	// No measured trigger: this fold was asked for, not forced by a budget, so
+	// there is no "tokens before" that caused it and no target it is aiming at.
+	return sh.compactOldest(ctx, sessionID, 0, 0)
 }
 
 // classifyPristineCount returns the number of trailing entries that qualify

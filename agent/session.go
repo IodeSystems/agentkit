@@ -55,10 +55,21 @@ type Session struct {
 	// failed" look alike to anything that is not a person reading a log.
 	OnTurnEnd func(TurnEnd)
 
-	// OnCompaction, if set, fires whenever the Shaper folds history mid-Turn —
-	// the same info Turn returns in TurnResult.Compactions. A host persists the
-	// summary as a hidden field on the turn and/or shows meta about it.
-	OnCompaction func(CompactionInfo)
+	// OnCompactionStart, if set, fires when the Shaper decides to fold, BEFORE
+	// the summarizer is called. Paired with OnCompactionComplete.
+	//
+	// Compaction is the one thing that happens to a turn without anyone asking,
+	// and it costs an LLM round-trip. With only a completion hook a host cannot
+	// say "this is compacting" while it happens — the turn stalls and the reason
+	// arrives after the wait is over.
+	OnCompactionStart func(CompactionStart)
+
+	// OnCompactionComplete, if set, fires when the fold is recorded — the same
+	// info Turn returns in TurnResult.Compactions, plus how long it took.
+	//
+	// The summary is the whole record of what was folded: an append-only host
+	// stores THIS, not a flag on the entries it replaced. See CompactionInfo.
+	OnCompactionComplete func(CompactionInfo)
 
 	// OnUsage, if set, fires after each chat round with the running token tally
 	// (cumulative Total + current Active window). Mirrors TurnResult.Usage.
@@ -277,11 +288,15 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	}()
 
 	// Install the compaction sink so a Shaper's mid-Turn compaction surfaces
-	// into result.Compactions + OnCompaction, without changing ContextBuilder.
+	// into result.Compactions + OnCompactionComplete, without changing
+	// ContextBuilder.
+	if s.OnCompactionStart != nil {
+		ctx = withCompactionStartSink(ctx, s.OnCompactionStart)
+	}
 	ctx = withCompactionSink(ctx, func(ci CompactionInfo) {
 		result.Compactions = append(result.Compactions, ci)
-		if s.OnCompaction != nil {
-			s.OnCompaction(ci)
+		if s.OnCompactionComplete != nil {
+			s.OnCompactionComplete(ci)
 		}
 	})
 

@@ -55,14 +55,14 @@ func TestTurn_SurfacesCompactionAndUsage(t *testing.T) {
 	var lastUsage TokenUsage
 	var clock int64 = 100
 	sess := &Session{
-		SessionID:    "s",
-		Store:        store,
-		Runner:       runner,
-		Build:        shaper.Build,
-		Now:          func() int64 { clock++; return clock },
-		OnCompaction: func(ci CompactionInfo) { cbCompactions = append(cbCompactions, ci) },
-		OnUsage:      func(u TokenUsage) { lastUsage = u },
-		MaxTurns:     3,
+		SessionID:            "s",
+		Store:                store,
+		Runner:               runner,
+		Build:                shaper.Build,
+		Now:                  func() int64 { clock++; return clock },
+		OnCompactionComplete: func(ci CompactionInfo) { cbCompactions = append(cbCompactions, ci) },
+		OnUsage:              func(u TokenUsage) { lastUsage = u },
+		MaxTurns:             3,
 	}
 	res, err := sess.Turn(context.Background())
 	if err != nil {

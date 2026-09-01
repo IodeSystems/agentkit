@@ -141,7 +141,7 @@ type ContextBuilder func(ctx context.Context, sessionID string, system string) (
 var ErrSessionClosed = errors.New("agent: session closed by terminal tool")
 
 // CompactionInfo describes a compaction the Shaper performed during a Turn. It
-// is surfaced (via Turn's result and the OnCompaction callback) so the host can
+// is surfaced (via Turn's result and the OnCompactionComplete callback) so the host can
 // persist the summary as a hidden field on the turn and show meta about what
 // was folded. Token counts are the active estimator's numbers.
 type CompactionInfo struct {
@@ -149,6 +149,33 @@ type CompactionInfo struct {
 	SubsumedCount int    // how many entries were folded into the summary
 	TokensBefore  int    // estimated active-window tokens before this compaction
 	TokensAfter   int    // estimated active-window tokens after
+
+	// Duration is how long the fold took, dominated by the summarizer's own
+	// round-trip. Reported because compaction is an unasked-for LLM call in the
+	// middle of somebody's turn: it is the one part of a slow turn that is not
+	// the work, and a host that cannot separate it will read its own latency
+	// wrong. It is also the number that says whether compacting is cheaper than
+	// the context it saves.
+	Duration time.Duration
+}
+
+// CompactionStart is delivered to Session.OnCompactionStart before the fold
+// begins.
+//
+// It exists because compaction is the one thing that happens to a turn without
+// anybody asking for it, and it is slow. Reported only on completion, a host has
+// no way to say "this is compacting" while it is happening — the turn simply
+// stalls, and the reason arrives after the wait is over.
+type CompactionStart struct {
+	SessionID string
+	// TokensBefore is the active window that triggered the fold.
+	TokensBefore int
+	// Target is the size the shaper is folding down to. Together with
+	// TokensBefore it says how much has to go.
+	Target int
+	// Subsuming is how many entries are about to be folded.
+	Subsuming int
+	At        time.Time
 }
 
 // ToolFormat selects how tool calls travel between the model and the loop.
@@ -336,6 +363,24 @@ type compactionSinkKey struct{}
 
 func withCompactionSink(ctx context.Context, fn func(CompactionInfo)) context.Context {
 	return context.WithValue(ctx, compactionSinkKey{}, fn)
+}
+
+// compactionStartSinkKey carries the START reporter the same way, for the same
+// reason: the Shaper is reached through ContextBuilder, whose signature the
+// Session does not own.
+type compactionStartSinkKey struct{}
+
+func withCompactionStartSink(ctx context.Context, fn func(CompactionStart)) context.Context {
+	return context.WithValue(ctx, compactionStartSinkKey{}, fn)
+}
+
+// reportCompactionStart delivers cs to the sink installed in ctx, if any. The
+// Shaper calls it once it knows a fold is happening and what it will cost —
+// after the decision, before the summarizer.
+func reportCompactionStart(ctx context.Context, cs CompactionStart) {
+	if fn, ok := ctx.Value(compactionStartSinkKey{}).(func(CompactionStart)); ok && fn != nil {
+		fn(cs)
+	}
 }
 
 // reportCompaction delivers ci to the sink installed in ctx, if any. The Shaper

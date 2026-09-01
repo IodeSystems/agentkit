@@ -15,6 +15,9 @@ have to wrap them yourself:
 - notification **lifecycle** — supersede, clear, and pre-turn revalidation
 - turn **lifecycle** — `OnTurnStart` / `OnTurnEnd` with a typed reason, so a
   host can tell a terminal tool from a reply and a cancellation from a fault
+- compaction **lifecycle** — `OnCompactionStart` / `OnCompactionComplete`, so a
+  host can say "compacting" while it happens and record the summary as the
+  whole record of what was folded
 - a fair-share **429/backpressure** retry that honors the server's `retry_after`
 
 What agentkit does **not** own is **orchestration** — roles, a task DAG,

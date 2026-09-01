@@ -18,6 +18,7 @@ TABLESTAKES every real agent client needs, so consumers don't re-wrap them:
 - queued-message **batching** (coalesce inbox into one turn)
 - grammar / JSON-Schema **validation** with a retry/fix loop
 - turn **lifecycle** — `OnTurnStart` / `OnTurnEnd` carrying WHY a turn ended
+- compaction **lifecycle** — `OnCompactionStart` / `OnCompactionComplete`
 
 It does NOT own **orchestration** (roles, task DAG, scheduling, when/why to
 run). That's the harness's job. autowork3 is one consumer; the user's
@@ -68,6 +69,33 @@ reason it can key on without parsing error text.
   and hooks-unset.
 - `TurnEnd.Duration` is wall clock: it includes tool execution, client-side 429
   backoff, AND proxy queue time. The type comment says which lever recovers each.
+
+### ✅ Compaction lifecycle — `OnCompactionStart` / `OnCompactionComplete` (2026-08-31)
+
+Asked for by aw4, whose event log is append-only: it wants to store the fold's
+SUMMARY as the record rather than flag the entries it replaced.
+
+- `OnCompaction` renamed to `OnCompactionComplete`, and `OnCompactionStart`
+  added. Compaction is the one thing that happens to a turn without anyone
+  asking, and it costs a summarizer round-trip — with only a completion hook a
+  host cannot say "this is compacting" while it happens; the turn stalls and the
+  reason arrives after the wait is over.
+- `CompactionStart` carries SessionID, TokensBefore, Target and Subsuming, so a
+  host can render "folding 12 entries" rather than a spinner. Announced AFTER the
+  decision is final — everything before that point can still find nothing to
+  fold, and a start with no completion is worse than no start.
+- `TokensBefore`/`Target` are passed IN from Build rather than recomputed: Build
+  already measured the window to decide, and re-measuring would report a
+  different number than the one that triggered the fold. The public `Compact`
+  passes zeros — it was asked for, so no budget caused it.
+- `CompactionInfo` gains `Duration`. It is the summarizer's round-trip: the part
+  of a slow turn that is not the work, and the number that says whether folding
+  is cheaper than the context it saves.
+- dun updated for the rename (one line, `harness.go`); its suite passes.
+- Tests: `agent/compactionhooks_test.go` — start pairs with complete, start
+  carries enough to render before the summarizer returns (and asserts
+  TokensBefore > Target, i.e. the numbers explain the fold), complete carries
+  summary + duration, hooks optional.
 
 ### ✅ Server timing — stop billing callers for the queue (2026-08-31)
 

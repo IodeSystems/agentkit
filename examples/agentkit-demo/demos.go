@@ -514,7 +514,7 @@ func runCompact(ctx context.Context, cfg config) error {
 		SessionID: "demo", Store: compStore, Build: compShaper.Build,
 		Runner: cannedRunner{reply: "We decided to ship the compaction feature.", prompt: 42, completion: 9},
 		Now:    clk.next, MaxTurns: 3, Tracer: cfg.tracer(),
-		OnCompaction: func(ci agent.CompactionInfo) {
+		OnCompactionComplete: func(ci agent.CompactionInfo) {
 			fmt.Printf("\n  ⟐ COMPACTION: %d entries folded, %d→%d tokens\n     summary (a hidden field on the turn): %s\n",
 				ci.SubsumedCount, ci.TokensBefore, ci.TokensAfter, oneLine(ci.Summary))
 		},
