@@ -258,6 +258,32 @@ type Usage struct {
 	// of what anyone asks of a trace, and without it the token counts alone
 	// cannot distinguish a slow cold load from a large generation.
 	LatencyMS int64 `json:"latency_ms,omitempty"`
+
+	// Server is what the PROXY said about its own overhead on this round-trip —
+	// queueing and cold-load time it held the request without running anything.
+	// Stamped client-side from response headers, like LatencyMS; zero-valued and
+	// Reported=false against an endpoint that says nothing.
+	//
+	// LatencyMS alone cannot be attributed: it is one number covering the model
+	// working and the proxy waiting. This is what separates them.
+	Server ServerTiming `json:"server_timing,omitzero"`
+}
+
+// WorkMS is LatencyMS with the proxy's self-reported overhead removed — the
+// closest thing to "how long the model actually took" a client can compute.
+//
+// Falls back to the full latency when the server reported nothing, which is the
+// safe direction: unmeasured overhead is counted as work rather than discounted
+// on a guess. Never returns less than zero — clock skew between the proxy's
+// measurement and ours must not produce negative work.
+func (u Usage) WorkMS() int64 {
+	if !u.Server.Reported {
+		return u.LatencyMS
+	}
+	if w := u.LatencyMS - u.Server.OverheadMS(); w > 0 {
+		return w
+	}
+	return 0
 }
 
 // PromptTokensDetails is OpenAI's nested prompt-token breakdown.
@@ -1180,7 +1206,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	}
 
 	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, resp.Body, ch, callStart)
+	go c.readStream(ctx, resp.Body, ch, callStart, serverTimingFrom(resp.Header))
 	return ch, nil
 }
 
@@ -1262,7 +1288,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // `stream_options.include_usage=true`); forward as soon as seen.
 // readStream parses the SSE body. callStart is when the request was issued, so
 // usage chunks can carry the round-trip latency no provider reports.
-func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time) {
+func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time, timing ServerTiming) {
 	defer body.Close()
 	defer close(ch)
 
@@ -1400,6 +1426,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		if len(event.Choices) == 0 {
 			if event.Usage != nil {
 				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
+				event.Usage.Server = timing
 				ch <- StreamChunk{Usage: event.Usage}
 			}
 			continue
@@ -1484,10 +1511,15 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			}
 			if event.Usage != nil {
 				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
+				event.Usage.Server = timing
 				done.Usage = event.Usage
 			}
 			ch <- done
 		} else if event.Usage != nil {
+			// Same stamp as the other two emission points: a usage chunk that
+			// skipped it would report the round as all work.
+			event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
+			event.Usage.Server = timing
 			ch <- StreamChunk{Usage: event.Usage}
 		}
 	}

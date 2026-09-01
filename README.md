@@ -13,6 +13,8 @@ have to wrap them yourself:
 - **lifting** — async tool results (a slow tool parks the turn, resumes later)
 - schema **validation** with a fix loop, and server-side **constrained decoding**
 - notification **lifecycle** — supersede, clear, and pre-turn revalidation
+- turn **lifecycle** — `OnTurnStart` / `OnTurnEnd` with a typed reason, so a
+  host can tell a terminal tool from a reply and a cancellation from a fault
 - a fair-share **429/backpressure** retry that honors the server's `retry_after`
 
 What agentkit does **not** own is **orchestration** — roles, a task DAG,

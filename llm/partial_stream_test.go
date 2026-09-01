@@ -22,7 +22,7 @@ func TestAbruptStreamDoesNotEmitToolCall(t *testing.T) {
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	var tools []ToolCall
 	var errs []StreamChunk
@@ -62,7 +62,7 @@ func TestCompleteStreamStillEmitsToolCall(t *testing.T) {
 	}, "\n\n")
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	var tools []ToolCall
 	for chunk := range ch {
@@ -100,7 +100,7 @@ func TestCleanFinishWithTruncatedArgumentsIsEmittedForTheCallerToRefuse(t *testi
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	var tools []ToolCall
 	var errs []StreamChunk
@@ -149,7 +149,7 @@ func TestLengthFinishIsReportedAsAStopReason(t *testing.T) {
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	// The FIRST Done chunk: finish_reason and [DONE] each produce one, and only
 	// the first carries what the provider said. A consumer reads the stream, not
@@ -186,7 +186,7 @@ func TestLengthFinishInProseNamesNoToolCalls(t *testing.T) {
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	// The FIRST Done chunk: finish_reason and [DONE] each produce one, and only
 	// the first carries what the provider said. A consumer reads the stream, not
@@ -218,7 +218,7 @@ func TestNormalFinishReportsNoStopReason(t *testing.T) {
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now())
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
 
 	for chunk := range ch {
 		if chunk.Done && chunk.StopReason != "" {

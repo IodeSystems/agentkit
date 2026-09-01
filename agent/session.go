@@ -43,6 +43,18 @@ type Session struct {
 	// SSE / live broadcast.
 	OnAssistantToken func(string)
 
+	// OnTurnStart, if set, fires once at the top of Turn, before the first chat
+	// round. Paired with OnTurnEnd, which fires on every exit path.
+	OnTurnStart func(TurnStart)
+
+	// OnTurnEnd, if set, fires exactly once per Turn with WHY the loop stopped,
+	// and with how much of its wall clock the proxy admits was not the model.
+	//
+	// The reason is the point. Without it a host distinguishes six exits by the
+	// text of an error, so "a terminal tool closed the session" and "the store
+	// failed" look alike to anything that is not a person reading a log.
+	OnTurnEnd func(TurnEnd)
+
 	// OnCompaction, if set, fires whenever the Shaper folds history mid-Turn —
 	// the same info Turn returns in TurnResult.Compactions. A host persists the
 	// summary as a hidden field on the turn and/or shows meta about it.
@@ -208,12 +220,60 @@ func (s *Session) Inject(ctx context.Context, e Entry) error {
 func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("Turn"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID)
+
+	// endReason is set at the exits that KNOW why they are leaving. The deferred
+	// reporter classifies the rest, so a return added later still reports
+	// something honest rather than silently going unreported.
+	var endReason TurnEndReason
+	var rounds int
+	// serverOverheadMS accumulates what the PROXY said it spent not running the
+	// model — queueing and cold loads. Reported separately from Duration rather
+	// than subtracted from it: a host that wants wall clock must still be able
+	// to get it, and the two answer different questions.
+	var serverOverheadMS int64
+	var sawServerTiming bool
+	startedAt := time.Now()
+	if s.OnTurnStart != nil {
+		s.OnTurnStart(TurnStart{
+			SessionID: s.SessionID,
+			ThreadID:  s.ThreadID,
+			At:        startedAt,
+		})
+	}
 	defer func() {
 		if err != nil {
 			sp.EndError(err)
 		} else {
 			sp.End()
 		}
+		if s.OnTurnEnd == nil {
+			return
+		}
+		reason := endReason
+		if reason == "" {
+			switch {
+			case err == nil:
+				reason = TurnReply
+			case ctx.Err() != nil:
+				// Classify by the context rather than by the error's text: a
+				// cancellation surfaces wrapped in whatever the failing call
+				// said, and only ctx knows it was a cancellation.
+				reason = TurnCanceled
+			default:
+				reason = TurnError
+			}
+		}
+		s.OnTurnEnd(TurnEnd{
+			SessionID:        s.SessionID,
+			ThreadID:         s.ThreadID,
+			Reason:           reason,
+			Err:              err,
+			Rounds:           rounds,
+			Usage:            result.Usage,
+			Duration:         time.Since(startedAt),
+			ServerOverheadMS: serverOverheadMS,
+			ServerTimingSeen: sawServerTiming,
+		})
 	}()
 
 	// Install the compaction sink so a Shaper's mid-Turn compaction surfaces
@@ -283,6 +343,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	var repTrips, repeatRounds int
 	var lastExchange uint64
 	for i := 0; i < maxTurns; i++ {
+		rounds = i + 1
 		// Claim any pending inbox arrivals (marks them shown). They're
 		// already persisted, so the model sees them via build() next call;
 		// this is just "mark shown".
@@ -339,6 +400,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			s.usageProcessed += usage.NewPromptTokens()
 			s.usageGenerated += usage.CompletionTokens
 			s.usageTurns++
+			// Summed across the turn's rounds, because a Turn's cost is the sum
+			// of its round-trips and a host budgets the turn, not the round.
+			serverOverheadMS += usage.Server.OverheadMS()
+			if usage.Server.Reported {
+				sawServerTiming = true
+			}
 		}
 		result.Usage.Total = s.usageTotal
 		result.Usage.Cached = s.usageCached
@@ -404,6 +471,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				// Re-prompting is only worth it while the model can still
 				// recover. Past that it is the same 30 minutes, paid in
 				// installments — so fail with the evidence instead.
+				endReason = TurnRepetition
 				return result, fmt.Errorf(
 					"agent: model looped %d times in a row (last: %s); giving up rather than "+
 						"re-prompting a generation that keeps collapsing", repTrips, rep)
@@ -439,6 +507,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if maxOverTrips > 0 && overTrips > maxOverTrips {
 				// Past this the host is not shedding anything that helps, and
 				// another pass is the same wall at the same speed.
+				endReason = TurnOverflow
 				return result, fmt.Errorf(
 					"agent: the provider cut generation for room %d rounds in a row (last: %s); "+
 						"giving up rather than retrying into the same wall", overTrips, cut)
@@ -464,6 +533,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				return result, fmt.Errorf("agent: re-check pending: %w", e)
 			}
 			if pending == 0 {
+				endReason = TurnReply
 				return result, nil
 			}
 			continue
@@ -563,6 +633,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 		if sessionClosed {
 			// A terminal tool fired. Don't loop into another chat round.
+			endReason = TurnTerminalTool
 			return result, nil
 		}
 
@@ -609,12 +680,14 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 	}
 	if s.ForcedTerminalTool != "" && !sawForcedToolCall {
+		endReason = TurnMaxTurns
 		return result, fmt.Errorf(
 			"agent: max turns (%d) exceeded without ever calling forced terminal tool %q "+
 				"(the LLM provider may be ignoring tool_choice forcing — verify against a "+
 				"spec-compliant endpoint)",
 			maxTurns, s.ForcedTerminalTool)
 	}
+	endReason = TurnMaxTurns
 	return result, fmt.Errorf("agent: max turns (%d) exceeded", maxTurns)
 }
 

@@ -23,6 +23,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/iodesystems/agentkit/llm"
 )
@@ -232,6 +233,99 @@ type TurnResult struct {
 	Reply       string
 	Compactions []CompactionInfo // usually empty or one; more if a huge context folds in stages
 	Usage       TokenUsage
+}
+
+// TurnEndReason names WHY a Turn stopped.
+//
+// It exists because the loop's six exits collapse into two observable states —
+// err nil or not — and a host that wants to tell "the model answered" from "a
+// terminal tool closed the session", or "we ran out of rounds" from "the store
+// failed", has nothing to key on but the text of an error string. Error strings
+// are for people; this is for code.
+//
+// The clean exits are TurnReply and TurnTerminalTool, and both carry a nil Err.
+// Everything else is a failure and carries the error the Turn returned.
+type TurnEndReason string
+
+const (
+	// TurnReply — the model answered and asked for no further tool calls, with
+	// nothing new pending. The ordinary end of a turn.
+	TurnReply TurnEndReason = "reply"
+	// TurnTerminalTool — a terminal tool fired and closed the session, so the
+	// loop stopped rather than running another chat round.
+	TurnTerminalTool TurnEndReason = "terminal_tool"
+	// TurnMaxTurns — the loop hit MaxTurns without the model settling. Note this
+	// counts ROUNDS inside one Turn, not turns in a conversation.
+	TurnMaxTurns TurnEndReason = "max_turns"
+	// TurnOverflow — the provider cut generation for room MaxOverflowRetries
+	// rounds running, and shedding more context stopped helping.
+	TurnOverflow TurnEndReason = "overflow"
+	// TurnRepetition — the model's generation kept collapsing into repetition
+	// past MaxRepetitionRetries, so the loop stopped re-prompting it.
+	TurnRepetition TurnEndReason = "repetition"
+	// TurnCanceled — the caller's context was canceled or its deadline passed.
+	// Separated from TurnError because it is usually not a fault: it is a host
+	// shutting a session down, and a host that logs it as a failure cries wolf.
+	TurnCanceled TurnEndReason = "canceled"
+	// TurnError — anything else: the store, the context builder, or the provider
+	// failed. Err carries it.
+	TurnError TurnEndReason = "error"
+)
+
+// Failed reports whether the reason describes a Turn that did not complete.
+// TurnCanceled counts as failed — the turn did not finish — even though it is
+// usually deliberate.
+func (r TurnEndReason) Failed() bool { return r != TurnReply && r != TurnTerminalTool }
+
+// TurnStart is delivered to Session.OnTurnStart once, before the loop's first
+// chat round.
+type TurnStart struct {
+	SessionID string
+	ThreadID  string
+	At        time.Time
+}
+
+// TurnEnd is delivered to Session.OnTurnEnd exactly once per Turn, on every
+// exit path including a panic-free error return.
+//
+// Duration is wall clock and is NOT time the model spent working. It includes
+// tool execution, client-side 429 backoff, and any time the proxy held the
+// request in its admission queue. Anything charging a budget against elapsed
+// time must decompose it or it prices the same work differently depending on
+// how busy the box was — which is what a budget exists to factor out.
+//
+// What each part needs:
+//
+//   - proxy queueing and cold loads → ServerOverheadMS, below.
+//   - client-side 429 backoff → Client.OnRetry (RetryEvent.Delay/Elapsed).
+//   - tool execution → the host's own dispatcher timing; agent does not measure
+//     it, because only the host knows which tools are its own work and which
+//     are another wait.
+type TurnEnd struct {
+	SessionID string
+	ThreadID  string
+	// Reason is why the loop stopped. Always set.
+	Reason TurnEndReason
+	// Err is the error Turn returned, nil on the clean exits.
+	Err error
+	// Rounds is how many chat rounds the loop ran, 1-based.
+	Rounds int
+	// Usage is the running tally as of the end of the turn.
+	Usage TokenUsage
+	// Duration is wall clock from OnTurnStart to here. See the type comment
+	// before charging anyone for it.
+	Duration time.Duration
+
+	// ServerOverheadMS is what the proxy reported spending NOT running the
+	// model — admission queueing plus cold loads — summed over the turn's
+	// rounds. Subtract it from Duration to stop billing a caller for the queue
+	// it waited in.
+	ServerOverheadMS int64
+	// ServerTimingSeen distinguishes "the proxy reported no overhead" from
+	// "nothing reported". A plain OpenAI endpoint says nothing, and a host that
+	// read a confident zero there would subtract an overhead it never measured.
+	// False means ServerOverheadMS is unknown, not zero.
+	ServerTimingSeen bool
 }
 
 // compactionSinkKey carries a compaction reporter through the ctx, so the Shaper
