@@ -57,6 +57,22 @@ func run(code string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// endpoint resolves what to run against: BASE and MODEL if set, else the
+// defaults. The README documented these two before they existed — the mains
+// hardcoded `Qwen3-6-27B-MPT`, which corrallm retired on 2026-08-14, so the
+// documented way to point this at a second model could not work.
+func endpoint() (string, string) {
+	base := os.Getenv("BASE")
+	if base == "" {
+		base = "https://llm.iodesystems.com/v1"
+	}
+	model := os.Getenv("MODEL")
+	if model == "" {
+		model = "Qwen3-6-27B-MPT"
+	}
+	return base, model
+}
+
 func evalTool() llm.ToolDef {
 	var td llm.ToolDef
 	td.Type = "function"
@@ -120,6 +136,9 @@ func ask(c *llm.Client, code string, heredoc bool, temp float64) (string, error)
 	}
 	calls, _, e := llm.ParseToolCalls(llm.CloseHeredoc(raw))
 	if e != nil {
+		if os.Getenv("DUMP") != "" {
+			fmt.Printf("      RAW(%d bytes): %q\n", len(raw), raw)
+		}
 		return "", e
 	}
 	if len(calls) == 0 {
@@ -140,7 +159,9 @@ func firstLine(s string) string {
 }
 
 func main() {
-	c := llm.NewClient("https://llm.iodesystems.com/v1", "", "Qwen3-6-27B-MPT")
+	base, model := endpoint()
+	fmt.Printf("endpoint %s model %s\n\n", base, model)
+	c := llm.NewClient(base, "", model)
 	reps := 3
 	type cell struct{ outOK, langErr, wrong, fail int }
 	res := map[string]*cell{}

@@ -55,7 +55,8 @@ tool's prompt measures the harness.
     go run ./copy
     go run ./authored
 
-`BASE` and `MODEL` point at another endpoint. If the claim reproduces elsewhere
+`BASE` and `MODEL` point at another endpoint (defaults: `https://llm.iodesystems.com/v1`
+ and `Qwen3-6-27B-MPT`, which corrallm RETIRED 2026-08-14 — set both). If the claim reproduces elsewhere
 it is model-specific, not a property of the format.
 
 ## Untested
