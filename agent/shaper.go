@@ -45,6 +45,14 @@ type ShaperPolicy struct {
 	// same dialect the model writes.
 	ToolFormat            ToolFormat
 	LODTruncateAboveChars int
+	// MaxToolResultChars bounds a single tool result REGARDLESS of age.
+	//
+	// LODTruncateAboveChars only reaches entries older than the preserved tail.
+	// That exemption protects the result a session is about to act on, and it
+	// means one oversized result rides in the window whole for as many turns as
+	// the tail is long. This is the floor under that: the freshest result may be
+	// large, but not unbounded. 0 → no limit.
+	MaxToolResultChars int
 	// LODHeadroomTokens is the runway kept below BudgetTokens. The Shaper
 	// restructures (LOD, then compaction) once the estimated context would
 	// exceed BudgetTokens-LODHeadroomTokens — NOT at the hard budget. Keeping
@@ -369,6 +377,10 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 		content := e.Content
 		if lod && i < olderEnd && len(content) > sh.Policy.LODTruncateAboveChars && sh.Policy.LODTruncateAboveChars > 0 {
 			content = lodStub(e, sh.Policy.LODTruncateAboveChars)
+		} else if n := sh.Policy.MaxToolResultChars; n > 0 && len(content) > n {
+			// Not aged out and not under LOD — the preserved tail. Bounded
+			// anyway, because "recent" is not a reason to be unbounded.
+			content = lodStub(e, n)
 		}
 		return content
 	}, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)

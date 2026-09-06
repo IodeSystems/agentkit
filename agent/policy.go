@@ -31,6 +31,22 @@ const DefaultOutputReservePct = 12
 // rather than folding conversation that was never the problem.
 const DefaultLODTruncateAboveChars = 4000
 
+// DefaultMaxToolResultChars bounds ONE tool result, wherever it sits.
+//
+// LOD only reaches OLDER entries — `render` skips the preserved tail on purpose,
+// because a session whose most recent tool result is stubbed loses the thing it
+// was about to act on. That exemption is right, and it leaves a hole: a single
+// enormous result in the tail is sent whole, every turn, until it ages out.
+//
+// Measured in aw4 on 2026-09-06: one `file.read` returned 191,623 characters —
+// about 48k tokens, 28% of a 170k window — from one call, and tool results were
+// 20MB of context over twelve hours. Nothing truncated it, because it was recent.
+//
+// 64,000 characters is roughly 16k tokens: large enough that ordinary reads,
+// diffs and suite output arrive whole, small enough that no single call can take
+// a quarter of the window. 0 disables it, like every other knob here.
+const DefaultMaxToolResultChars = 64_000
+
 // DefaultPreserveLastMessages and DefaultPreserveLastToolCalls are the tail a
 // fold must not touch. A session whose most recent exchanges are summarized
 // loses the tool result it was about to act on, which is the one part of the
@@ -59,6 +75,7 @@ func PolicyFor(window int) ShaperPolicy {
 	return ShaperPolicy{
 		BudgetTokens:          Budget(window, DefaultOutputReservePct),
 		LODTruncateAboveChars: DefaultLODTruncateAboveChars,
+		MaxToolResultChars:    DefaultMaxToolResultChars,
 		PreserveLastMessages:  DefaultPreserveLastMessages,
 		PreserveLastToolCalls: DefaultPreserveLastToolCalls,
 	}
