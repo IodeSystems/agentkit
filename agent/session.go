@@ -354,9 +354,11 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 
 	var sawForcedToolCall bool
 	// repTrips counts CONSECUTIVE rounds cut for degenerate repetition;
-	// repeatRounds counts CONSECUTIVE identical tool-call/result exchanges.
+	// repeatRounds counts how many times the CURRENT exchange appears in the
+	// recent window. See the check in Turn for why a window and not a streak.
 	var repTrips, repeatRounds int
-	var lastExchange uint64
+	var recentExchanges []uint64
+	notifiedLoop := map[uint64]bool{}
 	for i := 0; i < maxTurns; i++ {
 		rounds = i + 1
 		// Claim any pending inbox arrivals (marks them shown). They're
@@ -662,11 +664,31 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// correctly waiting for a status to change. A poll whose result changes
 		// is progress; one that returns byte-identical output round after round
 		// is not going to start.
+		//
+		// Counted over a WINDOW, not as a consecutive streak. Comparing each
+		// round to the previous one only sees a model repeating itself in ONE
+		// state: alternate between two and the comparison never matches, the
+		// counter resets every round, and the guard never fires however long it
+		// runs. Measured in autowork3 on 2026-09-08 — a session read the same
+		// file at offset 46 and offset 47, alternating, 285 times over ten
+		// minutes at two-second intervals, with this guard enabled the whole
+		// time and its counter never above 1.
+		//
+		// The window is 4x the bound so a two-state cycle still reaches it: a
+		// cycle is half as dense as a streak, so it takes about twice as many
+		// rounds to trip, which is the right way round — one repeat is more
+		// certainly stuck than the other.
 		if maxRepeatRounds > 0 && len(toolCalls) > 0 {
-			if sig := exchangeSignature(toolCalls, results); sig == lastExchange {
-				repeatRounds++
-			} else {
-				lastExchange, repeatRounds = sig, 1
+			sig := exchangeSignature(toolCalls, results)
+			if window := 4 * maxRepeatRounds; len(recentExchanges) >= window {
+				recentExchanges = recentExchanges[len(recentExchanges)-window+1:]
+			}
+			recentExchanges = append(recentExchanges, sig)
+			repeatRounds = 0
+			for _, seen := range recentExchanges {
+				if seen == sig {
+					repeatRounds++
+				}
 			}
 			if repeatRounds >= 2*maxRepeatRounds {
 				return result, fmt.Errorf(
@@ -674,18 +696,24 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 						"rounds running (last: %s); stopping rather than paying for more identical "+
 						"round-trips", repeatRounds, callNames(toolCalls))
 			}
-			if repeatRounds == maxRepeatRounds {
-				// Say it once, in context, and let the model break out itself —
-				// it may have a genuine reason to wait, and only it knows what
-				// the alternative move is.
+			if repeatRounds >= maxRepeatRounds && !notifiedLoop[sig] {
+				// Say it once PER EXCHANGE, in context, and let the model break
+				// out itself — it may have a genuine reason to wait, and only it
+				// knows what the alternative move is. Keyed by signature because
+				// a windowed count can cross the bound, fall back under it as
+				// other calls age in, and cross again; a streak could only ever
+				// do that once.
+				notifiedLoop[sig] = true
 				if e := s.Store.Append(ctx, s.SessionID, Entry{
 					ID:   NewID(),
 					Kind: KindNotification,
 					Tag:  "tool_loop",
 					Content: fmt.Sprintf(
-						"You have called %s %d times in a row and received an IDENTICAL result "+
-							"every time. Repeating it will not produce a different answer. Change "+
-							"the approach, or report what you have and stop.",
+						"You have called %s %d times in the last few rounds and received an "+
+							"IDENTICAL result every time. Repeating it will not produce a different "+
+							"answer, and alternating between it and one other call is the same "+
+							"loop wearing a hat. Change the approach, or report what you have "+
+							"and stop.",
 						callNames(toolCalls), repeatRounds),
 					CreatedAt: now(),
 				}); e != nil {

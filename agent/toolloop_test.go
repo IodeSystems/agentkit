@@ -229,3 +229,91 @@ func TestOnToolCalls_AddsToExistingCalls(t *testing.T) {
 		t.Errorf("second dispatched = %q, want ship", dispatched[1])
 	}
 }
+
+// alternatingTurns is a model that flips between two calls forever, which is
+// the same loop with an extra state.
+func alternatingTurns(n int) [][]llm.StreamChunk {
+	turns := make([][]llm.StreamChunk, 0, n)
+	for i := 0; i < n; i++ {
+		tc := &llm.ToolCall{ID: fmt.Sprintf("c%d", i), Type: "function"}
+		tc.Function.Name = "read_file"
+		tc.Function.Arguments = fmt.Sprintf(`{"path":"m.go","limit":8,"offset":%d}`, 46+i%2)
+		turns = append(turns, []llm.StreamChunk{{ToolCall: tc}})
+	}
+	return turns
+}
+
+/*
+Alternating between two calls is a loop, and comparing each round to the last
+one cannot see it.
+
+The guard counted a consecutive STREAK: `sig == lastExchange` or reset. Two
+states never match their predecessor, so the counter went back to 1 every round
+and the guard never fired however long it ran.
+
+Measured in autowork3 on 2026-09-08: a session read one file at offset 46 and
+offset 47, alternating, 285 times over ten minutes at two-second intervals, with
+this guard enabled the whole time and its counter never above 1. It is also the
+blind spot of the obvious query — "consecutive identical calls" reported 0.9% of
+that day's traffic and missed all 285.
+*/
+func TestAlternatingBetweenTwoCallsIsAlsoALoop(t *testing.T) {
+	store := &memStore{}
+	runner := &scriptRunner{turns: alternatingTurns(40)}
+	s := &Session{
+		SessionID: "s", Store: store, Runner: runner, MaxTurns: 40,
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+			// Each state answers consistently, which is what makes it a loop
+			// rather than progress.
+			return "contents at " + tc.Function.Arguments, nil
+		},
+	}
+
+	_, err := s.Turn(context.Background())
+	if err == nil {
+		t.Fatal("a two-state loop ran to MaxTurns without the guard firing")
+	}
+	if !strings.Contains(err.Error(), "tool-call loop") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+	var notices int
+	for _, e := range store.entries {
+		if e.Kind == KindNotification && e.Tag == "tool_loop" {
+			notices++
+		}
+	}
+	if notices == 0 {
+		t.Error("the model was never told, so it had no chance to break out itself")
+	}
+}
+
+/*
+And two calls whose answers keep changing are still not a loop.
+
+The window counts occurrences of an exchange, and an exchange includes its
+RESULT — so a model alternating between two calls that both keep answering
+differently is working, not circling. Without this the wider window would turn
+every interleaved poll into a false positive, which is the failure the original
+streak comparison could not have.
+*/
+func TestAlternatingCallsWithChangingResultsAreNotALoop(t *testing.T) {
+	store := &memStore{}
+	runner := &scriptRunner{turns: alternatingTurns(40)}
+	n := 0
+	s := &Session{
+		SessionID: "s", Store: store, Runner: runner, MaxTurns: 40,
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+			n++
+			return fmt.Sprintf("line %d", n), nil
+		},
+	}
+	if _, err := s.Turn(context.Background()); err != nil &&
+		strings.Contains(err.Error(), "tool-call loop") {
+		t.Fatalf("two calls whose results keep changing were called a loop: %v", err)
+	}
+	for _, e := range store.entries {
+		if e.Kind == KindNotification && e.Tag == "tool_loop" {
+			t.Error("a progressing alternation was warned about as a loop")
+		}
+	}
+}
