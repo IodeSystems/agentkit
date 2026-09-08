@@ -77,7 +77,7 @@ func TestLodStub_BackPointsToEvent(t *testing.T) {
 		Kind:    KindToolResult,
 		Content: strings.Repeat("x", 10_000),
 	}
-	stub := lodStub(e, 4000)
+	stub := lodStub(e, 4000, LODHead, "", "")
 
 	if !strings.Contains(stub, "event_id=abc-123") {
 		t.Errorf("stub missing event_id back-pointer: %q", stub)
@@ -400,4 +400,64 @@ func TestSummarize_PausesClock(t *testing.T) {
 	if !resumed {
 		t.Error("the resume func was not called after the compaction")
 	}
+}
+
+// A tool that answers at the BOTTOM keeps its bottom.
+//
+// `lodStub` kept a head only, so a truncated test suite lost the one line that
+// says whether it passed: suites put first failures at the top and the verdict
+// at the end. Recorded as a known tradeoff on 2026-09-06 and deliberately not
+// gold-plated then — "a head+tail option on lodStub would close it".
+func TestATailAnsweringToolKeepsItsVerdict(t *testing.T) {
+	body := "FAIL TestOne\n" + strings.Repeat("noise\n", 4000) + "SUITE FAILED: 1 of 900\n"
+	e := Entry{ID: "e1", Kind: KindToolResult, ToolName: "test.run", Content: body}
+
+	if head := lodStub(e, 2000, LODHead, "test.run", ""); strings.Contains(head, "SUITE FAILED") {
+		t.Fatal("the fixture does not discriminate: the verdict is inside the head")
+	}
+	ends := lodStub(e, 2000, LODEnds, "test.run", "")
+	if !strings.Contains(ends, "SUITE FAILED: 1 of 900") {
+		t.Errorf("the verdict was truncated away: %q", last(ends, 200))
+	}
+	if !strings.Contains(ends, "FAIL TestOne") {
+		t.Errorf("the first failure was dropped; both ends is the point: %q", ends[:200])
+	}
+	// The elision is COUNTED, so a model can tell a gap from a join.
+	if !strings.Contains(ends, "characters") {
+		t.Errorf("the stub does not say how much it removed: %q", ends)
+	}
+
+	tail := lodStub(e, 2000, LODTail, "test.run", "")
+	if !strings.Contains(tail, "SUITE FAILED") {
+		t.Errorf("a tail-keeping stub lost the tail: %q", tail)
+	}
+}
+
+// A stub says what the call ASKED, not only what came back.
+//
+// The head of a truncated result is the top of whatever the tool returned — for
+// a file its first lines, for a listing an arbitrary few — and never why the
+// session went looking. The arguments answer that for nothing: the model
+// already wrote them and they are already in the log.
+func TestAStubCarriesTheCallThatProducedIt(t *testing.T) {
+	e := Entry{ID: "e2", Kind: KindToolResult, ToolName: "dir.grep",
+		Content: strings.Repeat("match\n", 5000)}
+	stub := lodStub(e, 1000, LODHead, "dir.grep", `{"pattern":"func TestD1"}`)
+
+	if !strings.Contains(stub, "dir.grep") {
+		t.Errorf("the stub does not name the tool: %q", stub)
+	}
+	if !strings.Contains(stub, "func TestD1") {
+		t.Errorf("the stub does not say what was asked, which is the whole point: %q", stub)
+	}
+	if !strings.Contains(stub, "event_id=e2") {
+		t.Errorf("the back-pointer was lost: %q", stub)
+	}
+}
+
+func last(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }

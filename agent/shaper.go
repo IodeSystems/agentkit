@@ -6,8 +6,28 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iodesystems/agentkit/llm"
+)
+
+// LODKeep says which end of a truncated tool result carries its answer.
+//
+// A file read is answered at the top and a test run at the bottom: its first
+// failures come first and its verdict comes last, so a head-only stub of a
+// suite drops the line that says whether it passed. Which end matters is the
+// tool's business, and the tool is the only thing that knows it.
+type LODKeep string
+
+const (
+	// LODHead keeps the beginning. The default, and right for a file, a
+	// listing, or a search whose matches are ordered.
+	LODHead LODKeep = "head"
+	// LODTail keeps the end — output whose conclusion is its last line.
+	LODTail LODKeep = "tail"
+	// LODEnds keeps both, with the elision counted between them. For output
+	// that opens with what went wrong and closes with the verdict on it.
+	LODEnds LODKeep = "ends"
 )
 
 // ShaperPolicy captures per-model context-window policy. A host builds it
@@ -112,6 +132,15 @@ type Shaper struct {
 	// is "<prefix>.Shaper.Build". A host sets this to keep its labels stable.
 	SpanPrefix string
 	Tracer     Tracer // optional; nil = no spans
+	// ToolLOD says which end of a truncated result each tool answers at.
+	//
+	// Keyed by tool name; absent means LODHead, which is right for the majority
+	// (a file, a listing, a search). It is a property of the TOOL, known where
+	// the tool is registered, so the shaper is told rather than guessing — and
+	// it cannot ride on `llm.ToolDef`, which is the wire shape sent to the
+	// provider.
+	ToolLOD map[string]LODKeep
+
 	// Pause, if set, is called before the compaction LLM call and returns the
 	// resume func. A host uses it to STOP the turn's budget clock for the
 	// duration of the summarize call: compaction is bookkeeping, not model
@@ -373,34 +402,104 @@ func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
 // pristine tail get LOD-truncated content.
 func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod bool) []llm.Message {
 	olderEnd := len(entries) - pristineCount
+	// What each result was ASKED. The arguments live on the call and the
+	// truncation happens on the result, so a stub cannot see them without this.
+	//
+	// A stub says what it replaced — "[truncated event_id=… len=191623]" — and
+	// the head that follows is the top of whatever came back, which for a file
+	// is its first lines and for a listing is an arbitrary few. What it never
+	// said is what the session was LOOKING for, which is the thing it needs
+	// forty rounds later. The arguments answer that for free: the model already
+	// wrote them, they are already in the log, and `{"pattern":"func TestD1"}`
+	// is the purpose of that call in compressed form.
+	askedBy := map[string]string{}
+	for _, e := range entries {
+		if e.Kind == KindToolCall && e.ToolCallID != "" {
+			askedBy[e.ToolCallID] = e.Content
+		}
+	}
 	return groupMessages(system, entries, func(i int, e Entry) string {
 		content := e.Content
 		if lod && i < olderEnd && len(content) > sh.Policy.LODTruncateAboveChars && sh.Policy.LODTruncateAboveChars > 0 {
-			content = lodStub(e, sh.Policy.LODTruncateAboveChars)
+			content = sh.stub(e, sh.Policy.LODTruncateAboveChars, askedBy[e.ToolCallID])
 		} else if n := sh.Policy.MaxToolResultChars; n > 0 && len(content) > n {
 			// Not aged out and not under LOD — the preserved tail. Bounded
 			// anyway, because "recent" is not a reason to be unbounded.
-			content = lodStub(e, n)
+			content = sh.stub(e, n, askedBy[e.ToolCallID])
 		}
 		return content
 	}, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
 }
 
-// lodStub replaces content with a short head + a pointer back to the source
+// stub truncates one entry, keeping the end of it this tool's answers live at.
+func (sh *Shaper) stub(e Entry, maxChars int, asked string) string {
+	keep := LODHead
+	if k, ok := sh.ToolLOD[e.ToolName]; ok {
+		keep = k
+	}
+	return lodStub(e, maxChars, keep, e.ToolName, asked)
+}
+
+// lodStub replaces content with a short excerpt + a pointer back to the source
 // entry so a future read-truncated-field tool call can fetch the full version.
-func lodStub(e Entry, maxChars int) string {
-	head := e.Content
-	keep := maxChars / 2
-	if keep < 100 {
-		keep = 100
+//
+// WHICH excerpt is the tool's business, not the shaper's. A file read is
+// answered at the top; a test run puts its first failures at the top and its
+// verdict at the BOTTOM, so a head-only stub of a suite drops the one line that
+// says whether it passed — a known defect since 2026-09-06, deliberately not
+// gold-plated then and closed here.
+func lodStub(e Entry, maxChars int, keep LODKeep, tool, asked string) string {
+	body, n := e.Content, maxChars/2
+	if n < 100 {
+		n = 100
 	}
-	if keep > len(head) {
-		keep = len(head)
+	var excerpt string
+	switch {
+	case len(body) <= n:
+		excerpt = body
+	case keep == LODTail:
+		excerpt = "…\n" + cutRunes(body[len(body)-n:], true)
+	case keep == LODEnds:
+		// Half each end. The elision says how much went, so a model can tell a
+		// gap from a join.
+		h := n / 2
+		excerpt = cutRunes(body[:h], false) +
+			fmt.Sprintf("\n… %d characters …\n", len(body)-2*h) +
+			cutRunes(body[len(body)-h:], true)
+	default:
+		excerpt = cutRunes(body[:n], false) + "\n…"
 	}
-	return fmt.Sprintf("[truncated event_id=%s len=%d]\n%s%s",
-		e.ID, len(e.Content), head[:keep],
-		ifThen(len(head) > keep, "\n…"),
-	)
+	head := fmt.Sprintf("[truncated event_id=%s len=%d", e.ID, len(e.Content))
+	if tool != "" {
+		head += " · " + tool
+	}
+	if asked != "" {
+		head += " " + oneLine(asked, 200)
+	}
+	return head + "]\n" + excerpt
+}
+
+// cutRunes trims a byte slice back to a rune boundary — from the front when the
+// cut was at the front, from the back otherwise. A cut mid-rune is invalid
+// UTF-8, which some providers reject outright.
+func cutRunes(s string, fromFront bool) string {
+	for len(s) > 0 && !utf8.ValidString(s) {
+		if fromFront {
+			s = s[1:]
+		} else {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
+}
+
+// oneLine flattens a call's arguments onto the stub's header line.
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		s = cutRunes(s[:max], false) + "…"
+	}
+	return s
 }
 
 func ifThen(cond bool, then string) string {
