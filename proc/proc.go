@@ -84,6 +84,8 @@ type Proc struct {
 	partial []byte // bytes since the last newline; not reportable yet
 	pending []byte // matched whole lines not yet reported
 	written int64
+	rows    *Rows
+	extract Extract
 	done    bool
 	settled bool
 	result  string
@@ -94,6 +96,24 @@ type Proc struct {
 // held in memory until OpenLog is called.
 func New(id int, kind, label, logPath string, now time.Time) *Proc {
 	return &Proc{ID: id, Kind: kind, Label: label, LogPath: logPath, started: now}
+}
+
+// Collect turns this process's output into rows as well as text.
+//
+// The extract runs on the same complete lines the monitor sees, so a process is
+// never parsed twice and a half-line is never handed to a parser. Passing a nil
+// Rows stops collection without disturbing the text side.
+func (p *Proc) Collect(rows *Rows, e Extract) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rows, p.extract = rows, e
+}
+
+// Rows is the structured side, or nil when nothing is collecting.
+func (p *Proc) Rows() *Rows {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rows
 }
 
 // Watch replaces the monitor policy and returns an error only when the pattern
@@ -148,9 +168,29 @@ func (p *Proc) Write(b []byte) string {
 	if i := bytes.LastIndexByte(p.partial, '\n'); i >= 0 {
 		whole := p.partial[:i+1]
 		p.partial = append([]byte(nil), p.partial[i+1:]...)
+		p.collect(whole)
 		p.pending = append(p.pending, p.keep(whole)...)
 	}
 	return p.report(false, time.Now())
+}
+
+// collect extracts rows from whole lines. An extract that fails on one line
+// must not stop the process: its output is still going to the log, and a parser
+// that cannot read one line of a build is the ordinary case rather than an
+// error.
+func (p *Proc) collect(b []byte) {
+	if p.rows == nil || p.extract == nil {
+		return
+	}
+	for _, line := range bytes.SplitAfter(b, []byte("\n")) {
+		line = bytes.TrimRight(line, "\n")
+		if len(line) == 0 {
+			continue
+		}
+		if row, ok := p.extract(line); ok {
+			_ = p.rows.Append(row)
+		}
+	}
 }
 
 // keep filters whole lines down to what the monitor asked for.
