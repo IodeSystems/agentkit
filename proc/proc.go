@@ -85,6 +85,7 @@ type Proc struct {
 	pending []byte // matched whole lines not yet reported
 	written int64
 	rows    *Rows
+	queries []*QueryMonitor
 	extract Extract
 	done    bool
 	settled bool
