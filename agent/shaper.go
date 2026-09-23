@@ -150,6 +150,18 @@ type Shaper struct {
 	// reads as a crash. nil = no pause (the call runs on the caller's context
 	// and budget as-is).
 	Pause func() (resume func())
+
+	// Task is what the session is FOR, shown to the summarizer on every fold.
+	//
+	// A fold sends only the oldest entries, and the summarizer was told nothing
+	// else — so it judged what mattered by what was there, and one large early
+	// tool result dominated the summary while the task it was read for went
+	// unmentioned. The task is the measure of what to keep.
+	//
+	// Empty → Build falls back to the system prompt it was given, which is
+	// where a host normally states the task. Compact has no system prompt, so
+	// a host that forces folds sets this.
+	Task string
 }
 
 func (sh *Shaper) spanName(n string) string {
@@ -223,7 +235,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
 		// entries into a summary marker. If nothing summarizable remains, return
 		// what we have.
-		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target)
+		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target, sh.taskOr(system))
 		if err != nil {
 			return nil, err
 		}
@@ -259,7 +271,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 // re-measuring here would report a different number than the one that triggered
 // it. Zero from a caller that has no measurement (the public Compact) means the
 // start report carries what it knows and no more.
-func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target int) (CompactionInfo, bool, error) {
+func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target int, task string) (CompactionInfo, bool, error) {
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
 	}
@@ -300,7 +312,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		At:           startedAt,
 	})
 
-	summary, err := sh.summarize(ctx, entries[:olderEnd])
+	summary, err := sh.summarize(ctx, entries[:olderEnd], task)
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -356,7 +368,16 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
 	// No measured trigger: this fold was asked for, not forced by a budget, so
 	// there is no "tokens before" that caused it and no target it is aiming at.
-	return sh.compactOldest(ctx, sessionID, 0, 0)
+	return sh.compactOldest(ctx, sessionID, 0, 0, sh.Task)
+}
+
+// taskOr is the task a fold is judged against: the host's, else the system
+// prompt the turn was built with.
+func (sh *Shaper) taskOr(system string) string {
+	if sh.Task != "" {
+		return sh.Task
+	}
+	return system
 }
 
 // classifyPristineCount returns the number of trailing entries that qualify
@@ -530,8 +551,17 @@ func summarizeErr(ctx context.Context, err error) error {
 
 // summarize calls the model on the oldest contiguous prefix of entries and
 // asks for a concise summary. The returned text becomes the marker content.
-func (sh *Shaper) summarize(ctx context.Context, entries []Entry) (string, error) {
+//
+// The task goes first, so the summarizer keeps what serves it rather than what
+// was largest. The session after the fold still has its system prompt; what it
+// loses is the history, so the summary must carry what the task needs from it.
+func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string) (string, error) {
 	var b strings.Builder
+	if task = strings.TrimSpace(task); task != "" {
+		b.WriteString("The session these events belong to has this task:\n<task>\n")
+		b.WriteString(task)
+		b.WriteString("\n</task>\n\nKeep what serves that task: files and identifiers it touched, what was changed or committed, results that decide it, and what remains. Drop output that does not bear on it.\n\n")
+	}
 	b.WriteString("Summarize the following events in <= 500 tokens. Preserve user requests, agent identifiers, decisions, and any open questions. Output the summary only — no preamble.\n\n")
 	for i, e := range entries {
 		label := string(e.Kind)

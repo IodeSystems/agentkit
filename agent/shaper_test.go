@@ -461,3 +461,60 @@ func last(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+// The summarizer is shown the session's task, so a fold keeps what serves it.
+//
+// Before this it saw only the oldest entries under "Summarize the following
+// events", and a large early tool result decided what the summary was about.
+// Both paths are covered: Build folds under budget pressure and knows the
+// system prompt; Compact is forced and knows only what the host set.
+func TestSummarize_SeesTheTask(t *testing.T) {
+	const task = "Fix the flaky TestLeaseRenewal in internal/lease"
+	history := func() *memStore {
+		s := &memStore{}
+		kinds := []EntryKind{KindUser, KindToolCall, KindToolResult, KindAssistant, KindUser}
+		for i, k := range kinds {
+			s.entries = append(s.entries, Entry{
+				ID: fmt.Sprintf("e%d", i), Kind: k, ToolCallID: "c1",
+				Content: strings.Repeat("unrelated file body ", 60), CreatedAt: int64(i + 1),
+			})
+		}
+		return s
+	}
+	promptOf := func(t *testing.T, r *scriptRunner) string {
+		t.Helper()
+		if len(r.seen) == 0 {
+			t.Fatal("no summarize call was made")
+		}
+		var b strings.Builder
+		for _, m := range r.seen[0] {
+			b.WriteString(m.Content)
+		}
+		return b.String()
+	}
+
+	t.Run("Build passes the system prompt", func(t *testing.T) {
+		r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "S"}}, {{Content: "S"}}, {{Content: "S"}}, {{Content: "S"}}}}
+		sh := &Shaper{Store: history(), Runner: r, Policy: ShaperPolicy{
+			BudgetTokens: 300, LODHeadroomTokens: -1, PreserveLastMessages: 1,
+		}}
+		if _, err := sh.Build(context.Background(), "s", task); err != nil {
+			t.Fatal(err)
+		}
+		if p := promptOf(t, r); !strings.Contains(p, task) {
+			t.Errorf("the summarizer was not shown the task; its prompt began: %.200q", p)
+		}
+	})
+	t.Run("Compact passes the host's Task", func(t *testing.T) {
+		r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "S"}}}}
+		sh := &Shaper{Store: history(), Runner: r, Task: task, Policy: ShaperPolicy{
+			BudgetTokens: 1_000_000, PreserveLastMessages: 1,
+		}}
+		if _, ok, err := sh.Compact(context.Background(), "s"); err != nil || !ok {
+			t.Fatalf("Compact: ok=%v err=%v", ok, err)
+		}
+		if p := promptOf(t, r); !strings.Contains(p, task) {
+			t.Errorf("the summarizer was not shown the task; its prompt began: %.200q", p)
+		}
+	})
+}
