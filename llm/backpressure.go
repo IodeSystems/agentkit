@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// backpressureReasonQueueTimeout is corrallm's Backpressure.Reason for "we
+// queued the request and gave up only once OUR OWN queue timeout elapsed" —
+// as opposed to "rejected" (queue was already full) or any other reason.
+// postWithRetry treats it specially: the server already paced us, so it
+// retries at once instead of adding this client's own backoff on top. See
+// maxQueueTimeoutStreak.
+const backpressureReasonQueueTimeout = "queue-timeout"
+
 // Backpressure is the detail a fair-share proxy attaches to a 429.
 //
 // corrallm's proxy answers a saturated backend with a fully actionable 429 —

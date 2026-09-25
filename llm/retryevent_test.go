@@ -58,7 +58,11 @@ func TestOnRetry_429ThenRecovered(t *testing.T) {
 // TestOnRetry_429CarriesQueueDetail — corrallm's proxy answers a saturated
 // backend with the whole picture (Retry-After + capacity/in-flight/waiting +
 // a reason). All of it must reach the hook: "4/4 slots busy, 2 waiting ahead,
-// queue-timeout" tells a user whether to wait; "429" tells them nothing.
+// rejected" tells a user whether to wait; "429" tells them nothing.
+//
+// Reason is "rejected" (queue full), not "queue-timeout": that reason gets
+// its own immediate-retry path (see TestPostChatWithRetry_QueueTimeoutRetriesImmediately)
+// and this test is about detail propagation on the still-backing-off path.
 func TestOnRetry_429CarriesQueueDetail(t *testing.T) {
 	fastBackoff(t)
 	var hits atomic.Int32
@@ -74,7 +78,7 @@ func TestOnRetry_429CarriesQueueDetail(t *testing.T) {
 		h.Set("X-RateLimit-Waiting", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(w, `{"error":{"message":"backend at capacity; retry after backoff",`+
-			`"type":"backpressure","reason":"queue-timeout","retry_after":1,`+
+			`"type":"backpressure","reason":"rejected","retry_after":1,`+
 			`"capacity":4,"in_flight":4,"waiting":2}}`)
 	}))
 	defer srv.Close()
@@ -98,20 +102,20 @@ func TestOnRetry_429CarriesQueueDetail(t *testing.T) {
 	if ev.BP.Capacity != 4 || ev.BP.InFlight != 4 || ev.BP.Waiting != 2 {
 		t.Errorf("queue = %d/%d busy, %d waiting; want 4/4 and 2", ev.BP.InFlight, ev.BP.Capacity, ev.BP.Waiting)
 	}
-	if ev.BP.Reason != "queue-timeout" {
-		t.Errorf("BP.Reason = %q; want queue-timeout", ev.BP.Reason)
+	if ev.BP.Reason != "rejected" {
+		t.Errorf("BP.Reason = %q; want rejected", ev.BP.Reason)
 	}
 	if !ev.ServerAsked {
 		t.Error("ServerAsked = false; the server sent Retry-After, so the wait is its estimate")
 	}
 	// The server's 1s, not our own schedule — plus additive jitter, which is
-	// what keeps a queue-timeout from marching every rejected caller back in on
-	// the same tick. Never below the server's ask; never more than the fraction
-	// above it. See retryJitterFraction.
+	// what keeps a rejected caller from marching back in on the same tick as
+	// every other rejected caller. Never below the server's ask; never more
+	// than the fraction above it. See retryJitterFraction.
 	if maxDelay := time.Second + time.Duration(retryJitterFraction*float64(time.Second)); ev.Delay < time.Second || ev.Delay > maxDelay {
 		t.Errorf("Delay = %s; want the server's 1s plus jitter (≤ %s), not our schedule", ev.Delay, maxDelay)
 	}
-	for _, want := range []string{"4/4 slots busy", "2 waiting ahead", "queue-timeout"} {
+	for _, want := range []string{"4/4 slots busy", "2 waiting ahead", "rejected"} {
 		if !strings.Contains(ev.Reason, want) {
 			t.Errorf("Reason = %q; want it to mention %q", ev.Reason, want)
 		}

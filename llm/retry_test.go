@@ -227,6 +227,10 @@ func TestRetryAfterFrom(t *testing.T) {
 // TestPostChatWithRetry_RespectsBodyRetryAfter — a 429 whose ONLY retry hint
 // is a corrallm-style JSON body (no Retry-After header) must still shape the
 // sleep. This is the exact shape observed live at llm.iodesystems.com.
+//
+// Reason is "rejected", not "queue-timeout": queue-timeout retries
+// immediately (see TestPostChatWithRetry_QueueTimeoutRetriesImmediately) and
+// would not exercise the backoff this test is asserting.
 func TestPostChatWithRetry_RespectsBodyRetryAfter(t *testing.T) {
 	saveInit, saveMax := retryInitialBackoffSet(10*time.Millisecond, 5*time.Second)
 	defer retryInitialBackoffSet(saveInit, saveMax)
@@ -236,7 +240,7 @@ func TestPostChatWithRetry_RespectsBodyRetryAfter(t *testing.T) {
 		n := hits.Add(1)
 		if n == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = io.WriteString(w, `{"error":{"reason":"queue-timeout","retry_after":1,"type":"backpressure"}}`)
+			_, _ = io.WriteString(w, `{"error":{"reason":"rejected","retry_after":1,"type":"backpressure"}}`)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -753,5 +757,161 @@ func TestFiveXXGiveUpIncludesTheServerMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cuda oom") {
 		t.Errorf("the server's message was discarded: %v", err)
+	}
+}
+
+// TestPostChatWithRetry_QueueTimeoutRetriesImmediately — a 429 whose reason is
+// "queue-timeout" means corrallm already paced this caller: it queued the
+// request and answered only once ITS OWN queue timeout elapsed. The client
+// must retry AT ONCE (a few ms of jitter, not a backoff sleep) rather than
+// idling a slot that may already be free again — even though the server's own
+// body asks for a much longer wait, which the old behavior would have slept.
+func TestPostChatWithRetry_QueueTimeoutRetriesImmediately(t *testing.T) {
+	// A large backoff schedule: if the client fell back to sleeping it (the
+	// old behavior), this test's elapsed-time assertion below would fail.
+	saveInit, saveMax := retryInitialBackoffSet(5*time.Second, 30*time.Second)
+	defer retryInitialBackoffSet(saveInit, saveMax)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			// Server asks for 5s — the client must ignore this for a
+			// queue-timeout and retry now instead.
+			_, _ = io.WriteString(w, `{"error":{"reason":"queue-timeout","retry_after":5,"type":"backpressure"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "m")
+	start := time.Now()
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("postChatWithRetry: %v", err)
+	}
+	resp.Body.Close()
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("server hits = %d; want 2 (one queue-timeout 429, one 200)", got)
+	}
+	// Old behavior (sleeping the schedule above) would take ≥5s. Immediate
+	// retry is jittered up to immediateRetryJitterCeiling (250ms default) plus
+	// two round trips to an httptest server — well under 1s.
+	if elapsed >= 1*time.Second {
+		t.Errorf("elapsed = %v; want well under the old %s backoff — queue-timeout should retry immediately", elapsed, retryInitialBackoff)
+	}
+}
+
+// TestPostChatWithRetry_RejectedStillBacksOff — a 429 whose reason is
+// "rejected" means the queue itself was already full: the server never even
+// started waiting on this caller's behalf. Unlike queue-timeout, this keeps
+// the client's own backoff — corrallm is telling every client it is
+// saturated, not just handing one caller back after pacing it.
+func TestPostChatWithRetry_RejectedStillBacksOff(t *testing.T) {
+	saveInit, saveMax := retryInitialBackoffSet(10*time.Millisecond, 5*time.Second)
+	defer retryInitialBackoffSet(saveInit, saveMax)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"reason":"rejected","retry_after":1,"type":"backpressure"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "m")
+	start := time.Now()
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("postChatWithRetry: %v", err)
+	}
+	resp.Body.Close()
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("server hits = %d; want 2 (one rejected 429, one 200)", got)
+	}
+	// Honored the body's retry_after:1 (not immediate, not the 10ms initial
+	// backoff).
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v; want ≥ ~1s — a rejected 429 must still back off", elapsed)
+	}
+}
+
+// TestPostChatWithRetry_QueueTimeoutStreakFallsBackToBackoff — a run of
+// maxQueueTimeoutStreak consecutive queue-timeout 429s retries immediately
+// each time; the NEXT one (streak exhausted) must fall back to a real backoff
+// sleep instead of retrying immediately forever, so a queue that never drains
+// cannot be hammered without pause.
+func TestPostChatWithRetry_QueueTimeoutStreakFallsBackToBackoff(t *testing.T) {
+	saveInit, saveMax := retryInitialBackoffSet(100*time.Millisecond, 500*time.Millisecond)
+	defer retryInitialBackoffSet(saveInit, saveMax)
+	saveStreak := maxQueueTimeoutStreak
+	maxQueueTimeoutStreak = 3
+	defer func() { maxQueueTimeoutStreak = saveStreak }()
+	saveJitter := immediateRetryJitterCeiling
+	immediateRetryJitterCeiling = 10 * time.Millisecond
+	defer func() { immediateRetryJitterCeiling = saveJitter }()
+
+	// maxQueueTimeoutStreak(3) immediate retries, then one that must back off,
+	// then success.
+	const queueTimeouts = 4
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n <= queueTimeouts {
+			w.WriteHeader(http.StatusTooManyRequests)
+			// No retry_after: exercises the client's OWN backoff schedule on
+			// the fallback attempt, not a server-supplied wait.
+			_, _ = io.WriteString(w, `{"error":{"reason":"queue-timeout","type":"backpressure"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var evs []RetryEvent
+	c := NewClient(srv.URL, "", "m")
+	c.OnRetry = func(ev RetryEvent) { evs = append(evs, ev) }
+	resp, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
+	if err != nil {
+		t.Fatalf("postChatWithRetry: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := hits.Load(); got != queueTimeouts+1 {
+		t.Fatalf("server hits = %d; want %d", got, queueTimeouts+1)
+	}
+	// 4 Retry429 events (3 immediate + 1 backed-off) + 1 RetryRecovered.
+	if len(evs) != queueTimeouts+1 {
+		t.Fatalf("events = %d (%+v); want %d", len(evs), evs, queueTimeouts+1)
+	}
+	for i := 0; i < maxQueueTimeoutStreak; i++ {
+		if evs[i].Kind != Retry429 {
+			t.Fatalf("event %d kind = %v; want Retry429", i, evs[i].Kind)
+		}
+		if evs[i].Delay >= 100*time.Millisecond {
+			t.Errorf("event %d Delay = %s; want a near-immediate retry (jitter ≤ %s)", i, evs[i].Delay, immediateRetryJitterCeiling)
+		}
+		if evs[i].ServerAsked {
+			t.Errorf("event %d ServerAsked = true; an immediate retry ignores the server's ask", i)
+		}
+	}
+	fallback := evs[maxQueueTimeoutStreak]
+	if fallback.Kind != Retry429 {
+		t.Fatalf("fallback event kind = %v; want Retry429", fallback.Kind)
+	}
+	if fallback.Delay < 250*time.Millisecond {
+		t.Errorf("fallback Delay = %s; want a real backoff sleep (≥ ~%s) once the streak is exhausted", fallback.Delay, retryInitialBackoff)
+	}
+	last := evs[len(evs)-1]
+	if last.Kind != RetryRecovered {
+		t.Errorf("last event kind = %v; want RetryRecovered", last.Kind)
 	}
 }

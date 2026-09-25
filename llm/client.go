@@ -559,6 +559,50 @@ func jittered(d time.Duration) time.Duration {
 	return d + time.Duration(rand.Float64()*retryJitterFraction*float64(d))
 }
 
+// maxQueueTimeoutStreak caps consecutive IMMEDIATE (no-backoff) retries on a
+// queue-timeout 429 before this client falls back to the normal backoff
+// schedule for one attempt. See the queue-timeout branch in postWithRetry.
+//
+// A queue-timeout 429 means corrallm already paced us: it queued the request
+// and answered only once ITS OWN queue timeout elapsed, so retrying at once
+// just re-enters the same queue rather than adding load. Backing off on top
+// of that wait was measured idling the slot: 2026-09-25, 24h of the aw4
+// journal — 392 queue-timeout 429s, ~7,537s spent asleep in this client's own
+// backoff, against a model busy only 34% of the day. Retrying immediately
+// (jittered 0-250ms, see immediateRetryDelay) removes that self-inflicted
+// idle time.
+//
+// But a server that NEVER frees a slot must not be hammered forever, so the
+// immediate path is capped. 5 matches retry5xxMaxAttempts — this client's
+// other "how many times before we stop assuming the failure is transient and
+// change strategy" cap — for the same reason: enough attempts to ride out an
+// ordinary contention swing (the model is idle 66% of the day; a slot should
+// free within a handful of tries), few enough that a queue which truly never
+// drains falls back to exponential backoff within seconds, not minutes.
+//
+// var so tests can override; production never mutates.
+var maxQueueTimeoutStreak = 5
+
+// immediateRetryJitterCeiling bounds the jitter on an immediate (queue-timeout)
+// retry. Not retryJitterFraction: that fraction scales a backoff being slept,
+// and an immediate retry sleeps ~0. corrallm hands every caller queue-timed-out
+// in the same instant the same signal (their shared queue timeout firing), so
+// without spread they would all re-POST together; 250ms is enough to break
+// that lockstep without adding a delay a human would notice.
+//
+// var so tests can override; production never mutates.
+var immediateRetryJitterCeiling = 250 * time.Millisecond
+
+// immediateRetryDelay returns a small random delay in [0, immediateRetryJitterCeiling)
+// — "retry now", with just enough spread that concurrent callers whose
+// queue-timeouts fired together don't re-POST in lockstep.
+func immediateRetryDelay() time.Duration {
+	if immediateRetryJitterCeiling <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(immediateRetryJitterCeiling)))
+}
+
 // defaultRetryBudget bounds the TOTAL wall-clock a single postChatWithRetry
 // spends retrying (429 + 5xx) before it gives up with a clear error, when the
 // caller hasn't set Client.RetryBudget. 5m matches a "keep trying through a
@@ -637,6 +681,10 @@ type callIdent struct {
 func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, ident callIdent) (*http.Response, error) {
 	backoff := retryInitialBackoff
 	fiveXXAttempts := 0
+	// queueTimeoutStreak counts CONSECUTIVE queue-timeout 429s retried
+	// immediately (no backoff sleep). Reset by anything that isn't a
+	// queue-timeout 429 in a row — see maxQueueTimeoutStreak.
+	queueTimeoutStreak := 0
 	budget := c.retryBudget()
 	start := time.Now()
 	deadline := start.Add(budget)
@@ -679,6 +727,9 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
+			// Breaks a queue-timeout streak: "consecutive" means uninterrupted
+			// by any other kind of failure.
+			queueTimeoutStreak = 0
 			// Transport path: the gateway is DOWN, not answering. This never
 			// reaches the 429/5xx branches below, because those classify a
 			// status code and there is no response to classify — so before
@@ -737,13 +788,14 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		switch {
 		case status == http.StatusTooManyRequests:
 			// 429 path: drain + close so the connection can be
-			// reused for the retry. Retry-After is the fair-share
-			// proxy's authoritative signal — honor it exactly
-			// (clamped to retryAfterCeiling for safety against a
-			// misbehaving server). When absent (other providers,
-			// transient overload at the model), fall back to the
-			// exp-backoff schedule. Counter NOT incremented for the
-			// 5xx cap — 429 is "wait your turn", not "broken".
+			// reused for the retry. A queue-timeout retries at once (see
+			// below); otherwise Retry-After is the fair-share proxy's
+			// authoritative signal — honor it exactly (clamped to
+			// retryAfterCeiling for safety against a misbehaving server).
+			// When absent (other providers, transient overload at the
+			// model), fall back to the exp-backoff schedule. Counter NOT
+			// incremented for the 5xx cap — 429 is "wait your turn", not
+			// "broken".
 			sleep := backoff
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -752,8 +804,38 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			// same parse that yields the delay, so reporting it costs nothing — and
 			// it is the difference between "429" and "4/4 busy, 2 ahead of you".
 			bp, asked := backpressureFrom(resp.Header, bodyBytes)
-			if asked {
-				sleep = bp.RetryAfter
+			// A queue-timeout means the server already paced us: it queued this
+			// request and answered only once ITS OWN timeout elapsed, so sleeping
+			// an additional client-side backoff on top just idles a slot that may
+			// already be free again. Retry at once instead — capped at
+			// maxQueueTimeoutStreak in a row so a queue that never drains still
+			// falls back to backoff rather than being hammered. "rejected" (queue
+			// already full) and every other reason keep the normal schedule below:
+			// backing off matters when the server is telling every client it is
+			// saturated, not just this one that waited its turn.
+			immediate := bp.Reason == backpressureReasonQueueTimeout && queueTimeoutStreak < maxQueueTimeoutStreak
+			serverAsked := asked
+			if immediate {
+				queueTimeoutStreak++
+				sleep = immediateRetryDelay()
+				serverAsked = false
+			} else {
+				// Reset the streak whether it was exhausted (bp.Reason ==
+				// queue-timeout, count == maxQueueTimeoutStreak — fall back to
+				// backoff for this one attempt, then let the NEXT run of
+				// queue-timeouts earn its own maxQueueTimeoutStreak immediate
+				// retries) or broken by a different reason ("rejected" etc,
+				// which always backs off).
+				queueTimeoutStreak = 0
+				if asked {
+					sleep = bp.RetryAfter
+				}
+				// Additive jitter — the herd-breaker. Applied to the server's own
+				// Retry-After too, because that is where the lockstep actually comes
+				// from: every caller rejected in one moment is handed the identical
+				// value. Only ever later than asked, so the proxy's word is still
+				// honored. See retryJitterFraction.
+				sleep = jittered(sleep)
 			}
 			// Keep the ticket for the next attempt. Never cleared once set: a
 			// later 429 that omits it (a different proxy in the path, a
@@ -762,12 +844,6 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 			if bp.Ticket != "" {
 				ticket = bp.Ticket
 			}
-			// Additive jitter — the herd-breaker. Applied to the server's own
-			// Retry-After too, because that is where the lockstep actually comes
-			// from: every caller rejected in one moment is handed the identical
-			// value. Only ever later than asked, so the proxy's word is still
-			// honored. See retryJitterFraction.
-			sleep = jittered(sleep)
 
 			if time.Now().Add(sleep).After(deadline) {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
@@ -777,15 +853,28 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of 429 backpressure",
 					budget, time.Since(start).Round(time.Second))
 			}
-			c.emitRetry(RetryEvent{Kind: Retry429, Attempt: attempt + 1, Status: status,
+			ev := RetryEvent{Kind: Retry429, Attempt: attempt + 1, Status: status,
 				Body:  strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
 				Delay: sleep, Elapsed: time.Since(start), Budget: budget,
-				BP: &bp, ServerAsked: asked})
+				BP: &bp, ServerAsked: serverAsked}
+			if immediate {
+				ev.Reason = fmt.Sprintf("provider queue-timeout — retrying immediately, no backoff (attempt %d, %d/%d immediate retries)",
+					attempt+1, queueTimeoutStreak, maxQueueTimeoutStreak)
+			}
+			c.emitRetry(ev)
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
-				if q := bp.String(); q != "" {
+				q := bp.String()
+				switch {
+				case immediate && q != "":
+					log.Printf("llm: provider returned 429 — %s (attempt %d); retrying immediately (%d/%d)",
+						q, attempt+1, queueTimeoutStreak, maxQueueTimeoutStreak)
+				case immediate:
+					log.Printf("llm: provider returned 429 (attempt %d); retrying immediately (%d/%d)",
+						attempt+1, queueTimeoutStreak, maxQueueTimeoutStreak)
+				case q != "":
 					log.Printf("llm: provider returned 429 — %s (attempt %d); retrying in %s",
 						q, attempt+1, sleep)
-				} else {
+				default:
 					log.Printf("llm: provider returned 429 (attempt %d); retrying in %s",
 						attempt+1, sleep)
 				}
@@ -794,6 +883,9 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 				return nil, ctx.Err()
 			}
 		case status >= 500:
+			// Breaks a queue-timeout streak: "consecutive" means uninterrupted
+			// by any other kind of failure.
+			queueTimeoutStreak = 0
 			// 5xx path: transient upstream / proxy error. Retry a
 			// bounded number of times so the trial doesn't fail
 			// on a single bad-gateway blip, but don't loop forever
