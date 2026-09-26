@@ -117,6 +117,12 @@ type Session struct {
 	usageProcessed int
 	usageGenerated int
 	usageTurns     int
+	// usageReasoning sums the reasoning tokens that are KNOWN, and the two
+	// counters say how each round came to be known. A round in neither was not
+	// reported at all — unknown, not zero.
+	usageReasoning          int
+	usageReasoningReported  int
+	usageReasoningEstimated int
 
 	// slots holds transclusion slots captured from tool results during the
 	// current Turn (see transclude.go). Reset at the top of each Turn; results
@@ -389,7 +395,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// LOD + tool-result truncation). The last build of the Turn wins.
 		result.Usage.Active = s.estimateTokens(messages)
 
-		resp, toolCalls, usage, rep, cut, e := s.streamChat(ctx, messages)
+		resp, reasoning, toolCalls, usage, rep, cut, e := s.streamChat(ctx, messages)
 		if e != nil {
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
@@ -424,6 +430,20 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				sawServerTiming = true
 			}
 		}
+		eu := s.entryUsage(usage, reasoning)
+		if eu != nil {
+			switch eu.ReasoningSource {
+			case ReasoningReported:
+				s.usageReasoning += eu.Reasoning
+				s.usageReasoningReported++
+			case ReasoningEstimated:
+				s.usageReasoning += eu.Reasoning
+				s.usageReasoningEstimated++
+			}
+		}
+		result.Usage.Reasoning = s.usageReasoning
+		result.Usage.ReasoningReported = s.usageReasoningReported
+		result.Usage.ReasoningEstimated = s.usageReasoningEstimated
 		result.Usage.Total = s.usageTotal
 		result.Usage.Cached = s.usageCached
 		result.Usage.Processed = s.usageProcessed
@@ -441,10 +461,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				ID:      NewID(),
 				Kind:    KindAssistant,
 				Content: resp,
+				// Stored, never replayed: see Entry.Reasoning.
+				Reasoning: reasoning,
 				// What this round-trip cost, recorded WITH the reply it produced.
 				// The session log is the durable record, so a replay can answer
 				// "how long, and how much" per turn without a trace sidecar.
-				Usage: entryUsage(usage),
+				Usage: eu,
 				// now(), NOT time.Now(): this was the one Append in the loop
 				// that ignored the session clock, and history is ordered by
 				// CreatedAt.
@@ -559,6 +581,13 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// Persist the assistant's tool CALLS (id + name + arguments) so a
 		// rebuilt context has a valid assistant(tool_calls) → tool(tool_call_id)
 		// structure, not orphan tool messages that confuse the model on replay.
+		// A round that wrote no prose persisted no assistant entry above, so its
+		// reasoning and its cost ride on the FIRST call it made instead. Without
+		// this a tool-only round — most rounds of an agent — records neither.
+		roundReasoning, roundUsage := "", (*EntryUsage)(nil)
+		if resp == "" {
+			roundReasoning, roundUsage = reasoning, eu
+		}
 		for _, tc := range toolCalls {
 			// Arguments that are not valid JSON must never be persisted VERBATIM.
 			// They POISON THE SESSION: providers deserialize historical
@@ -588,10 +617,13 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				Content:    args,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
+				Reasoning:  roundReasoning,
+				Usage:      roundUsage,
 				CreatedAt:  now(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist tool call: %w", e)
 			}
+			roundReasoning, roundUsage = "", nil
 		}
 
 		var sessionClosed bool
@@ -781,7 +813,7 @@ func (s *Session) estimateTokens(msgs []llm.Message) int {
 // streamChat consumes the streaming response, accumulates content, collects
 // tool calls, captures token usage (when reported), and emits per-token
 // notifications.
-func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, cut *Overflow, err error) {
+func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, reasoning string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, cut *Overflow, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("streamChat"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID).Set("n_messages", len(messages))
 	defer func() {
@@ -834,14 +866,16 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 	}
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", "", nil, nil, nil, nil, err
 	}
-	var content strings.Builder
+	var content, think strings.Builder
+	defer func() { reasoning = think.String() }()
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), toolCalls, usage, nil, nil, fmt.Errorf("%s", chunk.Error)
+			return content.String(), "", toolCalls, usage, nil, nil, fmt.Errorf("%s", chunk.Error)
 		}
+		think.WriteString(chunk.Reasoning)
 		if chunk.StopReason == llm.StopReasonRepetition {
 			rep = chunk.Repetition
 		}
@@ -881,10 +915,10 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 		// incomplete BY CONSTRUCTION — a heredoc block here would fail to parse
 		// and abort the Turn with a message about truncation, blaming the wrong
 		// cause. Hand back the prose and the finding; the caller answers it.
-		return content.String(), nil, usage, rep, cut, nil
+		return content.String(), "", nil, usage, rep, cut, nil
 	}
 	if !heredoc {
-		return content.String(), toolCalls, usage, nil, cut, nil
+		return content.String(), "", toolCalls, usage, nil, cut, nil
 	}
 	// The stop sequence consumes the terminator, so put it back before parsing.
 	// Deliberately explicit: the parser must keep REFUSING an unterminated block,
@@ -904,29 +938,49 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out s
 		// enough for InToolCall, which is all the distinction is used for.
 		if cut != nil {
 			cut.TruncatedToolCalls = []string{"unterminated heredoc block"}
-			return prose, nil, usage, nil, cut, nil
+			return prose, "", nil, usage, nil, cut, nil
 		}
 		// A malformed or cut-off call is reported, not silently dropped. The
 		// caller answers it with a tool result so the model can retry.
-		return prose, nil, usage, nil, nil, perr
+		return prose, "", nil, usage, nil, nil, perr
 	}
-	return prose, calls, usage, nil, cut, nil
+	return prose, "", calls, usage, nil, cut, nil
 }
 
-// entryUsage projects a provider usage report onto the per-entry record.
-// Returns nil when the provider reported nothing, so the field stays absent
-// rather than persisting a row of zeros that reads as "this call was free".
-func entryUsage(u *llm.Usage) *EntryUsage {
-	if u == nil {
-		return nil
+// entryUsage projects a provider usage report, and the reasoning text the round
+// streamed, onto the per-entry record. Returns nil when there is nothing to
+// say, so the field stays absent rather than persisting a row of zeros that
+// reads as "this call was free".
+//
+// Reasoning is counted in the order of how much the number can be trusted: the
+// provider's own count, else an estimate from the streamed text, else nothing —
+// and nothing leaves ReasoningSource empty, which means NOT REPORTED. It never
+// means zero: a provider that hides its reasoning still bills for it inside
+// CompletionTokens.
+func (s *Session) entryUsage(u *llm.Usage, reasoning string) *EntryUsage {
+	eu := &EntryUsage{}
+	if u != nil {
+		eu.LatencyMS = u.LatencyMS
+		eu.Cached = u.CachedPromptTokens()
+		eu.Processed = u.NewPromptTokens()
+		eu.Generated = u.CompletionTokens
 	}
-	eu := &EntryUsage{
-		LatencyMS: u.LatencyMS,
-		Cached:    u.CachedPromptTokens(),
-		Processed: u.NewPromptTokens(),
-		Generated: u.CompletionTokens,
+	if n, ok := u.ReportedReasoningTokens(); ok {
+		eu.Reasoning, eu.ReasoningSource = n, ReasoningReported
+	} else if reasoning != "" {
+		est := s.Estimate
+		if est == nil {
+			est = Default()
+		}
+		n := est.Estimate(reasoning)
+		// The estimator is conservative (it over-counts), and reasoning is a
+		// part of the completion, so the completion is a hard ceiling on it.
+		if u != nil && u.CompletionTokens > 0 && n > u.CompletionTokens {
+			n = u.CompletionTokens
+		}
+		eu.Reasoning, eu.ReasoningSource = n, ReasoningEstimated
 	}
-	if eu.LatencyMS == 0 && eu.Cached == 0 && eu.Processed == 0 && eu.Generated == 0 {
+	if eu.LatencyMS == 0 && eu.Cached == 0 && eu.Processed == 0 && eu.Generated == 0 && eu.ReasoningSource == "" {
 		return nil
 	}
 	return eu

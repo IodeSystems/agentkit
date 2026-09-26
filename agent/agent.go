@@ -75,8 +75,17 @@ type Entry struct {
 	//
 	// Nil on every other kind, and omitted when marshalled, so stores and
 	// consumers that predate it are unaffected.
-	Usage    *EntryUsage `json:"Usage,omitempty"`
-	ToolName string      // the tool for KindToolCall / KindToolResult
+	Usage *EntryUsage `json:"Usage,omitempty"`
+	// Reasoning is the model's reasoning text for the round that produced this
+	// entry, when the provider streamed it. Stamped on the entry that carries
+	// the round's Usage: the KindAssistant reply, or — for a round with no
+	// prose — its first KindToolCall.
+	//
+	// RECORD ONLY. It is never rendered into an llm.Message: replaying reasoning
+	// would spend context on thought the model already acted on. A Store that
+	// does not persist it loses nothing the loop needs.
+	Reasoning string `json:"Reasoning,omitempty"`
+	ToolName  string // the tool for KindToolCall / KindToolResult
 	// Tag is an opaque display label used only when rendering a
 	// KindNotification (e.g. the host's raw event-type "nudge"). Empty →
 	// the Kind string is used.
@@ -238,6 +247,14 @@ type TokenUsage struct {
 	Processed int
 	Generated int
 
+	// Reasoning is the part of Generated known to be reasoning, summed over the
+	// rounds whose reasoning is known. ReasoningReported and ReasoningEstimated
+	// count those rounds by source; Turns minus both is the rounds whose
+	// reasoning was not reported, which Reasoning does not include.
+	Reasoning          int
+	ReasoningReported  int
+	ReasoningEstimated int
+
 	// Turns counts chat round-trips accumulated into this tally — the divisor
 	// for any per-turn figure.
 	Turns int
@@ -252,7 +269,22 @@ type EntryUsage struct {
 	Cached    int   `json:"cached,omitempty"`
 	Processed int   `json:"processed,omitempty"`
 	Generated int   `json:"generated,omitempty"`
+	// Reasoning is the part of Generated spent reasoning, and ReasoningSource
+	// says where the number came from. An empty source means the provider
+	// neither counted reasoning nor streamed it: UNKNOWN, not zero.
+	Reasoning       int    `json:"reasoning,omitempty"`
+	ReasoningSource string `json:"reasoning_source,omitempty"`
 }
+
+// ReasoningSource values. See EntryUsage.
+const (
+	// ReasoningReported — the provider counted it (usage.completion_tokens_details).
+	ReasoningReported = "reported"
+	// ReasoningEstimated — the provider streamed the text but did not count it,
+	// so the count is the session's token estimate of the text, capped at the
+	// round's completion tokens.
+	ReasoningEstimated = "estimated"
+)
 
 // TurnResult is what Turn returns: the model's final reply, whatever the loop
 // did to the context to keep it in budget, and the running token tally.

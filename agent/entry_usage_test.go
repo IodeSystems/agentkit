@@ -14,7 +14,7 @@ func TestEntryUsageProjectsTheSplit(t *testing.T) {
 		LatencyMS:           2818,
 		PromptTokensDetails: &llm.PromptTokensDetails{CachedTokens: 900},
 	}
-	eu := entryUsage(u)
+	eu := (&Session{}).entryUsage(u, "")
 	if eu == nil {
 		t.Fatal("nil usage record for a reported call")
 	}
@@ -31,10 +31,10 @@ func TestEntryUsageProjectsTheSplit(t *testing.T) {
 // A provider that reports nothing must leave the field ABSENT — a row of zeros
 // would read as "this call was free", which is worse than no data.
 func TestEntryUsageNilWhenNothingReported(t *testing.T) {
-	if entryUsage(nil) != nil {
+	if (&Session{}).entryUsage(nil, "") != nil {
 		t.Error("nil usage should project to nil")
 	}
-	if got := entryUsage(&llm.Usage{}); got != nil {
+	if got := (&Session{}).entryUsage(&llm.Usage{}, ""); got != nil {
 		t.Errorf("empty usage should project to nil, got %+v", got)
 	}
 }
