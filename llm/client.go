@@ -193,11 +193,18 @@ type ToolDef struct {
 // chunk carries Usage (when the provider supports include_usage); all
 // other fields will be zero on that chunk.
 type StreamChunk struct {
-	Content  string
-	ToolCall *ToolCall
-	Done     bool
-	Error    string
-	Usage    *Usage
+	Content string
+	// Reasoning is one delta of the model's reasoning text, when the provider
+	// streams it apart from Content (llama.cpp and DeepSeek send
+	// delta.reasoning_content; vLLM and OpenRouter send delta.reasoning). Empty
+	// on a provider that hides its reasoning or sends none — which is not
+	// evidence that no reasoning happened. Never part of Content, so a consumer
+	// that ignores it sees exactly what it saw before.
+	Reasoning string
+	ToolCall  *ToolCall
+	Done      bool
+	Error     string
+	Usage     *Usage
 
 	// PartialToolCalls carries whatever tool-call arguments had accumulated
 	// when an Error chunk was produced. Providers stream tool arguments
@@ -253,6 +260,13 @@ type Usage struct {
 	// token read as zero and prompt_tokens looked like real work forever.
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 
+	// CompletionTokensDetails is OpenAI's nested completion breakdown, which is
+	// where a provider that counts reasoning separately reports it. llama.cpp
+	// (b11191, measured 2026-09-26) sends no such block: its completion_tokens
+	// includes the reasoning and says nothing about the split. See
+	// ReportedReasoningTokens.
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+
 	// LatencyMS is wall-clock for this one round-trip, measured client-side.
 	// Not reported by any provider — but "how long did that call take" is half
 	// of what anyone asks of a trace, and without it the token counts alone
@@ -289,6 +303,24 @@ func (u Usage) WorkMS() int64 {
 // PromptTokensDetails is OpenAI's nested prompt-token breakdown.
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// CompletionTokensDetails is OpenAI's nested completion-token breakdown.
+//
+// ReasoningTokens is a pointer because absent and zero mean different things:
+// zero is a provider saying "no reasoning", absent is a provider saying nothing.
+type CompletionTokensDetails struct {
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
+}
+
+// ReportedReasoningTokens returns the reasoning tokens the provider counted,
+// and ok=false when it did not count them. ok=false is "unknown", never zero:
+// the reasoning still happened, and is still inside CompletionTokens.
+func (u *Usage) ReportedReasoningTokens() (n int, ok bool) {
+	if u == nil || u.CompletionTokensDetails == nil || u.CompletionTokensDetails.ReasoningTokens == nil {
+		return 0, false
+	}
+	return *u.CompletionTokensDetails.ReasoningTokens, true
 }
 
 // CachedPromptTokens returns prompt tokens served from cache, normalizing the
@@ -1481,8 +1513,11 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		var event struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content string `json:"content"`
+					// Two names for one thing. See StreamChunk.Reasoning.
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id,omitempty"`
 						Type     string `json:"type,omitempty"`
@@ -1524,6 +1559,12 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			continue
 		}
 		choice := event.Choices[0]
+
+		// Reasoning is forwarded as it arrives, like content, and kept apart
+		// from it: it is not part of the reply and must not be replayed as one.
+		if r := choice.Delta.ReasoningContent + choice.Delta.Reasoning; r != "" {
+			ch <- StreamChunk{Reasoning: r}
+		}
 
 		// Forward content immediately for token-level streaming.
 		if choice.Delta.Content != "" {
