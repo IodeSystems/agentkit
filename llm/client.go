@@ -743,6 +743,12 @@ type callIdent struct {
 // retry policy as the chat path — shared by Chat/ChatStream and Embed so every
 // endpoint honors the fair-share backpressure + retry budget identically.
 func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, ident callIdent) (*http.Response, error) {
+	return c.postTypedWithRetry(ctx, url, "application/json", payload, ident)
+}
+
+// postTypedWithRetry is postWithRetry for a body that is not JSON (a multipart
+// upload). The payload is resent byte-for-byte on every attempt.
+func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string, payload []byte, ident callIdent) (*http.Response, error) {
 	backoff := retryInitialBackoff
 	fiveXXAttempts := 0
 	// queueTimeoutStreak counts CONSECUTIVE queue-timeout 429s retried
@@ -770,7 +776,7 @@ func (c *Client) postWithRetry(ctx context.Context, url string, payload []byte, 
 		if err != nil {
 			return nil, fmt.Errorf("llm: request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 		// X-Trace-Id (thread id, optional) lets the server logs attribute
 		// requests back to an autowork3 thread for debugging. Skipped when
 		// empty so an ad-hoc probe doesn't emit a header with no value.
