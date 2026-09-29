@@ -281,6 +281,38 @@ type Usage struct {
 	// LatencyMS alone cannot be attributed: it is one number covering the model
 	// working and the proxy waiting. This is what separates them.
 	Server ServerTiming `json:"server_timing,omitzero"`
+
+	// Timings is what the MODEL SERVER said it spent computing this round, when
+	// it says so: llama.cpp's non-standard top-level "timings" object, a sibling
+	// of "usage" on the final stream event (corrallm relays it verbatim). Nil
+	// against an endpoint that sends none.
+	//
+	// It is the other half Server cannot give. Server reports the proxy's own
+	// admission queue; a request the proxy admitted can still wait inside
+	// llama-server behind other requests on a single slot, and that wait is on
+	// no header. LatencyMS minus Timings.ComputeMS is the whole of what this
+	// round waited, wherever it waited.
+	Timings *Timings `json:"timings,omitempty"`
+}
+
+// Timings is llama.cpp's per-request compute report. Milliseconds are floats on
+// the wire; prompt_n counts only the tokens actually evaluated (cache_n were
+// reused from the slot's KV cache).
+type Timings struct {
+	CacheN      int     `json:"cache_n"`
+	PromptN     int     `json:"prompt_n"`
+	PromptMS    float64 `json:"prompt_ms"`
+	PredictedN  int     `json:"predicted_n"`
+	PredictedMS float64 `json:"predicted_ms"`
+}
+
+// ComputeMS is prompt evaluation plus generation: the time the model spent on
+// THIS request, and nothing it spent waiting for its turn.
+func (t *Timings) ComputeMS() int64 {
+	if t == nil {
+		return 0
+	}
+	return int64(t.PromptMS + t.PredictedMS)
 }
 
 // WorkMS is LatencyMS with the proxy's self-reported overhead removed — the
@@ -1534,7 +1566,10 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *Usage `json:"usage"`
-			Error struct {
+			// Timings is a SIBLING of usage in llama.cpp's final event, not a
+			// member of it; folded into Usage where Usage is stamped below.
+			Timings *Timings `json:"timings"`
+			Error   struct {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
@@ -1554,6 +1589,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			if event.Usage != nil {
 				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 				event.Usage.Server = timing
+				event.Usage.Timings = event.Timings
 				ch <- StreamChunk{Usage: event.Usage}
 			}
 			continue
@@ -1645,6 +1681,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			if event.Usage != nil {
 				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 				event.Usage.Server = timing
+				event.Usage.Timings = event.Timings
 				done.Usage = event.Usage
 			}
 			ch <- done
@@ -1653,6 +1690,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// skipped it would report the round as all work.
 			event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
 			event.Usage.Server = timing
+			event.Usage.Timings = event.Timings
 			ch <- StreamChunk{Usage: event.Usage}
 		}
 	}
