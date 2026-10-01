@@ -915,3 +915,36 @@ func TestPostChatWithRetry_QueueTimeoutStreakFallsBackToBackoff(t *testing.T) {
 		t.Errorf("last event kind = %v; want RetryRecovered", last.Kind)
 	}
 }
+
+// TestPostChatWithRetry_RetryAfterPastBudgetWaitsOutTheBudget — a server whose
+// Retry-After is as long as (or longer than) the whole budget must be waited on
+// for what is left of the budget, not refused at once. corrallm answers a
+// paused model with Retry-After equal to the 5m default budget; the jittered
+// sleep ran past the deadline and every call gave up "after 0s of 429
+// backpressure" (aw4, 2026-10-01).
+func TestPostChatWithRetry_RetryAfterPastBudgetWaitsOutTheBudget(t *testing.T) {
+	fastBackoff(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "300")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "m")
+	c.RetryBudget = 300 * time.Millisecond
+
+	start := time.Now()
+	_, err := c.postChatWithRetry(context.Background(), []byte(`{}`), callIdent{traceID: "test"})
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "retry budget") {
+		t.Fatalf("err = %v; want retry budget exhausted", err)
+	}
+	if elapsed < 250*time.Millisecond {
+		t.Errorf("gave up after %v; want it to wait out the 300ms budget, not refuse the Retry-After at once", elapsed)
+	}
+	if hits.Load() < 2 {
+		t.Errorf("server hits = %d; want a retry at the end of the budget", hits.Load())
+	}
+}

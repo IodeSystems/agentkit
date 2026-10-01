@@ -915,7 +915,19 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 				ticket = bp.Ticket
 			}
 
-			if time.Now().Add(sleep).After(deadline) {
+			// A wait the server asks for that runs past the budget is CUT to
+			// what is left of the budget, not refused. Refusing it gave up at
+			// once: corrallm answers a paused model with Retry-After equal to
+			// the 5m default budget, the jitter above puts the sleep past the
+			// deadline, and every call failed "exhausted after 0s of 429
+			// backpressure" — measured 2026-10-01 on three aw4 sessions. The
+			// budget is a wall-clock promise to wait up to that long; it is
+			// spent only when nothing of it is left.
+			remaining := time.Until(deadline)
+			if sleep > remaining {
+				sleep = remaining
+			}
+			if remaining <= 0 {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
 					Elapsed: time.Since(start), Budget: budget, BP: &bp,
 					Reason: fmt.Sprintf("gave up after %s of 429 backpressure (retry budget %s)",
