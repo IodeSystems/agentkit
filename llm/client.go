@@ -452,6 +452,19 @@ type Client struct {
 	// caller is blocked in Chat/ChatStream/Embed — so it must not block for long
 	// and must not re-enter the client.
 	OnRetry func(RetryEvent)
+
+	// User is sent as the OpenAI-standard "user" field on every chat request:
+	// a stable id for the end user or conversation behind the call. A host that
+	// gives each conversation its own Client sets it to the conversation's id,
+	// so a proxy can route that conversation's calls to the slot that already
+	// holds its prompt prefix. Empty means the field is omitted.
+	User string
+
+	// Header holds extra HTTP headers sent on every request this client makes
+	// (chat, embeddings, transcription). The client's own headers —
+	// Content-Type, Authorization, X-Trace-Id, X-Corrallm-Request-Id — are set
+	// after these and win on a clash. nil sends none.
+	Header http.Header
 }
 
 // retry5xxAttempts is the effective 5xx attempt cap.
@@ -775,6 +788,11 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("llm: request: %w", err)
+		}
+		for k, vs := range c.Header {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
 		}
 		req.Header.Set("Content-Type", contentType)
 		// X-Trace-Id (thread id, optional) lets the server logs attribute
@@ -1331,6 +1349,9 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		// default; other providers silently ignore.
 		"stream_options": map[string]any{"include_usage": true},
 	}
+	if c.User != "" {
+		body["user"] = c.User
+	}
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
@@ -1410,6 +1431,9 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		"model":    c.model,
 		"messages": messages,
 		"stream":   false,
+	}
+	if c.User != "" {
+		body["user"] = c.User
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
