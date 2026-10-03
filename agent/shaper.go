@@ -162,6 +162,24 @@ type Shaper struct {
 	// where a host normally states the task. Compact has no system prompt, so
 	// a host that forces folds sets this.
 	Task string
+
+	// Rehead, if set, is the host's own way to shrink the context, tried once
+	// per Build just before a compaction fold — after the window has been
+	// found over target even with LOD.
+	//
+	// It exists because a fold is the one moment the prompt prefix is
+	// rewritten anyway: any other rewrite of earlier context breaks the
+	// provider's prompt cache from that entry on, once per rewrite. A host that
+	// knows some entries are redundant (a file read that a later, wider read
+	// covers; a read made stale by an edit) replaces them here, through its
+	// Store, and the cache is broken once for both. Rehead reports whether it
+	// changed the context; when it did, Build re-reads the context and checks
+	// the budget again, and the fold runs only if the window is still over.
+	//
+	// The host owns its errors: a re-heading that fails reports false and the
+	// fold proceeds as it would have without one. nil = no re-heading, which is
+	// the behavior before this field existed.
+	Rehead func(ctx context.Context, sessionID string) (changed bool)
 }
 
 func (sh *Shaper) spanName(n string) string {
@@ -202,6 +220,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		return sh.render(entries, pristineCount, system, sh.Policy.AlwaysLOD), nil
 	}
 
+	reheaded := false
 	for attempt := 0; attempt < 4; attempt++ {
 		entries, err := sh.Store.Context(ctx, sessionID)
 		if err != nil {
@@ -230,6 +249,16 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		messages = sh.render(entries, pristineCount, system, true)
 		if sh.tokens(messages) <= target {
 			return messages, nil
+		}
+
+		// Phase 1b: the host's re-heading, once, before any fold. It does not
+		// spend an attempt: the attempts bound folds, and this is not one.
+		if sh.Rehead != nil && !reheaded {
+			reheaded = true
+			if sh.Rehead(ctx, sessionID) {
+				attempt--
+				continue
+			}
 		}
 
 		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
