@@ -20,7 +20,7 @@ func TestTimingsReachUsageOverTheWire(t *testing.T) {
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n")
 		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":27834,\"completion_tokens\":103,\"total_tokens\":27937},"+
 			"\"timings\":{\"cache_n\":0,\"prompt_n\":27834,\"prompt_ms\":12911.5,\"prompt_per_second\":2155.8,"+
-			"\"predicted_n\":103,\"predicted_ms\":992.7,\"predicted_per_second\":103.7}}\n\n")
+			"\"predicted_n\":103,\"predicted_ms\":992.7,\"predicted_per_second\":103.7,\"draft_n\":60,\"draft_n_accepted\":41}}\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
@@ -44,6 +44,9 @@ func TestTimingsReachUsageOverTheWire(t *testing.T) {
 	}
 	if got := usage.Timings.ComputeMS(); got != 13904 {
 		t.Errorf("ComputeMS = %d, want 13904 (12911.5 + 992.7)", got)
+	}
+	if usage.Timings.DraftN != 60 || usage.Timings.DraftNAccepted != 41 {
+		t.Errorf("draft counts = %d/%d, want 60/41 (the MTP counts llama.cpp sends)", usage.Timings.DraftN, usage.Timings.DraftNAccepted)
 	}
 	if usage.Timings.PromptN != 27834 || usage.Timings.PredictedN != 103 {
 		t.Errorf("Timings = %+v", *usage.Timings)

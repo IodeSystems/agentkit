@@ -304,6 +304,11 @@ type Timings struct {
 	PromptMS    float64 `json:"prompt_ms"`
 	PredictedN  int     `json:"predicted_n"`
 	PredictedMS float64 `json:"predicted_ms"`
+	// DraftN and DraftNAccepted are the speculative-decoding (MTP) counts
+	// llama.cpp adds when it drafts: tokens drafted and tokens the model kept.
+	// Zero when the server does not draft.
+	DraftN         int `json:"draft_n,omitempty"`
+	DraftNAccepted int `json:"draft_n_accepted,omitempty"`
 }
 
 // ComputeMS is prompt evaluation plus generation: the time the model spent on

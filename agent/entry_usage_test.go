@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/iodesystems/agentkit/llm"
@@ -69,4 +70,20 @@ func containsSub(h, n string) bool {
 		}
 	}
 	return false
+}
+
+// The model server's timings are stored on the entry, so cache read, prefill and
+// decode rates can be derived later; an endpoint that sends none stores none.
+func TestEntryUsageCarriesTheServersTimings(t *testing.T) {
+	u := &llm.Usage{LatencyMS: 5000, CompletionTokens: 40,
+		Timings: &llm.Timings{CacheN: 900, PromptN: 100, PromptMS: 250.5, PredictedN: 40, PredictedMS: 400, DraftN: 30, DraftNAccepted: 24}}
+	eu := (&Session{}).entryUsage(u, "")
+	if eu == nil || eu.CacheN != 900 || eu.PromptN != 100 || eu.PromptMS != 250.5 || eu.PredictedN != 40 ||
+		eu.PredictedMS != 400 || eu.DraftN != 30 || eu.DraftNAccepted != 24 {
+		t.Fatalf("entry usage = %+v, want the timings stored", eu)
+	}
+	b, _ := json.Marshal((&Session{}).entryUsage(&llm.Usage{LatencyMS: 5, CompletionTokens: 1}, ""))
+	if strings.Contains(string(b), "cache_n") || strings.Contains(string(b), "prompt_ms") {
+		t.Errorf("timings were claimed for an endpoint that sent none: %s", b)
+	}
 }

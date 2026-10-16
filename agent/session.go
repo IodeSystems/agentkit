@@ -964,6 +964,11 @@ func (s *Session) entryUsage(u *llm.Usage, reasoning string) *EntryUsage {
 		eu.Cached = u.CachedPromptTokens()
 		eu.Processed = u.NewPromptTokens()
 		eu.Generated = u.CompletionTokens
+		if t := u.Timings; t != nil {
+			eu.CacheN, eu.PromptN, eu.PromptMS = t.CacheN, t.PromptN, t.PromptMS
+			eu.PredictedN, eu.PredictedMS = t.PredictedN, t.PredictedMS
+			eu.DraftN, eu.DraftNAccepted = t.DraftN, t.DraftNAccepted
+		}
 	}
 	if n, ok := u.ReportedReasoningTokens(); ok {
 		eu.Reasoning, eu.ReasoningSource = n, ReasoningReported

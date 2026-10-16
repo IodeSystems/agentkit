@@ -274,6 +274,20 @@ type EntryUsage struct {
 	// neither counted reasoning nor streamed it: UNKNOWN, not zero.
 	Reasoning       int    `json:"reasoning,omitempty"`
 	ReasoningSource string `json:"reasoning_source,omitempty"`
+
+	// The model server's own report of this round (llama.cpp "timings"), when it
+	// sent one, so a rate can be derived: cache read = CacheN/(CacheN+PromptN),
+	// unfused prefill = PromptN/PromptMS, fused = (CacheN+PromptN)/PromptMS,
+	// decode = PredictedN/PredictedMS, and the queue wait is LatencyMS less
+	// PromptMS+PredictedMS. DraftN/DraftNAccepted are the speculative-decoding
+	// counts. All omitted when absent: absent is unknown, not zero.
+	CacheN         int     `json:"cache_n,omitempty"`
+	PromptN        int     `json:"prompt_n,omitempty"`
+	PromptMS       float64 `json:"prompt_ms,omitempty"`
+	PredictedN     int     `json:"predicted_n,omitempty"`
+	PredictedMS    float64 `json:"predicted_ms,omitempty"`
+	DraftN         int     `json:"draft_n,omitempty"`
+	DraftNAccepted int     `json:"draft_n_accepted,omitempty"`
 }
 
 // ReasoningSource values. See EntryUsage.
