@@ -93,6 +93,15 @@ type ShaperPolicy struct {
 	// further (never back), up to the exact tail edge. 0 → defaultLODStep;
 	// 1 → the exact edge every turn (the old behavior).
 	LODStep int
+	// PinFirstUser keeps the session's first user entry verbatim for the life
+	// of the session. A host that states the session's subject in that message
+	// (rather than in the system message, to keep the system message identical
+	// across sessions) needs it to survive: older entries are otherwise
+	// LOD-truncated once over budget and the oldest are folded into a
+	// summary, and the subject is the oldest entry there is. A pinned entry is
+	// never stubbed, never counted among the entries a fold subsumes, and
+	// stays where it was.
+	PinFirstUser bool
 	// AlwaysLOD forces LOD (level-of-detail) truncation of oversized older
 	// entries on EVERY Build, from Phase 0 on — skipping the "pristine, no-LOD"
 	// fast path that otherwise leaves the context untouched while under budget.
@@ -359,8 +368,14 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		return CompactionInfo{}, false, nil
 	}
 
+	pinned := sh.pinnedIndex(entries)
 	var subsumed []Entry
+	var foldable []Entry // what the summarizer reads: the older entries but the pinned one
 	for i := 0; i < olderEnd; i++ {
+		if i == pinned {
+			continue // the subject stays verbatim
+		}
+		foldable = append(foldable, entries[i])
 		if entries[i].Kind == KindCompaction {
 			// Already-compacted region — don't re-summarize a marker.
 			continue
@@ -384,7 +399,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		At:           startedAt,
 	})
 
-	summary, err := sh.summarize(ctx, entries[:olderEnd], task)
+	summary, err := sh.summarize(ctx, foldable, task)
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -452,6 +467,20 @@ func (sh *Shaper) taskOr(system string) string {
 	return system
 }
 
+// pinnedIndex is the index of the entry PinFirstUser keeps verbatim: the first
+// KindUser entry, or -1 when the policy does not pin or there is none.
+func (sh *Shaper) pinnedIndex(entries []Entry) int {
+	if !sh.Policy.PinFirstUser {
+		return -1
+	}
+	for i, e := range entries {
+		if e.Kind == KindUser {
+			return i
+		}
+	}
+	return -1
+}
+
 // classifyPristineCount returns the number of trailing entries that qualify
 // as the pristine tail under the policy.
 func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
@@ -495,6 +524,7 @@ func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
 // pristine tail get LOD-truncated content.
 func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod bool) []llm.Message {
 	olderEnd := len(entries) - pristineCount
+	pinned := sh.pinnedIndex(entries)
 	// What each result was ASKED. The arguments live on the call and the
 	// truncation happens on the result, so a stub cannot see them without this.
 	//
@@ -513,6 +543,9 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 	}
 	return groupMessages(system, entries, func(i int, e Entry) string {
 		content := e.Content
+		if i == pinned {
+			return content
+		}
 		if lod && i < olderEnd && len(content) > sh.Policy.LODTruncateAboveChars && sh.Policy.LODTruncateAboveChars > 0 {
 			content = sh.stub(e, sh.Policy.LODTruncateAboveChars, askedBy[e.ToolCallID])
 		} else if n := sh.Policy.MaxToolResultChars; n > 0 && len(content) > n {

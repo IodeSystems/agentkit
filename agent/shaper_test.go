@@ -603,3 +603,57 @@ func TestLODStepStillFitsTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// ── pinned first user entry ─────────────────────────────────────────
+
+// A host that states the session's subject in the first user message (so the
+// system message is identical across sessions) needs it to survive the shaping
+// that would otherwise reach it: it is the oldest, and big, entry. With
+// PinFirstUser it stays verbatim under LOD and out of a fold; without, both
+// take it.
+func TestPinFirstUser_SurvivesLODAndCompaction(t *testing.T) {
+	subject := "THE SUBJECT " + strings.Repeat("s", 6000)
+	seed := func() *memStore {
+		s := &memStore{}
+		s.entries = append(s.entries, Entry{ID: "subj", Kind: KindUser, Content: subject, CreatedAt: 1})
+		for i := 0; i < 6; i++ {
+			s.entries = append(s.entries,
+				Entry{ID: fmt.Sprintf("c%d", i), Kind: KindToolCall, ToolCallID: fmt.Sprintf("t%d", i), ToolName: "read", Content: "{}", CreatedAt: int64(10 + 2*i)},
+				Entry{ID: fmt.Sprintf("r%d", i), Kind: KindToolResult, ToolCallID: fmt.Sprintf("t%d", i), ToolName: "read", Content: strings.Repeat("x", 4500), CreatedAt: int64(11 + 2*i)})
+		}
+		return s
+	}
+	pol := func(pin bool) ShaperPolicy {
+		return ShaperPolicy{BudgetTokens: 1_000_000, PreserveLastToolCalls: 1, LODTruncateAboveChars: 100, AlwaysLOD: true, PinFirstUser: pin}
+	}
+	// LOD: the older big user entry is stubbed unless pinned.
+	for _, pin := range []bool{false, true} {
+		sh := &Shaper{Store: seed(), Policy: pol(pin)}
+		msgs, err := sh.Build(context.Background(), "s", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := containsFull(msgs, subject); got != pin {
+			t.Errorf("PinFirstUser=%v: subject verbatim after LOD = %v, want %v", pin, got, pin)
+		}
+	}
+	// Compaction: the pinned entry is not subsumed and the summarizer is not
+	// asked to fold it.
+	for _, pin := range []bool{false, true} {
+		store := seed()
+		sh := &Shaper{Store: store, Runner: &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}}}, Policy: pol(pin)}
+		sh.Policy.AlwaysLOD = false
+		if _, did, err := sh.Compact(context.Background(), "s"); err != nil || !did {
+			t.Fatalf("compact: did %v err %v", did, err)
+		}
+		kept := false
+		for _, e := range store.entries {
+			if e.ID == "subj" && e.Content == subject {
+				kept = true
+			}
+		}
+		if kept != pin {
+			t.Errorf("PinFirstUser=%v: subject kept verbatim after a fold = %v, want %v", pin, kept, pin)
+		}
+	}
+}
