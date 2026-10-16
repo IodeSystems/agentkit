@@ -81,6 +81,18 @@ type ShaperPolicy struct {
 	// re-truncating a little more every turn. 0 → defaultLODHeadroom (10k);
 	// negative → no headroom (restructure only at BudgetTokens).
 	LODHeadroomTokens int
+	// LODStep is how many entries the LOD boundary moves at a time. Entries
+	// older than the pristine tail are stubbed, and the tail moves by one tool
+	// call per turn; stubbing right up to it rewrites one already-sent result
+	// from verbatim to stub on every turn, and a prompt cache keyed on the
+	// prefix is invalid from that entry on. So the boundary is rounded down to a
+	// multiple of LODStep: between steps history only grows at the end, and at a
+	// step a whole batch is stubbed together. Entries between the rounded
+	// boundary and the tail ride verbatim, at most LODStep-1 more than the
+	// policy preserves; if that does not fit the budget the boundary steps
+	// further (never back), up to the exact tail edge. 0 → defaultLODStep;
+	// 1 → the exact edge every turn (the old behavior).
+	LODStep int
 	// AlwaysLOD forces LOD (level-of-detail) truncation of oversized older
 	// entries on EVERY Build, from Phase 0 on — skipping the "pristine, no-LOD"
 	// fast path that otherwise leaves the context untouched while under budget.
@@ -94,6 +106,21 @@ type ShaperPolicy struct {
 // defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
 // unset — a rule of thumb: start reshaping with ~10k tokens to spare.
 const defaultLODHeadroom = 10_000
+
+// defaultLODStep is the LOD boundary step when LODStep is unset: about eight
+// turns of (assistant, call, result), so a stub rewrite costs a cache miss once
+// per eight turns instead of every turn.
+const defaultLODStep = 24
+
+func (p ShaperPolicy) lodStep() int {
+	switch {
+	case p.LODStep == 0:
+		return defaultLODStep
+	case p.LODStep < 1:
+		return 1
+	}
+	return p.LODStep
+}
 
 // shapeTarget is the token ceiling the Shaper actually shapes to: the hard
 // budget minus the headroom, so a restructure leaves runway. Falls back to the
@@ -246,9 +273,25 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		}
 		// Phase 1: LOD. Truncate older oversized entries. If that fits the
 		// target, we're done — LOD is cheaper + lossless-ish vs compaction.
-		messages = sh.render(entries, pristineCount, system, true)
-		if sh.tokens(messages) <= target {
-			return messages, nil
+		// The boundary is stepped (ShaperPolicy.LODStep): the smallest step at
+		// which the stubbed history fits, then the exact tail edge. It only
+		// grows with the history, so between steps the prefix is append-only.
+		olderEnd := len(entries) - pristineCount
+		step := sh.Policy.lodStep()
+		for b := olderEnd / step * step; ; b += step {
+			if b > olderEnd {
+				b = olderEnd
+			}
+			if b == 0 && olderEnd > 0 {
+				continue // nothing stubbed: the render measured above
+			}
+			messages = sh.render(entries, len(entries)-b, system, true)
+			if sh.tokens(messages) <= target {
+				return messages, nil
+			}
+			if b == olderEnd {
+				break
+			}
 		}
 
 		// Phase 1b: the host's re-heading, once, before any fold. It does not

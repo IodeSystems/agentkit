@@ -518,3 +518,88 @@ func TestSummarize_SeesTheTask(t *testing.T) {
 		}
 	})
 }
+
+// ── LOD boundary steps ──────────────────────────────────────────────
+
+// growingTurns renders a conversation after each of n turns (a call and a big
+// result) and returns, per turn, the rendered messages.
+func growingTurns(t *testing.T, pol ShaperPolicy, n int) [][]llm.Message {
+	t.Helper()
+	store := &memStore{}
+	sh := &Shaper{Store: store, Policy: pol}
+	store.entries = append(store.entries, Entry{ID: "u", Kind: KindUser, Content: "do the work", CreatedAt: 1})
+	var out [][]llm.Message
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("tc%02d", i)
+		store.entries = append(store.entries,
+			Entry{ID: "c" + id, Kind: KindToolCall, ToolCallID: id, ToolName: "file_read", Content: `{"path":"` + id + `"}`, CreatedAt: int64(10 + 2*i)},
+			Entry{ID: "r" + id, Kind: KindToolResult, ToolCallID: id, ToolName: "file_read", Content: strings.Repeat(string(rune('a'+i%26)), 4000), CreatedAt: int64(11 + 2*i)},
+		)
+		msgs, err := sh.Build(context.Background(), "s", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, msgs)
+	}
+	return out
+}
+
+// rewrites counts the turns whose rendered prompt does not extend the previous
+// turn's: an already-sent message changed, so a prompt cache keyed on the
+// prefix is invalid from there.
+func rewrites(turns [][]llm.Message) int {
+	n := 0
+	for i := 1; i < len(turns); i++ {
+		prev, cur := turns[i-1], turns[i]
+		ok := len(cur) >= len(prev)
+		for j := 0; ok && j < len(prev); j++ {
+			ok = prev[j].Role == cur[j].Role && prev[j].Content == cur[j].Content && prev[j].ToolCallID == cur[j].ToolCallID
+		}
+		if !ok {
+			n++
+		}
+	}
+	return n
+}
+
+/*
+History is append-only between rare, batched boundary moves. Once the context is
+over budget the entries older than the pristine tail are stubbed; the tail moves
+a tool call per turn, so stubbing right up to it turned one already-sent
+verbatim result into a stub every turn, each invalidating the model's prompt
+cache from that entry on (i_1m52s5e2ndw0ttvtc43v4p). With a step, the boundary
+moves once per LODStep entries: of 40 turns, only the few at a step rewrite
+history. LODStep 1 is the old per-turn behavior, and rewrites on nearly every
+turn once over budget.
+*/
+func TestLODBoundaryMovesInStepsNotPerTurn(t *testing.T) {
+	pol := ShaperPolicy{
+		BudgetTokens: 16_000, LODHeadroomTokens: -1, PreserveLastToolCalls: 2,
+		LODTruncateAboveChars: 200, LODStep: 20,
+	}
+	stepped := rewrites(growingTurns(t, pol, 40))
+	if stepped > 5 {
+		t.Errorf("LODStep 20: %d of 40 turns rewrote an already-sent message, want at most 5 (a step every ten turns)", stepped)
+	}
+
+	pol.LODStep = 1
+	perTurn := rewrites(growingTurns(t, pol, 40))
+	if perTurn < 15 {
+		t.Fatalf("LODStep 1: only %d rewrites in 40 turns: the test does not reach the over-budget regime", perTurn)
+	}
+}
+
+// The step does not break the budget: when the extra verbatim entries do not
+// fit, the boundary steps on (never back) until the context fits.
+func TestLODStepStillFitsTheBudget(t *testing.T) {
+	pol := ShaperPolicy{
+		BudgetTokens: 12_000, LODHeadroomTokens: -1, PreserveLastToolCalls: 2,
+		LODTruncateAboveChars: 200, LODStep: 20,
+	}
+	sh := &Shaper{Policy: pol, Estimate: Default()}
+	for i, msgs := range growingTurns(t, pol, 40) {
+		if tok := sh.tokens(msgs); tok > pol.BudgetTokens {
+			t.Fatalf("turn %d: %d tokens, over the %d budget", i, tok, pol.BudgetTokens)
+		}
+	}
+}
