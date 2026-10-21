@@ -1,12 +1,15 @@
 package mcpmgr
 
-// The MCP layer: the handshake and the three request methods this package
-// actually speaks, on top of the JSON-RPC transport in jsonrpc.go.
+// The MCP layer: the handshake and the request methods this package speaks, on
+// top of a JSON-RPC transport — stdio (jsonrpc.go) or Streamable HTTP
+// (http.go).
 //
-// The whole vocabulary is initialize + tools/list + tools/call, plus the
-// notifications/initialized we owe the server and whatever notifications it
-// pushes back. That subset has been byte-stable across every published
-// revision of the MCP spec, which is what makes owning this code cheap.
+// The vocabulary is initialize + tools/list + tools/call, the read side of
+// resources (resources/list, resources/read) and of prompts (prompts/list,
+// prompts/get), plus the notifications/initialized we owe the server and
+// whatever notifications it pushes back. That subset has been stable across
+// every published revision of the MCP spec, which is what makes owning this
+// code cheap.
 
 import (
 	"context"
@@ -55,6 +58,17 @@ type callToolResult struct {
 	StructuredContent json.RawMessage  `json:"structuredContent,omitempty"`
 }
 
+// transport is one JSON-RPC connection to one MCP server.
+type transport interface {
+	call(ctx context.Context, method string, params, out any) error
+	notify(method string, params any) error
+	close() error
+	setNotificationHandler(fn func(method string, params map[string]any))
+}
+
+// mcpClient speaks MCP over a transport.
+type mcpClient struct{ transport }
+
 type initializeResult struct {
 	ProtocolVersion string         `json:"protocolVersion"`
 	Capabilities    map[string]any `json:"capabilities"`
@@ -68,7 +82,7 @@ type initializeResult struct {
 // notifications/initialized the server is entitled to wait for before
 // answering anything else. Skipping that notification is a silent failure mode
 // — a strict server accepts the connection and then refuses every call.
-func (c *stdioClient) initialize(ctx context.Context, clientName, clientVersion string) (*initializeResult, error) {
+func (c mcpClient) initialize(ctx context.Context, clientName, clientVersion string) (*initializeResult, error) {
 	var res initializeResult
 	err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": requestedProtocolVersion,
@@ -97,7 +111,7 @@ func (c *stdioClient) initialize(ctx context.Context, clientName, clientVersion 
 }
 
 // listTools enumerates the server's tools, following pagination cursors.
-func (c *stdioClient) listTools(ctx context.Context, serverName string) ([]toolDesc, error) {
+func (c mcpClient) listTools(ctx context.Context, serverName string) ([]toolDesc, error) {
 	var all []toolDesc
 	cursor := ""
 	for range maxToolPages {
@@ -126,7 +140,7 @@ func (c *stdioClient) listTools(ctx context.Context, serverName string) ([]toolD
 }
 
 // callTool invokes one tool.
-func (c *stdioClient) callTool(ctx context.Context, name string, args map[string]any) (*callToolResult, error) {
+func (c mcpClient) callTool(ctx context.Context, name string, args map[string]any) (*callToolResult, error) {
 	if args == nil {
 		// Send an empty object, not null: servers that unmarshal arguments
 		// into a struct reject null, and a caller passing no arguments is
@@ -141,6 +155,123 @@ func (c *stdioClient) callTool(ctx context.Context, name string, args map[string
 		return nil, err
 	}
 	return &res, nil
+}
+
+// Resource is one entry of resources/list.
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// ResourceContent is one entry of a resources/read reply: Text for a text
+// resource, Blob (base64) for a binary one.
+type ResourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+}
+
+// Prompt is one entry of prompts/list.
+type Prompt struct {
+	Name        string           `json:"name"`
+	Title       string           `json:"title,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// PromptMessage is one message of a prompts/get reply. Content is one content
+// block, kept raw for the same reason tool results are; Text renders it.
+type PromptMessage struct {
+	Role    string         `json:"role"`
+	Content map[string]any `json:"content"`
+}
+
+func (p PromptMessage) Text() string { return renderContent([]map[string]any{p.Content}) }
+
+// listResources enumerates the server's resources, following cursors.
+func (c mcpClient) listResources(ctx context.Context, serverName string) ([]Resource, error) {
+	var all []Resource
+	cursor := ""
+	for range maxToolPages {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var res struct {
+			Resources  []Resource `json:"resources"`
+			NextCursor string     `json:"nextCursor"`
+		}
+		if err := c.call(ctx, "resources/list", params, &res); err != nil {
+			return nil, err
+		}
+		all = append(all, res.Resources...)
+		if res.NextCursor == "" || res.NextCursor == cursor {
+			return all, nil
+		}
+		cursor = res.NextCursor
+	}
+	log.Printf("mcp: %s: stopped following resources/list cursors after %d pages", serverName, maxToolPages)
+	return all, nil
+}
+
+func (c mcpClient) readResource(ctx context.Context, uri string) ([]ResourceContent, error) {
+	var res struct {
+		Contents []ResourceContent `json:"contents"`
+	}
+	if err := c.call(ctx, "resources/read", map[string]any{"uri": uri}, &res); err != nil {
+		return nil, err
+	}
+	return res.Contents, nil
+}
+
+// listPrompts enumerates the server's prompts, following cursors.
+func (c mcpClient) listPrompts(ctx context.Context, serverName string) ([]Prompt, error) {
+	var all []Prompt
+	cursor := ""
+	for range maxToolPages {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var res struct {
+			Prompts    []Prompt `json:"prompts"`
+			NextCursor string   `json:"nextCursor"`
+		}
+		if err := c.call(ctx, "prompts/list", params, &res); err != nil {
+			return nil, err
+		}
+		all = append(all, res.Prompts...)
+		if res.NextCursor == "" || res.NextCursor == cursor {
+			return all, nil
+		}
+		cursor = res.NextCursor
+	}
+	log.Printf("mcp: %s: stopped following prompts/list cursors after %d pages", serverName, maxToolPages)
+	return all, nil
+}
+
+func (c mcpClient) getPrompt(ctx context.Context, name string, args map[string]string) (string, []PromptMessage, error) {
+	if args == nil {
+		args = map[string]string{}
+	}
+	var res struct {
+		Description string          `json:"description"`
+		Messages    []PromptMessage `json:"messages"`
+	}
+	if err := c.call(ctx, "prompts/get", map[string]any{"name": name, "arguments": args}, &res); err != nil {
+		return "", nil, err
+	}
+	return res.Description, res.Messages, nil
 }
 
 // renderContent flattens MCP content blocks into the single string a tool

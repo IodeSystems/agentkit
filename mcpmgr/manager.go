@@ -51,6 +51,12 @@ type MCPConfig struct {
 	Timeout int      `json:"timeout"` // seconds, default 30
 	Scope   string   `json:"scope"`
 
+	// URL selects the Streamable HTTP transport (http.go) instead of
+	// spawning Command. Headers go on every request — Authorization: Bearer
+	// <token> for a server that takes a static token.
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// SecretRef names a row in the secrets table whose plaintext is a
 	// JSON object (a flat KV map). When set, spawn() resolves it,
 	// renders it to SecretFormat, writes it to a per-server 0600 temp
@@ -76,11 +82,14 @@ type MCPTool struct {
 
 // MCPServer wraps a connected MCP client.
 type MCPServer struct {
-	Config   MCPConfig
-	client   *stdioClient
-	Tools    []MCPTool
-	ready    chan struct{}
-	readyErr error
+	Config MCPConfig
+	client mcpClient
+	Tools  []MCPTool
+	// Capabilities is what the server declared in the handshake: "tools",
+	// "resources", "prompts", … — a client asks only for what is there.
+	Capabilities map[string]any
+	ready        chan struct{}
+	readyErr     error
 	// secretDir is the per-server temp directory holding the rendered
 	// 0600 secret file (empty when SecretRef is unset). Teardown
 	// (Close / StopServer / StopThreadServers + the delete+replace
@@ -341,7 +350,15 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		}
 	}
 
-	mc := newStdioClient(cfg.Command, env, args)
+	var t transport
+	var stdio *stdioClient
+	if cfg.URL != "" {
+		t = newHTTPClient(cfg.URL, cfg.Headers)
+	} else {
+		stdio = newStdioClient(cfg.Command, env, args)
+		t = stdio
+	}
+	mc := mcpClient{t}
 
 	// Server→client push. Registered before start() so nothing a server emits
 	// during initialization is missed. The handler runs on the client's read
@@ -360,23 +377,28 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	// The subprocess is NOT tied to ctx — see stdioClient.start. It lives as
 	// long as the Manager does; Manager.Close() and StopThreadServers tear it
 	// down. ctx bounds the handshake below, nothing more.
-	if err := mc.start(); err != nil {
-		if secretDir != "" {
-			os.RemoveAll(secretDir)
+	// An HTTP server has no process and no stderr: its tail stays empty.
+	tail := watchStderr(nil)
+	if stdio != nil {
+		if err := stdio.start(); err != nil {
+			if secretDir != "" {
+				os.RemoveAll(secretDir)
+			}
+			tail := watchStderr(stdio.stderrPipe())
+			tail.settle()
+			return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
 		}
-		tail := watchStderr(mc.stderrPipe())
-		tail.settle()
-		return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
+		// Drain stderr for the life of the process: it is where a server
+		// explains itself when it refuses to start, and nobody else reads the
+		// pipe.
+		tail = watchStderr(stdio.stderrPipe())
 	}
-
-	// Drain stderr for the life of the process: it is where a server explains
-	// itself when it refuses to start, and nobody else reads the pipe.
-	tail := watchStderr(mc.stderrPipe())
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if _, err := mc.initialize(handshakeCtx, clientName, clientVersion); err != nil {
+	init, err := mc.initialize(handshakeCtx, clientName, clientVersion)
+	if err != nil {
 		mc.close()
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
@@ -386,11 +408,12 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	}
 
 	srv := &MCPServer{
-		Config:    cfg,
-		client:    mc,
-		ready:     make(chan struct{}),
-		secretDir: secretDir,
-		stderr:    tail,
+		Config:       cfg,
+		client:       mc,
+		Capabilities: init.Capabilities,
+		ready:        make(chan struct{}),
+		secretDir:    secretDir,
+		stderr:       tail,
 	}
 
 	go func() {
@@ -555,29 +578,9 @@ func (m *Manager) GetTools() []MCPTool {
 // thread-scoped id produced by ThreadServerID(integID, threadID).
 // Routes to whichever map holds it.
 func (m *Manager) CallTool(ctx context.Context, serverID string, toolName string, args map[string]interface{}) (string, error) {
-	m.mu.RLock()
-	srv, ok := m.servers[serverID]
-	if !ok {
-		// Try thread-scoped lookup: serverID = "<integID>:<threadID>".
-		// Iterate rather than parse — the integration id is opaque
-		// and may itself contain colons.
-		for _, byThread := range m.threadServers {
-			for _, s := range byThread {
-				if s.Config.ID == serverID {
-					srv = s
-					ok = true
-					break
-				}
-			}
-			if ok {
-				break
-			}
-		}
-	}
-	m.mu.RUnlock()
-
-	if !ok {
-		return "", fmt.Errorf("mcp server %s not connected", serverID)
+	srv, err := m.server(serverID)
+	if err != nil {
+		return "", err
 	}
 
 	result, err := srv.client.callTool(ctx, toolName, args)
@@ -590,6 +593,73 @@ func (m *Manager) CallTool(ctx context.Context, serverID string, toolName string
 	}
 
 	return renderContent(result.Content), nil
+}
+
+// server finds a connected server by id: a project-scoped id (one of
+// m.servers' keys) OR a thread-scoped id produced by ThreadServerID.
+func (m *Manager) server(serverID string) (*MCPServer, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if srv, ok := m.servers[serverID]; ok {
+		return srv, nil
+	}
+	// Iterate rather than parse — the integration id is opaque and may
+	// itself contain colons.
+	for _, byThread := range m.threadServers {
+		for _, s := range byThread {
+			if s.Config.ID == serverID {
+				return s, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("mcp server %s not connected", serverID)
+}
+
+// Capabilities returns what a connected server declared in the handshake, or
+// nil when it is not connected.
+func (m *Manager) Capabilities(serverID string) map[string]any {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return nil
+	}
+	return srv.Capabilities
+}
+
+// ListResources returns a server's resources (resources/list).
+func (m *Manager) ListResources(ctx context.Context, serverID string) ([]Resource, error) {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return srv.client.listResources(ctx, srv.Config.Name)
+}
+
+// ReadResource returns the contents of one resource (resources/read).
+func (m *Manager) ReadResource(ctx context.Context, serverID, uri string) ([]ResourceContent, error) {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return srv.client.readResource(ctx, uri)
+}
+
+// ListPrompts returns a server's prompts (prompts/list).
+func (m *Manager) ListPrompts(ctx context.Context, serverID string) ([]Prompt, error) {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return srv.client.listPrompts(ctx, srv.Config.Name)
+}
+
+// GetPrompt renders one prompt with its arguments (prompts/get): the
+// prompt's description and its messages.
+func (m *Manager) GetPrompt(ctx context.Context, serverID, name string, args map[string]string) (string, []PromptMessage, error) {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return "", nil, err
+	}
+	return srv.client.getPrompt(ctx, name, args)
 }
 
 // Close disconnects all MCP servers (project + thread scope).
