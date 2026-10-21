@@ -537,6 +537,24 @@ func (m *Manager) ServerReadyErr(id string) error {
 	}
 }
 
+// ServerReady reports whether a project-scoped server finished tool
+// discovery without error. A server with no tools at all (one that serves
+// only resources or prompts) is ready once discovery returns empty.
+func (m *Manager) ServerReady(id string) bool {
+	m.mu.RLock()
+	srv, ok := m.servers[id]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	select {
+	case <-srv.ready:
+		return srv.readyErr == nil
+	default:
+		return false
+	}
+}
+
 // ServerStderr returns the tail of what a running server wrote to stderr, or ""
 // when it has said nothing (or is not running). Useful for reporting a server
 // that started but is misbehaving, where no error was ever returned.
