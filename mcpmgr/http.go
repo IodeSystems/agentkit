@@ -87,7 +87,7 @@ func (c *httpClient) newRequest(ctx context.Context, method string, body []byte)
 	if err != nil {
 		return nil, "", err
 	}
-	if c.auth.Authorization != nil {
+	if c.auth != nil && c.auth.Authorization != nil {
 		// The hook owns the header: its value replaces a static one, and an
 		// empty value sends none (a client with no token yet, which wants the
 		// 401 and its WWW-Authenticate to start discovery).
