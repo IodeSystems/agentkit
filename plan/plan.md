@@ -46,6 +46,26 @@ final though.
 
 ## Active work
 
+### ◐ MCP over OAuth/OIDC — per-request token + 401 retry (2026-10-22, branch `mcp-token-source`)
+
+USER decision: dun must reach OAuth-protected MCP servers (Snowflake managed
+MCP: RFC 9728 discovery; Superset: IdP JWT). Fixed `Headers` could not carry a
+refreshed token without a reconnect.
+
+- `MCPConfig.Authorization func(ctx) (string, error)` — asked per request,
+  replaces a static Authorization; "" sends none. `json:"-"`.
+- `MCPConfig.OnUnauthorized func(ctx, wwwAuthenticate string) error` — on 401,
+  then ONE retry. Second 401 / no hook → `*UnauthorizedError`
+  (`errors.Is ErrUnauthorized`, carries WWW-Authenticate). 403 unchanged.
+  Concurrent 401s serialize on a one-slot gate; a request whose token already
+  changed retries without re-running the hook.
+- `mcpmgr/mcpauth`: WWW-Authenticate parser, RFC 9728 + RFC 8414/OIDC fetchers
+  with path insertion, resource/issuer checks. No browser, no token storage.
+- **next**: user review → release v0.8.0 (user tags); dun wires a token cache.
+- **risks**: not tried against real Snowflake/Superset. Issuer compare tolerates
+  a trailing slash only. DELETE on close is not retried.
+- **optional extensions**: 403 `insufficient_scope` step-up; the GET stream.
+
 ### ✅ Turn lifecycle hooks — `OnTurnStart` / `OnTurnEnd` (2026-08-31)
 
 Requested by aw4, which needs turn boundaries as events in its own log and a
