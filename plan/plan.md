@@ -46,6 +46,29 @@ final though.
 
 ## Active work
 
+### ◐ `files` — a mountable file toolset (2026-10-22, branch `files-tools`)
+
+USER: dun had no file tools; wanted one "minimal, configurable, but efficient and
+complete", modelled on aw4's without aw4's coupling. New package `files/` (llm +
+stdlib; shells out to `rg`/`git` when on PATH).
+
+- `New(Config)` → `Defs()` + `Wrap(dispatcher)` / `Dispatch`. Tools read, edit,
+  write, grep, list (default), delete, move (opt-in); `ReadOnly`; names
+  `file_read`… (`NamePrefix`; dots are refused by providers, so not `file.read`).
+- Paths: `Under` refuses `..`, absolute-outside and symlinks whose target is
+  outside (inside links followed; writes go to the real path).
+- Hooks: `Resolve`, `Refusal` (reasons wrap `ErrEscape`/`ErrNotFound`),
+  `AfterWrite`. Read-tracking per Toolset gates write's overwrite.
+- grep: rg when on PATH else Go; git ls-files inside a work tree, else a walk with
+  a gitignore matcher + skip list. rg/Go output byte-identical (parity test, both
+  git and non-git trees).
+- dun wires it on branch `files-tools` (worktree), building via a temp go.work.
+- **next**: user tags v0.10.0; dun bumps.
+- **risks**: rg ≥ 13 assumed for `--no-ignore-dot`/`--no-require-git`; an older rg
+  fails and falls back to Go (counted in `rgFailed`). Not tried on Windows.
+- **optional extensions**: a file outline tool (aw4's file.structure); a stale-read
+  check (mtime since read) on write.
+
 ### ◐ Money and limits — `Usage.Cost`, `Usage.Limits`, `Client.KeyBudget` (2026-10-22, branch `llm-cost-limits`)
 
 USER: "parse out any known cost/budget values". Verified against LiteLLM source
