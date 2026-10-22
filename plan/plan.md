@@ -46,6 +46,31 @@ final though.
 
 ## Active work
 
+### ◐ Money and limits — `Usage.Cost`, `Usage.Limits`, `Client.KeyBudget` (2026-10-22, branch `llm-cost-limits`)
+
+USER: "parse out any known cost/budget values". Verified against LiteLLM source
+(common_request_processing.py, key_management_endpoints.py, schema.prisma),
+OpenRouter, OpenAI and Anthropic docs — see `llm/cost.go` header comment.
+
+- `Usage.Cost{Amount, Currency, Reported}`: LiteLLM `x-litellm-response-cost`
+  (USD, non-streaming only), else `usage.cost` in the body (OpenRouter credits;
+  LiteLLM stream with `include_cost_in_streaming_usage`; currency "" elsewhere).
+- `Usage.Limits` (requests / tokens / input / output windows: Limit, Remaining +
+  HasRemaining, ResetAt): `x-ratelimit-*`, `anthropic-ratelimit-*`, and both
+  under LiteLLM's `llm_provider-` forward prefix. Gateway's own wins per window.
+- `Usage.KeyBudget`: LiteLLM `x-litellm-key-spend` / `-key-max-budget` per call.
+- `Client.KeyBudget(ctx)`: LiteLLM `GET /key/info`, OpenRouter `GET /api/v1/key`
+  (effective_budget preferred); else `ErrBudgetUnsupported`, cached per
+  base+key. Transport errors not cached. 5s per probe.
+- `Client.OnUsage func(Usage)`: once per response (stream: before close).
+- No request flag: OpenRouter's `usage:{include:true}` is deprecated, cost is
+  always sent.
+- **next**: user review → v0.9.0 (user tags); dun branch `llm-cost` consumes it.
+- **risks**: OpenRouter credits↔USD not stated in docs (kept "credits"). LiteLLM
+  reset header format undocumented (parser takes duration / seconds / RFC 3339).
+  Team/user budgets in LiteLLM not read. Not tried against a live gateway.
+- **optional extensions**: LiteLLM `x-litellm-key-remaining-{requests,tokens}-<group>`.
+
 ### ◐ MCP over OAuth/OIDC — per-request token + 401 retry (2026-10-22, branch `mcp-token-source`)
 
 USER decision: dun must reach OAuth-protected MCP servers (Snowflake managed

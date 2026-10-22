@@ -293,6 +293,21 @@ type Usage struct {
 	// no header. LatencyMS minus Timings.ComputeMS is the whole of what this
 	// round waited, wherever it waited.
 	Timings *Timings `json:"timings,omitempty"`
+
+	// Cost is the money this response cost, when the endpoint said: LiteLLM's
+	// x-litellm-response-cost header, or usage.cost in the body (OpenRouter;
+	// LiteLLM on a stream). Zero-valued and Reported=false otherwise. See
+	// cost.go.
+	Cost Cost `json:"response_cost,omitzero"`
+
+	// Limits is the rate-limit snapshot the response headers carried (OpenAI,
+	// Anthropic and LiteLLM shapes). Zero-valued and Reported=false when absent.
+	Limits RateLimits `json:"rate_limits,omitzero"`
+
+	// KeyBudget is the key's spend and budget as of this response, when the
+	// gateway stamps it on every call (LiteLLM's x-litellm-key-spend and
+	// x-litellm-key-max-budget). No reset time: for that, Client.KeyBudget.
+	KeyBudget KeyBudget `json:"key_budget,omitzero"`
 }
 
 // Timings is llama.cpp's per-request compute report. Milliseconds are floats on
@@ -470,6 +485,17 @@ type Client struct {
 	// Content-Type, Authorization, X-Trace-Id, X-Corrallm-Request-Id — are set
 	// after these and win on a clash. nil sends none.
 	Header http.Header
+
+	// OnUsage, when set, is called once per completed chat response with its
+	// final Usage — tokens, Cost, Limits and KeyBudget — so a host can total
+	// spend across every call a client makes without reading each stream
+	// itself. A stream that carried no usage chunk but whose headers reported
+	// something still calls it, with the header facts alone.
+	//
+	// Called from the goroutine reading the response (for ChatStream, before
+	// its channel closes), so it must not block for long and must not re-enter
+	// the client.
+	OnUsage func(Usage)
 }
 
 // retry5xxAttempts is the effective 5xx attempt cap.
@@ -1406,7 +1432,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	}
 
 	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, resp.Body, ch, callStart, serverTimingFrom(resp.Header))
+	go c.readStream(ctx, resp.Body, ch, callStart, c.metaFrom(resp.Header))
 	return ch, nil
 }
 
@@ -1452,6 +1478,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 
 	// Chat is the non-streaming path; today no caller passes a trace
 	// id here, so X-Trace-Id stays unset.
+	callStart := time.Now()
 	resp, err := c.postChatWithRetry(ctx, payload, callIdent{})
 	if err != nil {
 		return "", nil, err
@@ -1468,9 +1495,26 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *Usage `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("llm: read: %w", err)
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return "", nil, fmt.Errorf("llm: decode: %w", err)
+	}
+	if c.OnUsage != nil {
+		meta := c.metaFrom(resp.Header)
+		if result.Usage != nil || meta.reported() {
+			u := Usage{}
+			if result.Usage != nil {
+				u = *result.Usage
+			}
+			u.LatencyMS = time.Since(callStart).Milliseconds()
+			meta.stamp(&u, usageCost(raw))
+			c.OnUsage(u)
+		}
 	}
 	if len(result.Choices) == 0 {
 		return "", nil, nil
@@ -1491,9 +1535,34 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // `stream_options.include_usage=true`); forward as soon as seen.
 // readStream parses the SSE body. callStart is when the request was issued, so
 // usage chunks can carry the round-trip latency no provider reports.
-func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time, timing ServerTiming) {
+func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time, meta responseMeta) {
 	defer body.Close()
 	defer close(ch)
+
+	// lastUsage is what OnUsage gets, once, when the stream ends — not per
+	// usage chunk, since a provider may send more than one and a host totalling
+	// cost would count it twice. Deferred after close(ch), so it runs first.
+	var lastUsage *Usage
+	defer func() {
+		if c.OnUsage == nil {
+			return
+		}
+		if lastUsage != nil {
+			c.OnUsage(*lastUsage)
+		} else if meta.reported() {
+			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
+			meta.stamp(&u, nil)
+			c.OnUsage(u)
+		}
+	}()
+	// stampUsage is the one place a usage chunk gets what the client measured
+	// and what the headers said.
+	stampUsage := func(u *Usage, timings *Timings, data string) {
+		u.LatencyMS = time.Since(callStart).Milliseconds()
+		u.Timings = timings
+		meta.stamp(u, usageCost([]byte(data)))
+		lastUsage = u
+	}
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 65536), 65536)
@@ -1634,9 +1703,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// stream_options.include_usage send one of these after content.
 		if len(event.Choices) == 0 {
 			if event.Usage != nil {
-				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
-				event.Usage.Server = timing
-				event.Usage.Timings = event.Timings
+				stampUsage(event.Usage, event.Timings, data)
 				ch <- StreamChunk{Usage: event.Usage}
 			}
 			continue
@@ -1726,18 +1793,14 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				done.TruncatedToolCalls = truncated
 			}
 			if event.Usage != nil {
-				event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
-				event.Usage.Server = timing
-				event.Usage.Timings = event.Timings
+				stampUsage(event.Usage, event.Timings, data)
 				done.Usage = event.Usage
 			}
 			ch <- done
 		} else if event.Usage != nil {
 			// Same stamp as the other two emission points: a usage chunk that
 			// skipped it would report the round as all work.
-			event.Usage.LatencyMS = time.Since(callStart).Milliseconds()
-			event.Usage.Server = timing
-			event.Usage.Timings = event.Timings
+			stampUsage(event.Usage, event.Timings, data)
 			ch <- StreamChunk{Usage: event.Usage}
 		}
 	}

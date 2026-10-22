@@ -24,7 +24,7 @@ func TestStreamingAcceptsObjectArguments(t *testing.T) {
 
 	c := &Client{}
 	ch := make(chan StreamChunk, 16)
-	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), ServerTiming{})
+	go c.readStream(context.Background(), io.NopCloser(strings.NewReader(sse)), ch, time.Now(), responseMeta{})
 
 	var tools []ToolCall
 	var errs []string
