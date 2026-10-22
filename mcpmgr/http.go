@@ -16,7 +16,10 @@ package mcpmgr
 // stream are delivered.
 //
 // Headers are sent on every request; Authorization: Bearer <token> is how a
-// static token authenticates.
+// static token authenticates. A token that expires (OAuth, an IdP's JWT) uses
+// Authorization instead — asked on every request, so a refreshed token is used
+// without reconnecting — and OnUnauthorized, which runs on a 401 before the
+// request is retried once. See auth.go.
 
 import (
 	"bufio"
@@ -38,6 +41,7 @@ const httpCloseTimeout = 3 * time.Second
 type httpClient struct {
 	url     string
 	headers map[string]string
+	auth    *authHooks
 	hc      *http.Client
 
 	mu              sync.Mutex
@@ -53,8 +57,8 @@ type httpClient struct {
 	closeOnce sync.Once
 }
 
-func newHTTPClient(url string, headers map[string]string) *httpClient {
-	return &httpClient{url: url, headers: headers, hc: &http.Client{}, done: make(chan struct{})}
+func newHTTPClient(url string, headers map[string]string, auth *authHooks) *httpClient {
+	return &httpClient{url: url, headers: headers, auth: auth, hc: &http.Client{}, done: make(chan struct{})}
 }
 
 func (c *httpClient) setNotificationHandler(fn func(method string, params map[string]any)) {
@@ -63,19 +67,34 @@ func (c *httpClient) setNotificationHandler(fn func(method string, params map[st
 	c.onNotify = fn
 }
 
-func (c *httpClient) newRequest(ctx context.Context, method string, body []byte) (*http.Request, error) {
+// newRequest builds a request with every header the session needs, and
+// returns the Authorization value it sent (see retryAfter401).
+func (c *httpClient) newRequest(ctx context.Context, method string, body []byte) (*http.Request, string, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.url, r)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
+	}
+	authz, err := c.auth.authorization(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if c.auth.Authorization != nil {
+		// The hook owns the header: its value replaces a static one, and an
+		// empty value sends none (a client with no token yet, which wants the
+		// 401 and its WWW-Authenticate to start discovery).
+		req.Header.Del("Authorization")
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
 	}
 	c.mu.Lock()
 	if c.sessionID != "" {
@@ -85,7 +104,7 @@ func (c *httpClient) newRequest(ctx context.Context, method string, body []byte)
 		req.Header.Set("MCP-Protocol-Version", c.protocolVersion)
 	}
 	c.mu.Unlock()
-	return req, nil
+	return req, authz, nil
 }
 
 func (c *httpClient) post(ctx context.Context, msg any) (*http.Response, error) {
@@ -98,19 +117,45 @@ func (c *httpClient) post(ctx context.Context, msg any) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
-	req, err := c.newRequest(ctx, http.MethodPost, body)
-	if err != nil {
-		return nil, err
+	// One retry, after a 401 and the refresh it triggers. The request is
+	// rebuilt from the same bytes: a 401 arrives before the server read the
+	// message (or started a stream), so nothing was processed and the
+	// JSON-RPC id is still unused. Session id and protocol version are read
+	// again, so the retry carries exactly what the first attempt did.
+	for attempt := 0; ; attempt++ {
+		req, sent, err := c.newRequest(ctx, http.MethodPost, body)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			resp.Body.Close()
+			uerr := &UnauthorizedError{URL: c.url, WWWAuthenticate: resp.Header.Get("WWW-Authenticate"),
+				Body: strings.TrimSpace(string(snippet))}
+			if attempt > 0 || !c.auth.canRefresh() {
+				return nil, uerr
+			}
+			if err := c.auth.refresh(ctx, sent, uerr.WWWAuthenticate); err != nil {
+				return nil, fmt.Errorf("%w (refresh: %w)", uerr, err)
+			}
+			continue
+		}
+		return c.checkStatus(resp)
 	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
+}
+
+// checkStatus passes a 2xx response through and turns anything else into an
+// error that says what the status means here.
+func (c *httpClient) checkStatus(resp *http.Response) (*http.Response, error) {
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		switch resp.StatusCode {
-		case http.StatusUnauthorized, http.StatusForbidden:
+		case http.StatusForbidden:
 			return nil, fmt.Errorf("mcp: HTTP %d from %s — the server refused the credentials: %s",
 				resp.StatusCode, c.url, strings.TrimSpace(string(snippet)))
 		case http.StatusNotFound:
@@ -259,7 +304,7 @@ func (c *httpClient) close() error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), httpCloseTimeout)
 		defer cancel()
-		req, err := c.newRequest(ctx, http.MethodDelete, nil)
+		req, _, err := c.newRequest(ctx, http.MethodDelete, nil)
 		if err != nil {
 			return
 		}

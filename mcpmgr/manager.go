@@ -57,6 +57,22 @@ type MCPConfig struct {
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 
+	// Authorization, when set, is called before every HTTP request and its
+	// return value is sent as the Authorization header ("Bearer <token>"),
+	// replacing any in Headers; "" sends none. It is called often and from
+	// several goroutines: cache the token, and return quickly. An error
+	// fails the request. Not serialized — a host sets it in code.
+	Authorization func(ctx context.Context) (string, error) `json:"-"`
+	// OnUnauthorized, when set, runs when a request gets HTTP 401, with the
+	// response's WWW-Authenticate header (resource_metadata in it starts
+	// RFC 9728 discovery — see mcpauth). It should refresh or obtain the
+	// token that Authorization returns; the request is then retried once.
+	// A second 401, or no hook, fails with an *UnauthorizedError
+	// (errors.Is ErrUnauthorized). Concurrent 401s run it one at a time,
+	// and not at all when Authorization already returns a value different
+	// from the one that failed. Not serialized.
+	OnUnauthorized func(ctx context.Context, wwwAuthenticate string) error `json:"-"`
+
 	// SecretRef names a row in the secrets table whose plaintext is a
 	// JSON object (a flat KV map). When set, spawn() resolves it,
 	// renders it to SecretFormat, writes it to a per-server 0600 temp
@@ -353,7 +369,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	var t transport
 	var stdio *stdioClient
 	if cfg.URL != "" {
-		t = newHTTPClient(cfg.URL, cfg.Headers)
+		t = newHTTPClient(cfg.URL, cfg.Headers, newAuthHooks(cfg.Authorization, cfg.OnUnauthorized))
 	} else {
 		stdio = newStdioClient(cfg.Command, env, args)
 		t = stdio
