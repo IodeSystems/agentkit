@@ -33,7 +33,12 @@ func (t *Toolset) edit(a args) (string, error) {
 		}
 		pairs = []editPair{{Old: *a.Old, New: *a.New}}
 	default:
-		return "", fmt.Errorf("edit needs old and new, or edits:[{old,new},…]. To create or replace a whole file use %s", t.Name(Write))
+		got := "no arguments"
+		if len(a.keys) > 0 {
+			got = "only " + strings.Join(a.keys, ", ")
+		}
+		return "", fmt.Errorf("edit needs edits:[{old,new},…] and this call sent %s — nothing was changed. "+
+			"To create or replace a whole file use %s", got, t.Name(Write))
 	}
 	abs, display, err := t.resolve(a.Path)
 	if err != nil {

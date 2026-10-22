@@ -267,6 +267,7 @@ func (t *Toolset) Dispatch(ctx context.Context, name, argsJSON string) string {
 		if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
 			return fmt.Sprintf("ERROR: %s: arguments are not a JSON object: %v", name, err)
 		}
+		a.keys = argKeys([]byte(argsJSON))
 	}
 	out, err := t.run(ctx, bare, a)
 	if err != nil {
@@ -289,6 +290,7 @@ func (t *Toolset) Run(ctx context.Context, bare string, a map[string]any) (strin
 	if err := json.Unmarshal(b, &parsed); err != nil {
 		return "", err
 	}
+	parsed.keys = argKeys(b)
 	return t.run(ctx, bare, parsed)
 }
 
@@ -330,6 +332,23 @@ type args struct {
 	IgnoreCase flexBool   `json:"ignore_case"`
 	Sizes      flexBool   `json:"sizes"`
 	To         string     `json:"to"`
+	// keys are the argument names the call sent, for a refusal that says
+	// what arrived.
+	keys []string
+}
+
+// argKeys is the sorted top-level keys of a JSON object; nil if it is not one.
+func argKeys(b []byte) []string {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type editPair struct {

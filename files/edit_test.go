@@ -90,7 +90,8 @@ func TestEdit(t *testing.T) {
 		{name: "same text", args: map[string]any{"old": "return 1", "new": "return 1"}, err: []string{"the same text"}},
 		{name: "old without new", args: map[string]any{"old": "return 1"}, err: []string{"old needs a new"}},
 		{name: "both shapes", args: map[string]any{"old": "a", "new": "b", "edits": []map[string]any{{"old": "c", "new": "d"}}}, err: []string{"not both"}},
-		{name: "neither", args: map[string]any{}, err: []string{"edit needs old and new", "file_write"}},
+		{name: "neither", args: map[string]any{}, err: []string{"edit needs edits", "file_write"}},
+		{name: "path only", args: map[string]any{"path": "a.txt"}, err: []string{"sent only path", "nothing was changed"}},
 		{
 			name: "cancelling edits write nothing",
 			args: map[string]any{"edits": []map[string]any{{"old": "return 1", "new": "return 9"}, {"old": "return 9", "new": "return 1"}}},

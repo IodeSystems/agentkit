@@ -39,19 +39,22 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 		td.Function.Description = fmt.Sprintf("Change a file by exact replacement. Each old must occur EXACTLY ONCE in the file "+
 			"(add surrounding lines to make it unique); edits apply in order, all or none. Copy old from a %s of the "+
 			"span — a few lines, without the line-number prefix. Returns the diff.", t.Name(Read))
+		// One shape, edits required: with old/new and edits both optional the
+		// schema required only path, and a model that fills what is required
+		// sent just that (DeepSeek, 2026-10-22). old/new at the top level are
+		// still accepted, unadvertised.
 		td.Function.Parameters = obj(map[string]any{
 			"path": str(pathDesc),
-			"old":  str("Exact text to replace (single edit)."),
-			"new":  str("Replacement text; empty deletes."),
 			"edits": map[string]any{
 				"type":        "array",
-				"description": "Several replacements, applied in order: [{old, new}, …]. Use instead of old/new.",
+				"minItems":    1,
+				"description": "Replacements, applied in order: [{old, new}, …]; one item for a single edit.",
 				"items": obj(map[string]any{
 					"old": str("Exact text to replace."),
-					"new": str("Replacement text."),
+					"new": str("Replacement text; empty deletes."),
 				}, "old", "new"),
 			},
-		}, "path")
+		}, "path", "edits")
 	case Write:
 		td.Function.Description = fmt.Sprintf("Create a file, or replace one whole. Parent directories are created. Replacing a file "+
 			"you have not read in this session is refused unless overwrite is true; for a change to an existing file use %s.",

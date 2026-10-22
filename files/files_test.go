@@ -253,3 +253,32 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// The edit schema has one shape and requires it: with old/new and edits both
+// optional, a model that fills only what is required sent just a path.
+func TestEditSchemaRequiresEdits(t *testing.T) {
+	ts := mount(t, Config{Root: tree(t, nil)})
+	for _, d := range ts.Defs() {
+		if d.Function.Name != "file_edit" {
+			continue
+		}
+		p := d.Function.Parameters.(map[string]any)
+		if req := p["required"].([]string); !reflect.DeepEqual(req, []string{"path", "edits"}) {
+			t.Errorf("required = %v", req)
+		}
+		if _, ok := p["properties"].(map[string]any)["old"]; ok {
+			t.Error("old/new should not be advertised beside edits")
+		}
+		return
+	}
+	t.Fatal("no file_edit def")
+}
+
+// old/new at the top level still work for a model that sends them.
+func TestEditAcceptsOldNewAlias(t *testing.T) {
+	root := tree(t, map[string]string{"a.txt": "one\ntwo\n"})
+	ts := mount(t, Config{Root: root})
+	ts.Dispatch(context.Background(), "file_read", `{"path":"a.txt"}`)
+	out := ts.Dispatch(context.Background(), "file_edit", `{"path":"a.txt","old":"two","new":"2"}`)
+	contains(t, mustOK(t, out), "edited")
+}
