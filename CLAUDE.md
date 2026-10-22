@@ -18,6 +18,9 @@ llm/      OpenAI-compatible streaming chat client. stdlib only.
 mcpmgr/   MCP server manager (spawn/discover/call, thread scoping, secrets).
           Own JSON-RPC stdio client (jsonrpc.go + protocol.go). stdlib only.
 agent/    the tablestakes engine: Session.Turn loop + Shaper + primitives. imports llm + stdlib only.
+files/    mountable file toolset (read/edit/write/grep/list, opt-in delete/move) for a
+          host's tool list: Defs() + Wrap(dispatcher). imports llm + stdlib only;
+          shells out to rg/git when on PATH, works without either.
 examples/agentkit-demo/  runnable CLI, one subcommand per feature.
 plan/     living plan. Only plan.md exists today; it carries its own Icebox
           section rather than the separate done.md / icebox.md the global
