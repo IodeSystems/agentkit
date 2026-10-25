@@ -72,6 +72,13 @@ type MCPConfig struct {
 	// and not at all when Authorization already returns a value different
 	// from the one that failed. Not serialized.
 	OnUnauthorized func(ctx context.Context, wwwAuthenticate string) error `json:"-"`
+	// OnStderr, when set, gets each line a spawned server writes on stderr,
+	// as it writes it: from the spawn on, through the handshake and for the
+	// life of the process (ServerStderr only has the tail of a server that
+	// finished its handshake). It runs on the stderr reader's goroutine, so
+	// it hands off and returns; blocking it stalls the server's stderr pipe.
+	// Blank lines are skipped and long ones cut, as in the tail.
+	OnStderr func(line string) `json:"-"`
 
 	// SecretRef names a row in the secrets table whose plaintext is a
 	// JSON object (a flat KV map). When set, spawn() resolves it,
@@ -396,20 +403,20 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	// long as the Manager does; Manager.Close() and StopThreadServers tear it
 	// down. ctx bounds the handshake below, nothing more.
 	// An HTTP server has no process and no stderr: its tail stays empty.
-	tail := watchStderr(nil)
+	tail := watchStderr(nil, nil)
 	if stdio != nil {
 		if err := stdio.start(); err != nil {
 			if secretDir != "" {
 				os.RemoveAll(secretDir)
 			}
-			tail := watchStderr(stdio.stderrPipe())
+			tail := watchStderr(stdio.stderrPipe(), cfg.OnStderr)
 			tail.settle()
 			return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
 		}
 		// Drain stderr for the life of the process: it is where a server
 		// explains itself when it refuses to start, and nobody else reads the
 		// pipe.
-		tail = watchStderr(stdio.stderrPipe())
+		tail = watchStderr(stdio.stderrPipe(), cfg.OnStderr)
 	}
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)

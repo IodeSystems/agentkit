@@ -35,8 +35,9 @@ type stderrTail struct {
 
 // watchStderr drains r in the background for the life of the process. A nil
 // reader (no pipe, e.g. an in-process transport) yields a tail that is simply
-// always empty, so callers need no nil checks.
-func watchStderr(r io.Reader) *stderrTail {
+// always empty, so callers need no nil checks. onLine, when set, gets each
+// line kept, as it is read (MCPConfig.OnStderr).
+func watchStderr(r io.Reader, onLine func(string)) *stderrTail {
 	t := &stderrTail{done: make(chan struct{})}
 	if r == nil {
 		close(t.done)
@@ -60,6 +61,9 @@ func watchStderr(r io.Reader) *stderrTail {
 				t.lines = t.lines[len(t.lines)-stderrTailLines:]
 			}
 			t.mu.Unlock()
+			if onLine != nil {
+				onLine(line)
+			}
 		}
 	}()
 	return t
