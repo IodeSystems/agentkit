@@ -43,7 +43,19 @@ func TestMain(m *testing.M) {
 		fakeServerMain(s)
 		return
 	}
-	os.Exit(m.Run())
+	// Tests that start the real poly-lsp-mcp from PATH must not reach the
+	// user's shared daemon (poly-lsp 1be97d0 proxies to it by default): it
+	// kept the tests' temp roots warm and allowed. In-process, under a temp
+	// home in case a build still proxies.
+	home, err := os.MkdirTemp("", "agentkit-mcpmgr-test-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("POLY_LSP_NO_DAEMON", "1")
+	os.Setenv("POLY_LSP_HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 // fakeServer returns the (command, env) pair that spawns this test binary as
