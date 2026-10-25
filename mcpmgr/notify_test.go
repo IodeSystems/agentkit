@@ -41,11 +41,38 @@ func TestNotificationsReachTheManager(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 
+	// A server that builds an index after the handshake (poly-lsp-mcp
+	// v0.2.0) watches the tree once it is built: wait for that, or a little.
+	wait := time.After(10 * time.Second)
+ready:
+	for {
+		select {
+		case n := <-got:
+			if contains(n.Text(), `"state":"ready"`) {
+				break ready
+			}
+		case <-wait:
+			break ready
+		}
+	}
+
 	// A conflict appears out of band — nobody asked the server anything.
 	write("w.go", "package n\n\n<<<<<<< HEAD\nfunc A() {}\n=======\nfunc B() {}\n>>>>>>> feat\n")
 
-	select {
-	case n := <-got:
+	// Other notifications may come first (poly-lsp-mcp v0.2.0 says its
+	// index is ready): wait for the conflict's.
+	deadline := time.After(20 * time.Second)
+	for {
+		var n Notification
+		select {
+		case n = <-got:
+		case <-deadline:
+			t.Fatal("no conflict notification arrived — the server→client path is not connected")
+		}
+		t.Logf("notification: %s %s %q", n.Method, n.Level(), n.Text())
+		if !contains(n.Text(), "merge conflict") {
+			continue
+		}
 		if n.ServerID != "code" {
 			t.Errorf("the notification should name its server; got %q", n.ServerID)
 		}
@@ -55,11 +82,7 @@ func TestNotificationsReachTheManager(t *testing.T) {
 		if n.Level() != "warning" {
 			t.Errorf("a new conflict is a warning; got %q", n.Level())
 		}
-		if txt := n.Text(); txt == "" || !contains(txt, "merge conflict") {
-			t.Errorf("text should describe the conflict; got %q", txt)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("no notification arrived — the server→client path is not connected")
+		break
 	}
 }
 
