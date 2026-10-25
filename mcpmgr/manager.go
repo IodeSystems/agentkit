@@ -104,8 +104,10 @@ type MCPServer struct {
 	// Capabilities is what the server declared in the handshake: "tools",
 	// "resources", "prompts", … — a client asks only for what is there.
 	Capabilities map[string]any
-	ready        chan struct{}
-	readyErr     error
+	// Info is what the server said about itself in the handshake.
+	Info     ServerInfo
+	ready    chan struct{}
+	readyErr error
 	// secretDir is the per-server temp directory holding the rendered
 	// 0600 secret file (empty when SecretRef is unset). Teardown
 	// (Close / StopServer / StopThreadServers + the delete+replace
@@ -427,9 +429,11 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 		Config:       cfg,
 		client:       mc,
 		Capabilities: init.Capabilities,
-		ready:        make(chan struct{}),
-		secretDir:    secretDir,
-		stderr:       tail,
+		Info: ServerInfo{Name: init.ServerInfo.Name, Title: init.ServerInfo.Title, Version: init.ServerInfo.Version,
+			ProtocolVersion: init.ProtocolVersion, Instructions: init.Instructions, Raw: init.raw},
+		ready:     make(chan struct{}),
+		secretDir: secretDir,
+		stderr:    tail,
 	}
 
 	go func() {
@@ -657,6 +661,27 @@ func (m *Manager) Capabilities(serverID string) map[string]any {
 		return nil
 	}
 	return srv.Capabilities
+}
+
+// ServerInfo is what a server said about itself in the initialize handshake:
+// serverInfo's name, title (newer servers) and version, the negotiated
+// protocol version, its instructions (what it is for and how to use it, when
+// it says), and the whole result as sent, for fields beside the spec's.
+type ServerInfo struct {
+	Name, Title, Version string
+	ProtocolVersion      string
+	Instructions         string
+	Raw                  json.RawMessage
+}
+
+// ServerInfo returns what a connected server said about itself in the
+// handshake; ok=false when it is not connected.
+func (m *Manager) ServerInfo(serverID string) (ServerInfo, bool) {
+	srv, err := m.server(serverID)
+	if err != nil {
+		return ServerInfo{}, false
+	}
+	return srv.Info, true
 }
 
 // ListResources returns a server's resources (resources/list).

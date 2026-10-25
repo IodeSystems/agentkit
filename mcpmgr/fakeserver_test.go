@@ -176,7 +176,9 @@ func fakeServerMain(scenario string) {
 			conn.result(id, map[string]any{
 				"protocolVersion": fakeProtocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "fake", "version": "1"},
+				"serverInfo":      map[string]any{"name": "fake", "title": "Fake Server", "version": "1"},
+				"instructions":    "Use search for anything.",
+				"index":           map[string]any{"state": "building"}, // a server's own field
 			})
 
 		case "tools/list":

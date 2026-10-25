@@ -561,3 +561,19 @@ func TestThreadScopedServerLifecycle(t *testing.T) {
 		t.Error("want an error calling a stopped thread server")
 	}
 }
+
+// What a server says about itself in the handshake is kept: its title and
+// instructions, and the whole result for fields beside the spec's.
+func TestServerInfo(t *testing.T) {
+	m := startFake(t, "fake", "happy", 10)
+	info, ok := m.ServerInfo("fake")
+	if !ok || info.Name != "fake" || info.Title != "Fake Server" || info.Version != "1" || info.Instructions != "Use search for anything." {
+		t.Fatalf("info: %+v %v", info, ok)
+	}
+	if info.ProtocolVersion == "" || !strings.Contains(string(info.Raw), `"index":{"state":"building"}`) {
+		t.Errorf("raw: %s", info.Raw)
+	}
+	if _, ok := m.ServerInfo("nope"); ok {
+		t.Error("an unknown server has no info")
+	}
+}

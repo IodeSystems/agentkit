@@ -74,8 +74,15 @@ type initializeResult struct {
 	Capabilities    map[string]any `json:"capabilities"`
 	ServerInfo      struct {
 		Name    string `json:"name"`
+		Title   string `json:"title"`
 		Version string `json:"version"`
 	} `json:"serverInfo"`
+	// Instructions is the server's own account of what it is for and how to
+	// use it (optional in the spec).
+	Instructions string `json:"instructions"`
+	// raw is the whole result, for fields this library does not model (a
+	// server's own extensions beside the spec's).
+	raw json.RawMessage
 }
 
 // initialize performs the MCP handshake: send initialize, then the
@@ -83,17 +90,22 @@ type initializeResult struct {
 // answering anything else. Skipping that notification is a silent failure mode
 // — a strict server accepts the connection and then refuses every call.
 func (c mcpClient) initialize(ctx context.Context, clientName, clientVersion string) (*initializeResult, error) {
-	var res initializeResult
+	var raw json.RawMessage
 	err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": requestedProtocolVersion,
 		"clientInfo":      map[string]any{"name": clientName, "version": clientVersion},
 		// Present but empty: we implement no sampling, roots, or elicitation,
 		// and the field is not optional.
 		"capabilities": map[string]any{},
-	}, &res)
+	}, &raw)
 	if err != nil {
 		return nil, err
 	}
+	var res initializeResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("decode initialize result: %w", err)
+	}
+	res.raw = raw
 
 	// Deliberately NOT policed against a list of known versions. We speak a
 	// three-method subset that has not changed across revisions, so rejecting
