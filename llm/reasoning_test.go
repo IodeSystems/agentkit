@@ -244,3 +244,27 @@ func TestApplyReasoning_OpenRouter(t *testing.T) {
 		}
 	}
 }
+
+// A named dialect wins over detection: the openai one sends only an
+// effort, a LiteLLM proxy's address names nothing.
+func TestReasoningDialect_Named(t *testing.T) {
+	on, n := true, 4096
+	c := NewClient("https://litellm.corp.example/v1", "", "deepseek-1017")
+	body := map[string]any{}
+	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "medium"})
+	if _, ok := body["chat_template_kwargs"]; !ok {
+		t.Error("auto on an unnamed address is llama.cpp's dialect")
+	}
+	c.SetReasoningDialect(DialectOpenAI)
+	body = map[string]any{}
+	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "medium"})
+	if body["reasoning_effort"] != "medium" || len(body) != 1 {
+		t.Errorf("openai: %v", body)
+	}
+	c.SetReasoningDialect(DialectOpenRouter)
+	body = map[string]any{}
+	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningEffort: "high"})
+	if r, _ := body["reasoning"].(map[string]any); r["effort"] != "high" {
+		t.Errorf("openrouter: %v", body)
+	}
+}

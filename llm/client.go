@@ -411,9 +411,12 @@ func (u *Usage) NewPromptTokens() int {
 // Client sends requests to an OpenAI-compatible LLM endpoint.
 type Client struct {
 	baseURL string
-	apiKey  string
-	model   string
-	http    *http.Client
+	// reasoningDialect is how this endpoint is asked to think (reasoning.go);
+	// "" detects it.
+	reasoningDialect string
+	apiKey           string
+	model            string
+	http             *http.Client
 
 	// RetryBudget caps the total wall-clock a single request spends retrying
 	// 429/5xx before giving up (exponential backoff to retryMaxBackoff,
@@ -1335,9 +1338,9 @@ type ChatOpts struct {
 	EnableThinking *bool
 
 	// ReasoningEffort is "low", "medium" or "high" ("none": no thinking), for
-	// an endpoint that takes an effort rather than a budget. Only OpenRouter's
-	// dialect sends it (see reasoning.go); elsewhere EnableThinking and
-	// ReasoningBudgetTokens carry the request.
+	// an endpoint that takes an effort rather than a budget: the openrouter
+	// and openai dialects send it (see reasoning.go); llama.cpp's and
+	// Anthropic's use EnableThinking and ReasoningBudgetTokens.
 	ReasoningEffort string
 }
 

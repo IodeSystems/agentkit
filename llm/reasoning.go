@@ -28,16 +28,40 @@ import (
 // would come back 200 either way and learn nothing. The model id is the honest
 // signal — corrallm's own passthrough is keyed on `claude-*` globs, and a
 // request that reaches Anthropic at all had to name a claude model to get there.
-// openRouterDialect is an OpenRouter endpoint (openrouter.ai, or an
-// enterprise one whose address names it). It reads one `reasoning` object
-// and none of the other dialects' fields: chat_template_kwargs never reaches
-// the model behind it, and without a `reasoning` object a model may think
-// and send none of it back.
-func (c *Client) openRouterDialect() bool {
-	return strings.Contains(strings.ToLower(c.baseURL), "openrouter")
+// Reasoning dialects: how an endpoint is asked to think. "" detects one
+// from the model id and the address; a caller that knows better (a LiteLLM
+// proxy in front of OpenRouter has neither in its address) names it with
+// SetReasoningDialect.
+const (
+	DialectAuto       = ""
+	DialectLlamaCpp   = "llamacpp"   // chat_template_kwargs.enable_thinking, reasoning_budget_tokens
+	DialectAnthropic  = "anthropic"  // thinking: {type, budget_tokens}
+	DialectOpenRouter = "openrouter" // reasoning: {effort | max_tokens | enabled}
+	DialectOpenAI     = "openai"     // reasoning_effort: low|medium|high (what LiteLLM maps per provider)
+)
+
+// SetReasoningDialect names this endpoint's dialect; "" detects it. Not
+// safe to call while requests are in flight.
+func (c *Client) SetReasoningDialect(d string) { c.reasoningDialect = d }
+
+// dialect is the one in force: the named one, else detected.
+func (c *Client) dialect() string {
+	if c.reasoningDialect != DialectAuto {
+		return c.reasoningDialect
+	}
+	switch {
+	case c.anthropicDetected():
+		return DialectAnthropic
+	case strings.Contains(strings.ToLower(c.baseURL), "openrouter"):
+		// openrouter.ai, or an enterprise endpoint whose address names it.
+		return DialectOpenRouter
+	}
+	return DialectLlamaCpp
 }
 
-func (c *Client) anthropicDialect() bool {
+func (c *Client) anthropicDialect() bool { return c.dialect() == DialectAnthropic }
+
+func (c *Client) anthropicDetected() bool {
 	return strings.HasPrefix(c.model, "claude-") ||
 		strings.Contains(c.baseURL, "api.anthropic.com")
 }
@@ -52,8 +76,19 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 	if opts == nil {
 		return
 	}
-	if c.openRouterDialect() {
+	switch c.dialect() {
+	case DialectOpenRouter:
 		applyOpenRouterReasoning(body, opts)
+		return
+	case DialectOpenAI:
+		// Only an effort: there is no standard off or budget. A llama.cpp
+		// template refuses an effort it does not know (measured: Qwen3.8
+		// answered 500 to "high"), which is why this dialect is named,
+		// never detected.
+		switch opts.ReasoningEffort {
+		case "low", "medium", "high":
+			body["reasoning_effort"] = opts.ReasoningEffort
+		}
 		return
 	}
 	anth := c.anthropicDialect()
