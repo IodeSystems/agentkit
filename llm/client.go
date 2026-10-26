@@ -1333,6 +1333,12 @@ type ChatOpts struct {
 	// Meaningless to a template that does not read the kwarg, and unused on the
 	// Anthropic dialect, where a budget is itself the toggle.
 	EnableThinking *bool
+
+	// ReasoningEffort is "low", "medium" or "high" ("none": no thinking), for
+	// an endpoint that takes an effort rather than a budget. Only OpenRouter's
+	// dialect sends it (see reasoning.go); elsewhere EnableThinking and
+	// ReasoningBudgetTokens carry the request.
+	ReasoningEffort string
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.

@@ -28,6 +28,15 @@ import (
 // would come back 200 either way and learn nothing. The model id is the honest
 // signal — corrallm's own passthrough is keyed on `claude-*` globs, and a
 // request that reaches Anthropic at all had to name a claude model to get there.
+// openRouterDialect is an OpenRouter endpoint (openrouter.ai, or an
+// enterprise one whose address names it). It reads one `reasoning` object
+// and none of the other dialects' fields: chat_template_kwargs never reaches
+// the model behind it, and without a `reasoning` object a model may think
+// and send none of it back.
+func (c *Client) openRouterDialect() bool {
+	return strings.Contains(strings.ToLower(c.baseURL), "openrouter")
+}
+
 func (c *Client) anthropicDialect() bool {
 	return strings.HasPrefix(c.model, "claude-") ||
 		strings.Contains(c.baseURL, "api.anthropic.com")
@@ -41,6 +50,10 @@ func (c *Client) anthropicDialect() bool {
 // there would silently lose the budget.
 func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 	if opts == nil {
+		return
+	}
+	if c.openRouterDialect() {
+		applyOpenRouterReasoning(body, opts)
 		return
 	}
 	anth := c.anthropicDialect()
@@ -87,6 +100,22 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 		// fraction of the budget and waits for a newline; until that merges,
 		// this message is the only thing telling the model what happened.
 		body["reasoning_budget_message"] = opts.ReasoningBudgetMessage
+	}
+}
+
+// applyOpenRouterReasoning is OpenRouter's `reasoning` object: off, a
+// token budget, an effort, or on; nothing when opts asks for none of them.
+func applyOpenRouterReasoning(body map[string]any, opts *ChatOpts) {
+	off := opts.ReasoningEffort == "none" || (opts.EnableThinking != nil && !*opts.EnableThinking)
+	switch {
+	case off:
+		body["reasoning"] = map[string]any{"enabled": false}
+	case opts.ReasoningBudgetTokens != nil && *opts.ReasoningBudgetTokens > 0:
+		body["reasoning"] = map[string]any{"max_tokens": *opts.ReasoningBudgetTokens}
+	case opts.ReasoningEffort != "":
+		body["reasoning"] = map[string]any{"effort": opts.ReasoningEffort}
+	case opts.EnableThinking != nil:
+		body["reasoning"] = map[string]any{"enabled": true}
 	}
 }
 

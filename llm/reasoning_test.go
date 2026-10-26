@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -207,5 +208,39 @@ func TestLive_AutoReasoningBudget(t *testing.T) {
 	t.Logf("budget=%d (%.0f%% of window)", budget, 100*float64(budget)/float64(window))
 	if budget >= window {
 		t.Errorf("budget %d must be smaller than the window %d", budget, window)
+	}
+}
+
+// OpenRouter takes one `reasoning` object, and none of llama.cpp's fields.
+func TestApplyReasoning_OpenRouter(t *testing.T) {
+	c := NewClient("https://openrouter.ai/api/v1", "", "deepseek/deepseek-r1")
+	on, off, n := true, false, 2048
+	for name, tc := range map[string]struct {
+		opts ChatOpts
+		want string
+	}{
+		"effort": {ChatOpts{EnableThinking: &on, ReasoningEffort: "high"}, `{"effort":"high"}`},
+		"budget": {ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "low"}, `{"max_tokens":2048}`},
+		"off":    {ChatOpts{EnableThinking: &off}, `{"enabled":false}`},
+		"none":   {ChatOpts{ReasoningEffort: "none"}, `{"enabled":false}`},
+		"on":     {ChatOpts{EnableThinking: &on}, `{"enabled":true}`},
+		"unset":  {ChatOpts{}, ``},
+	} {
+		body := map[string]any{}
+		c.applyReasoning(body, &tc.opts)
+		got := ""
+		if r, ok := body["reasoning"]; ok {
+			b, _ := json.Marshal(r)
+			got = string(b)
+		}
+		if got != tc.want {
+			t.Errorf("%s: reasoning %s, want %s", name, got, tc.want)
+		}
+		if _, ok := body["chat_template_kwargs"]; ok {
+			t.Errorf("%s: chat_template_kwargs sent to OpenRouter", name)
+		}
+		if _, ok := body["reasoning_budget_tokens"]; ok {
+			t.Errorf("%s: reasoning_budget_tokens sent to OpenRouter", name)
+		}
 	}
 }
