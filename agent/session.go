@@ -744,9 +744,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 						"You have called %s %d times in the last few rounds and received an "+
 							"IDENTICAL result every time. Repeating it will not produce a different "+
 							"answer, and alternating between it and one other call is the same "+
-							"loop wearing a hat. Change the approach, or report what you have "+
-							"and stop.",
-						callNames(toolCalls), repeatRounds),
+							"loop. At %d identical rounds this turn is stopped. Change the "+
+							"approach: wait for what you are polling if the tool can, do other "+
+							"work, or report what you have and stop.",
+						callNames(toolCalls), repeatRounds, 2*maxRepeatRounds),
 					CreatedAt: now(),
 				}); e != nil {
 					return result, fmt.Errorf("agent: persist tool-loop notice: %w", e)

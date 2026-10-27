@@ -57,6 +57,11 @@ func TestIdenticalExchangeStopsTheTurn(t *testing.T) {
 	if !strings.Contains(notice, "check_status") {
 		t.Errorf("the model was never told which tool was looping: %q", notice)
 	}
+	// It is told the stop is coming, and when: a model that does not know it
+	// polls on until it is stopped (dun, 2026-10-27).
+	if !strings.Contains(notice, "At 10 identical rounds this turn is stopped") {
+		t.Errorf("the warning does not say when the turn stops: %q", notice)
+	}
 }
 
 // The false positive that would make this guard unusable: a poll IS a repeated
