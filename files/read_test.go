@@ -214,7 +214,14 @@ func TestReadLargeFileNote(t *testing.T) {
 	root := tree(t, map[string]string{"ci.log": log, "small.txt": "a\nb\n"})
 	ts := mount(t, Config{Root: root})
 	note := fmt.Sprintf("ci.log is %s, 3000 lines: search it with grep", sizeOf(int64(len(log))))
-	contains(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log"})), "cut at 8.0KB", note, `grep:"ERROR|FAIL"`)
+	// No range on a large file: a short head (largeHead), the note, and no
+	// paging advice — searching is the next step, not reading on.
+	head := mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log"}))
+	contains(t, head, "lines 1-", note, `grep:"ERROR|FAIL"`)
+	lacks(t, head, "cut at", "Continue with offset")
+	if len(head) > largeHead+400 {
+		t.Errorf("the head of a large file is %d bytes, want about %d", len(head), largeHead)
+	}
 	out := mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log", "offset": -120}))
 	contains(t, out, "lines 2881-3000 of 3000", note)
 	if !strings.HasSuffix(out, "or read a range]") {

@@ -44,6 +44,12 @@ const maxEditSize = 16 << 20
 // the same log returned 265 bytes.
 const largeFile = 64 * 1024
 
+// largeHead is what a read of a large file with no range returns: enough to
+// see what the file is, not a page to carry. The same benchmark re-run with
+// the note: a model read the 8KB head first (~5k tokens, kept in context)
+// and only then grepped; a short head makes the search the next step.
+const largeHead = 2 << 10
+
 // read reads a file or a range of it; on a directory it is list; with grep it
 // is grep, on a file or a tree. One tool for the three, because a model that
 // has read in hand reaches for it, and a search that needs a second tool is a
@@ -99,9 +105,13 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 	}
 
 	ranged := offset != 0 || limit != 0
+	large := st.Size() >= largeFile
 	capBytes := t.cfg.ReadMax
 	if !ranged {
 		capBytes = t.cfg.UnrangedMax
+		if large {
+			capBytes = min(capBytes, largeHead)
+		}
 	}
 
 	// The total is needed for the header, for a negative offset and for the
@@ -145,17 +155,20 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 		// Capped: say what was cut and the exact next range, so paging needs
 		// no arithmetic the caller has to get right.
 		next := last + 1
-		if !ranged {
+		switch {
+		case !ranged && large:
+			// The note below says what to do instead; no paging advice.
+		case !ranged:
 			fmt.Fprintf(&b, "\n[cut at %s: this read named no range, and gets a head. %s has %d lines (%s). "+
 				"Continue with offset=%d limit=200, or offset=-200 for the end; a ranged read returns up to %s]",
 				sizeOf(int64(capBytes)), display, total, sizeOf(st.Size()), next, sizeOf(int64(t.cfg.ReadMax)))
-		} else {
+		default:
 			fmt.Fprintf(&b, "\n[cut at %s, the most one read returns. %s has %d lines. Continue with offset=%d]",
 				sizeOf(int64(capBytes)), display, total, next)
 		}
 	}
 	out := strings.TrimRight(b.String(), "\n")
-	if st.Size() >= largeFile && (!ranged || offset < 0) {
+	if large && (!ranged || offset < 0) {
 		out += fmt.Sprintf("\n[%s is %s, %d lines: search it with grep (e.g. grep:\"ERROR|FAIL\" for a log), or read a range]",
 			display, sizeOf(st.Size()), total)
 	}
