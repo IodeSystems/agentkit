@@ -37,7 +37,7 @@ Requires Go 1.26+.
 | `llm`    | the streaming OpenAI-compatible chat client (tools, tool_choice, grammar, response_format, 429 retry) | stdlib only |
 | `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | stdlib only |
 | `agent`  | the tablestakes: `Session.Turn` loop, `Shaper`, injection, lifting, validation, notification lifecycle | `llm` only |
-| `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move) rooted at one directory, with capped reads, exact-once edits and .gitignore-aware search (`rg` when on PATH) | `llm` only |
+| `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move; read alone also lists a directory and, with grep, searches a file or a tree) rooted at one directory, with capped reads, exact-once edits and .gitignore-aware search (`rg` when on PATH) | `llm` only |
 
 **agentkit has no third-party dependencies at all** — `go.mod` declares a
 module path, a Go version, and nothing else:

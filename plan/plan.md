@@ -63,6 +63,11 @@ stdlib; shells out to `rg`/`git` when on PATH).
   a gitignore matcher + skip list. rg/Go output byte-identical (parity test, both
   git and non-git trees).
 - dun wires it on branch `files-tools` (worktree), building via a temp go.work.
+- read takes `grep` (+ `context`, `glob`) on a file or a tree, lists a directory
+  (list's params: `glob`, `sizes`, `max`), and notes size + "search it with grep"
+  on a ≥64KB head/tail read (branch `fileread-grep`, for v0.14.0). The grep and
+  list tools stay, unchanged. Why: dun benchmark 2026-10-27, a 218KB CI log
+  tail-read (~5.8k tokens) where a grep returned 265 bytes.
 - **next**: user tags v0.10.0; dun bumps.
 - **risks**: rg ≥ 13 assumed for `--no-ignore-dot`/`--no-require-git`; an older rg
   fails and falls back to Go (counted in `rgFailed`). Not tried on Windows.

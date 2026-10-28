@@ -147,7 +147,94 @@ func TestReadMissingSuggests(t *testing.T) {
 			lacks(t, out, c.not...)
 		})
 	}
-	mustErr(t, call(t, ts, Read, map[string]any{"path": "internal"}), "is a directory", "file_list")
+	// A directory is listed, not refused.
+	contains(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "internal"})), "internal/: 2 dirs, 0 files", "api/\nstore/")
+}
+
+// read on a directory is list: the same output for the same arguments,
+// with read alone mounted.
+func TestReadDirectoryIsList(t *testing.T) {
+	root := tree(t, map[string]string{
+		".gitignore":           "*.log\n",
+		"README.md":            "r\n",
+		"debug.log":            "x\n",
+		"internal/a/a.go":      "package a\n",
+		"internal/a/a_test.go": "package a\n",
+		"internal/b/b.go":      "package b\n",
+	})
+	both := mount(t, Config{Root: root})
+	only := mount(t, Config{Root: root, Tools: []string{Read}})
+	for _, a := range []map[string]any{
+		{"path": "."},
+		{"path": "internal/a", "sizes": true},
+		{"path": ".", "glob": "**/*.go"},
+		{"path": "internal", "glob": "*_test.go", "sizes": true},
+		{"path": ".", "glob": "**/*.go", "max": 1},
+		{"path": ".", "max": 1},
+	} {
+		want := mustOK(t, call(t, both, List, a))
+		if got := mustOK(t, call(t, only, Read, a)); got != want {
+			t.Errorf("read %v:\n%s\nlist:\n%s", a, got, want)
+		}
+	}
+	lacks(t, mustOK(t, call(t, only, Read, map[string]any{"path": "."})), "debug.log")
+}
+
+// read with grep is grep: the same output for every grep case, on a file
+// and on a tree, under the grep name and under grep's own "pattern".
+func TestReadGrepIsGrep(t *testing.T) {
+	root := searchTree(t)
+	both := mount(t, Config{Root: root})
+	only := mount(t, Config{Root: root, Tools: []string{Read}})
+	for _, c := range grepCases() {
+		t.Run(c.name, func(t *testing.T) {
+			want := mustOK(t, call(t, both, Grep, c.args))
+			a := map[string]any{}
+			for k, v := range c.args {
+				a[k] = v
+			}
+			a["grep"] = a["pattern"]
+			delete(a, "pattern")
+			if got := mustOK(t, call(t, only, Read, a)); got != want {
+				t.Errorf("read %v:\n%s\ngrep:\n%s", a, got, want)
+			}
+			if got := mustOK(t, call(t, only, Read, c.args)); got != want {
+				t.Errorf("read with pattern %v:\n%s\ngrep:\n%s", c.args, got, want)
+			}
+		})
+	}
+	// On a file: only the matching lines, numbered, with context.
+	out := mustOK(t, call(t, only, Read, map[string]any{"path": "ctx.txt", "grep": "needle 2", "context": 1}))
+	contains(t, out, "1 match in 1 file under ctx.txt\nctx.txt-9-h\nctx.txt:10:needle 2\nctx.txt-11-i")
+	lacks(t, out, "needle 1", "needle 3")
+}
+
+func TestReadLargeFileNote(t *testing.T) {
+	log := lines(3000, func(i int) string { return fmt.Sprintf("step %04d ok %s", i, strings.Repeat("-", 20)) })
+	root := tree(t, map[string]string{"ci.log": log, "small.txt": "a\nb\n"})
+	ts := mount(t, Config{Root: root})
+	note := fmt.Sprintf("ci.log is %s, 3000 lines: search it with grep", sizeOf(int64(len(log))))
+	contains(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log"})), "cut at 8.0KB", note, `grep:"ERROR|FAIL"`)
+	out := mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log", "offset": -120}))
+	contains(t, out, "lines 2881-3000 of 3000", note)
+	if !strings.HasSuffix(out, "or read a range]") {
+		t.Errorf("the note is not the last line:\n%s", out[len(out)-200:])
+	}
+	lacks(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log", "offset": 100, "limit": 5})), note)
+	lacks(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "ci.log", "grep": "step 0042"})), note)
+	lacks(t, mustOK(t, call(t, ts, Read, map[string]any{"path": "small.txt"})), "search it with grep")
+}
+
+func TestReadDef(t *testing.T) {
+	ts := mount(t, Config{Root: t.TempDir(), Tools: []string{Read}})
+	d := ts.Defs()[0]
+	contains(t, d.Function.Description, "list a directory", "with grep search a file or a directory tree", "large file or a log")
+	props := d.Function.Parameters.(map[string]any)["properties"].(map[string]any)
+	for _, p := range []string{"path", "offset", "limit", "grep", "context", "glob", "sizes"} {
+		if props[p] == nil {
+			t.Errorf("read does not advertise %s", p)
+		}
+	}
 }
 
 func TestReadStreamsLargeFiles(t *testing.T) {

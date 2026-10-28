@@ -1,5 +1,8 @@
 // Package files is a configurable file toolset an agent host mounts: read,
 // edit, write, grep and list (delete and move opt-in), rooted at one directory.
+// read also does the work of the other two: on a directory it lists, and with
+// grep it searches a file or a tree, so a host can mount read, edit and write
+// alone.
 //
 // Each enabled tool is an llm.ToolDef plus a branch of one dispatcher. The host
 // adds Defs() to its tool list and wraps its dispatcher with Wrap — the same
@@ -325,6 +328,7 @@ type args struct {
 	Content    *string    `json:"content"`
 	Overwrite  flexBool   `json:"overwrite"`
 	Pattern    string     `json:"pattern"`
+	Grep       string     `json:"grep"`
 	Glob       string     `json:"glob"`
 	Files      flexBool   `json:"files"`
 	Context    flexInt    `json:"context"`

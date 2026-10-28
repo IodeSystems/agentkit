@@ -26,14 +26,21 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 	pathDesc := "Path relative to the working tree."
 	switch bare {
 	case Read:
-		td.Function.Description = fmt.Sprintf("Read a text file. Each line comes back as its number, a TAB, then the text — "+
-			"the number and tab are not part of the file, so leave them out of edit anchors. With no offset/limit "+
-			"you get the first %s; a ranged read returns up to %s. The first line of the result says which lines "+
-			"you got and how many the file has.", sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(t.cfg.ReadMax)))
+		// The list and grep tools' other arguments (max, files, ignore_case,
+		// and pattern for grep) are accepted, unadvertised: every property
+		// here rides every request.
+		td.Function.Description = fmt.Sprintf("Read a file or a range of its lines, list a directory, or with grep search a file or "+
+			"a directory tree. Search a large file or a log with grep before you read it. Lines come back as number, TAB, "+
+			"text; leave the number and tab out of edit anchors. With no offset/limit you get the first %s; a ranged "+
+			"read returns up to %s.", sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(t.cfg.ReadMax)))
 		td.Function.Parameters = obj(map[string]any{
-			"path":   str(pathDesc),
-			"offset": num("First line, from 1 (the numbers grep reports). Negative counts from the end: -50 is the last 50 lines."),
-			"limit":  num("How many lines. Omit for the rest of the file (still capped)."),
+			"path":    str("File or directory, relative to the working tree."),
+			"offset":  num("First line, from 1. Negative counts from the end: -50 is the last 50 lines."),
+			"limit":   num("How many lines. Omit for the rest of the file (still capped)."),
+			"grep":    str("Regular expression (RE2). Returns only the matching lines, as path:line:text."),
+			"context": num("With grep: lines before and after each match (max 10)."),
+			"glob":    str("On a directory: only files matching this glob (*.go at any depth; with a /, the path: internal/**/*_test.go)."),
+			"sizes":   boolean("On a directory: show file sizes."),
 		}, "path")
 	case Edit:
 		td.Function.Description = fmt.Sprintf("Change a file by exact replacement. Each old must occur EXACTLY ONCE in the file "+

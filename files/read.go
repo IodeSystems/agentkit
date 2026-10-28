@@ -38,7 +38,24 @@ const binaryScan = 8000
 // maxEditSize bounds the files edit will load whole.
 const maxEditSize = 16 << 20
 
+// largeFile is the size from which a head or a tail read gets a note: search
+// before reading. A benchmark (dun, 2026-10-27) read the last 120 lines of a
+// 218KB CI log, ~5.8k tokens carried for four more requests, where a grep of
+// the same log returned 265 bytes.
+const largeFile = 64 * 1024
+
+// read reads a file or a range of it; on a directory it is list; with grep it
+// is grep, on a file or a tree. One tool for the three, because a model that
+// has read in hand reaches for it, and a search that needs a second tool is a
+// search it does not make.
 func (t *Toolset) read(ctx context.Context, a args) (string, error) {
+	if a.Grep == "" && a.Pattern != "" {
+		a.Grep = a.Pattern // the grep tool's name for it
+	}
+	if a.Grep != "" {
+		a.Pattern = a.Grep
+		return t.grep(ctx, a)
+	}
 	if strings.TrimSpace(a.Path) == "" {
 		return "", errors.New("read needs a path")
 	}
@@ -53,7 +70,7 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 	case err != nil:
 		return "", err
 	case st.IsDir():
-		return "", fmt.Errorf("%s is a directory, not a file; %s lists it.%s", display, t.Name(List), near(display, abs, ""))
+		return t.list(ctx, a)
 	}
 	offset, limit := int(a.Offset), int(a.Limit)
 	if limit < 0 {
@@ -99,7 +116,7 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 		start = max(1, total+offset+1)
 	case offset > total:
 		return "", fmt.Errorf("offset %d is past the end of %s, which has %d lines. Lines are numbered from 1, "+
-			"the numbers %s reports", offset, display, total, t.Name(Grep))
+			"the numbers a grep reports", offset, display, total)
 	case offset > 0:
 		start = offset
 	}
@@ -137,7 +154,12 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 				sizeOf(int64(capBytes)), display, total, next)
 		}
 	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	out := strings.TrimRight(b.String(), "\n")
+	if st.Size() >= largeFile && (!ranged || offset < 0) {
+		out += fmt.Sprintf("\n[%s is %s, %d lines: search it with grep (e.g. grep:\"ERROR|FAIL\" for a log), or read a range]",
+			display, sizeOf(st.Size()), total)
+	}
+	return out, nil
 }
 
 // countLines counts lines the way numbered numbers them: a final line without
