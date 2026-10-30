@@ -242,6 +242,11 @@ type Shaper struct {
 	// fold proceeds as it would have without one. nil = no re-heading, which is
 	// the behavior before this field existed.
 	Rehead func(ctx context.Context, sessionID string) (changed bool)
+
+	// Index, if set, keeps each fold's subsumed entries searchable, with the
+	// fold's summary as their description (see SessionIndex). A failed Put
+	// does not undo the fold; it is reported in CompactionInfo.IndexErr.
+	Index SessionIndex
 }
 
 func (sh *Shaper) spanName(n string) string {
@@ -453,17 +458,18 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 			markerCreatedAt = e.CreatedAt
 		}
 	}
-	if err := sh.Store.Compact(ctx, sessionID, Compaction{
-		Marker: Entry{
-			ID:        NewID(),
-			Kind:      KindCompaction,
-			Content:   summary,
-			CreatedAt: markerCreatedAt,
-		},
-		Subsumes: subsumed,
-	}); err != nil {
+	marker := Entry{
+		ID:        NewID(),
+		Kind:      KindCompaction,
+		Content:   summary,
+		CreatedAt: markerCreatedAt,
+	}
+	if err := sh.Store.Compact(ctx, sessionID, Compaction{Marker: marker, Subsumes: subsumed}); err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: compact: %w", err)
 	}
+	// After the fold has applied: what was deleted from the transcript is kept
+	// in the index, under the marker that replaced it.
+	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, subsumed)
 
 	// Measure the new active window by re-rendering the post-compaction entries.
 	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
@@ -480,6 +486,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		TokensBefore:  before,
 		TokensAfter:   after,
 		Duration:      time.Since(startedAt),
+		IndexErr:      indexErr,
 	}, true, nil
 }
 
@@ -766,13 +773,7 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		system = DefaultSummarySystem
 	}
 	b.WriteString(prompt(task, budget))
-	for i, e := range entries {
-		label := string(e.Kind)
-		if e.Tag != "" {
-			label = e.Tag
-		}
-		fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, label, e.Content)
-	}
+	b.WriteString(eventLines(entries))
 
 	// Stop the turn's budget clock for the fold: compaction is bookkeeping, not
 	// model work, so it must not burn the turn's time budget. See Pause.

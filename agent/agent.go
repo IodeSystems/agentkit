@@ -166,6 +166,10 @@ type CompactionInfo struct {
 	// wrong. It is also the number that says whether compacting is cheaper than
 	// the context it saves.
 	Duration time.Duration
+
+	// IndexErr is a failed Shaper.Index Put. The fold applied regardless; the
+	// host decides whether a fold its index missed is worth saying.
+	IndexErr error
 }
 
 // CompactionStart is delivered to Session.OnCompactionStart before the fold
