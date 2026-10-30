@@ -657,3 +657,101 @@ func TestPinFirstUser_SurvivesLODAndCompaction(t *testing.T) {
 		}
 	}
 }
+
+// A summary's budget follows the fold: an eighth of what is folded, within
+// [SummaryMinTokens, SummaryMaxTokens], cut to keep the rebuilt prompt within
+// 60% of the target.
+func TestDefaultSummaryTokens(t *testing.T) {
+	for _, c := range []struct{ folded, kept, target, want int }{
+		{2_000, 0, 0, SummaryMinTokens},             // a small fold still gets the floor
+		{40_000, 0, 0, 5_000},                       // an eighth
+		{400_000, 0, 0, SummaryMaxTokens},           // the ceiling
+		{40_000, 10_000, 100_000, 5_000},            // room enough
+		{40_000, 57_000, 100_000, 3_000},            // pressure: 60k - 57k
+		{40_000, 70_000, 100_000, SummaryMinTokens}, // no room: still the floor
+	} {
+		if got := DefaultSummaryTokens(c.folded, c.kept, c.target); got != c.want {
+			t.Errorf("DefaultSummaryTokens(%d, %d, %d) = %d, want %d", c.folded, c.kept, c.target, got, c.want)
+		}
+	}
+}
+
+// The fold call carries the host's options (thinking off), a completion cap
+// from the budget, the budget in its prompt, what to keep, and the task as
+// TaskFunc says it now.
+func TestSummarize_OptionsBudgetAndTaskFunc(t *testing.T) {
+	s := &memStore{}
+	for i, k := range []EntryKind{KindUser, KindToolCall, KindToolResult, KindAssistant, KindUser} {
+		s.entries = append(s.entries, Entry{ID: fmt.Sprintf("e%d", i), Kind: k, ToolCallID: "c1",
+			Content: strings.Repeat("body ", 2_000), CreatedAt: int64(i + 1)})
+	}
+	off := false
+	r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "S"}}}}
+	task := "first"
+	var sized [3]int
+	sh := &Shaper{Store: s, Runner: r, Task: "stale", TaskFunc: func() string { return task },
+		SummaryOpts: &llm.ChatOpts{EnableThinking: &off, TraceID: "t"},
+		SummaryTokens: func(folded, kept, target int) int {
+			sized = [3]int{folded, kept, target}
+			return 1234
+		},
+		Policy: ShaperPolicy{BudgetTokens: 1_000_000, PreserveLastMessages: 1}}
+	task = "now"
+	if _, ok, err := sh.Compact(context.Background(), "s"); err != nil || !ok {
+		t.Fatalf("Compact: ok=%v err=%v", ok, err)
+	}
+	if sized[0] == 0 || sized[2] != 0 {
+		t.Errorf("SummaryTokens got folded=%d kept=%d target=%d", sized[0], sized[1], sized[2])
+	}
+	o := r.opts[0]
+	if o == nil || o.EnableThinking == nil || *o.EnableThinking || o.TraceID != "t" {
+		t.Fatalf("the host's options did not reach the fold: %+v", o)
+	}
+	if o.MaxTokens != SummaryCap(1234) {
+		t.Errorf("MaxTokens %d, want %d", o.MaxTokens, SummaryCap(1234))
+	}
+	if sh.SummaryOpts.MaxTokens != 0 {
+		t.Error("the host's options were changed in place")
+	}
+	var p strings.Builder
+	for _, m := range r.seen[0] {
+		p.WriteString(m.Content)
+	}
+	for _, want := range []string{"about 1234 tokens", "work in flight", "ruled out", "<task>\nnow\n</task>"} {
+		if !strings.Contains(p.String(), want) {
+			t.Errorf("the fold prompt lacks %q", want)
+		}
+	}
+}
+
+// The host writes the fold's instructions and system message; the events
+// still follow, numbered.
+func TestSummarize_HostPrompt(t *testing.T) {
+	s := &memStore{}
+	for i, k := range []EntryKind{KindUser, KindAssistant, KindUser} {
+		s.entries = append(s.entries, Entry{ID: fmt.Sprintf("e%d", i), Kind: k, Content: "event " + fmt.Sprint(i), CreatedAt: int64(i + 1)})
+	}
+	r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "S"}}}}
+	var gotTask string
+	var gotBudget int
+	sh := &Shaper{Store: s, Runner: r, Task: "the task",
+		SummaryPrompt: func(task string, budget int) string {
+			gotTask, gotBudget = task, budget
+			return "HOST RULES\n"
+		},
+		SummarySystem: "host system",
+		Policy:        ShaperPolicy{BudgetTokens: 1_000_000, PreserveLastMessages: 1}}
+	if _, ok, err := sh.Compact(context.Background(), "s"); err != nil || !ok {
+		t.Fatalf("Compact: ok=%v err=%v", ok, err)
+	}
+	if gotTask != "the task" || gotBudget != SummaryMinTokens {
+		t.Errorf("SummaryPrompt got task %q budget %d", gotTask, gotBudget)
+	}
+	msgs := r.seen[0]
+	if msgs[0].Content != "host system" {
+		t.Errorf("system %q", msgs[0].Content)
+	}
+	if u := msgs[1].Content; !strings.HasPrefix(u, "HOST RULES\n1. [") || strings.Contains(u, "Summarize the following") {
+		t.Errorf("user message %q", u)
+	}
+}

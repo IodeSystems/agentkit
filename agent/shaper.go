@@ -187,6 +187,32 @@ type Shaper struct {
 	// and budget as-is).
 	Pause func() (resume func())
 
+	// SummaryOpts are the fold call's request options; nil sends none, and the
+	// server's defaults decide. A host sets thinking off here: a summarizer that
+	// thinks spends its budget before it writes, and on a server whose default
+	// thinks, a fold cost thousands of reasoning tokens to write a few hundred.
+	// The fold sends a copy with MaxTokens set from the summary budget.
+	SummaryOpts *llm.ChatOpts
+
+	// SummaryTokens sizes a fold's summary from the tokens being folded, the
+	// tokens the prompt keeps beside the summary, and the build's target (0
+	// for a fold that was asked for, not forced). nil = DefaultSummaryTokens.
+	SummaryTokens func(folded, kept, target int) int
+
+	// SummaryPrompt writes a fold's instructions from the task ("" when there
+	// is none) and the budget in tokens; the numbered events follow it. nil =
+	// DefaultSummaryPrompt. A host wraps the default to add to it, or writes
+	// its own: what a summary must keep depends on what the host runs.
+	SummaryPrompt func(task string, budget int) string
+	// SummarySystem is the fold call's system message; "" =
+	// DefaultSummarySystem.
+	SummarySystem string
+
+	// TaskFunc, when set, is the task at each fold and wins over Task: a
+	// host's task changes during a session (a goal set, a plan revised, work
+	// started), and a string set once goes stale.
+	TaskFunc func() string
+
 	// Task is what the session is FOR, shown to the summarizer on every fold.
 	//
 	// A fold sends only the oldest entries, and the summarizer was told nothing
@@ -387,6 +413,19 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	}
 
 	before := sh.tokens(sh.render(entries, pristineCount, "", false))
+	// The summary's size follows the fold: what is folded, and what stays
+	// beside it. A fixed 500 tokens was a twentieth of a 10k fold and a
+	// two-hundred-and-fortieth of a 120k one.
+	folded := sh.tokens(sh.render(subsumed, 0, "", false))
+	whole := tokensBefore
+	if whole == 0 {
+		whole = before
+	}
+	sizeFor := sh.SummaryTokens
+	if sizeFor == nil {
+		sizeFor = DefaultSummaryTokens
+	}
+	budget := sizeFor(folded, max(whole-folded, 0), target)
 
 	// Announced only now: everything above can still decide there is nothing to
 	// fold, and a start with no matching completion is worse than no start.
@@ -399,7 +438,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		At:           startedAt,
 	})
 
-	summary, err := sh.summarize(ctx, foldable, task)
+	summary, err := sh.summarize(ctx, foldable, task, budget)
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -455,12 +494,17 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
 	// No measured trigger: this fold was asked for, not forced by a budget, so
 	// there is no "tokens before" that caused it and no target it is aiming at.
-	return sh.compactOldest(ctx, sessionID, 0, 0, sh.Task)
+	return sh.compactOldest(ctx, sessionID, 0, 0, sh.taskOr(""))
 }
 
 // taskOr is the task a fold is judged against: the host's, else the system
 // prompt the turn was built with.
 func (sh *Shaper) taskOr(system string) string {
+	if sh.TaskFunc != nil {
+		if t := sh.TaskFunc(); t != "" {
+			return t
+		}
+	}
 	if sh.Task != "" {
 		return sh.Task
 	}
@@ -660,14 +704,68 @@ func summarizeErr(ctx context.Context, err error) error {
 // The task goes first, so the summarizer keeps what serves it rather than what
 // was largest. The session after the fold still has its system prompt; what it
 // loses is the history, so the summary must carry what the task needs from it.
-func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string) (string, error) {
+// Summary sizes (DefaultSummaryTokens): a summary is about an eighth of what
+// it folds, at least SummaryMinTokens and at most SummaryMaxTokens.
+const (
+	SummaryMinTokens = 500
+	SummaryMaxTokens = 8192
+	summaryShare     = 8
+	// summaryRoomPct is the share of the target the rebuilt prompt may fill:
+	// a summary that leaves the prompt near the target is folded again on the
+	// next round.
+	summaryRoomPct = 60
+)
+
+// DefaultSummaryTokens is a summary's budget: folded/8 within [SummaryMin,
+// SummaryMax], cut to what keeps the rebuilt prompt within 60% of target
+// (when there is one), but never under SummaryMinTokens.
+func DefaultSummaryTokens(folded, kept, target int) int {
+	n := min(max(folded/summaryShare, SummaryMinTokens), SummaryMaxTokens)
+	if target > 0 {
+		n = min(n, target*summaryRoomPct/100-kept)
+	}
+	return max(n, SummaryMinTokens)
+}
+
+// SummaryCap is the completion cap for a budget: the budget with room
+// to finish its last sentence. The budget is asked for in the prompt; the
+// cap stops a model that ignores it.
+func SummaryCap(budget int) int { return budget + budget/2 + 256 }
+
+// DefaultSummarySystem is the fold call's system message when the host sets
+// no SummarySystem.
+const DefaultSummarySystem = "You are a compaction worker. Summarize event logs concisely."
+
+// DefaultSummaryPrompt is the fold's instructions when the host sets no
+// SummaryPrompt: the task (when there is one), the budget, and what to keep.
+// The numbered events follow it.
+func DefaultSummaryPrompt(task string, budget int) string {
 	var b strings.Builder
 	if task = strings.TrimSpace(task); task != "" {
 		b.WriteString("The session these events belong to has this task:\n<task>\n")
 		b.WriteString(task)
 		b.WriteString("\n</task>\n\nKeep what serves that task: files and identifiers it touched, what was changed or committed, results that decide it, and what remains. Drop output that does not bear on it.\n\n")
 	}
-	b.WriteString("Summarize the following events in <= 500 tokens. Preserve user requests, agent identifiers, decisions, and any open questions. Output the summary only — no preamble.\n\n")
+	fmt.Fprintf(&b, "Summarize the following events in about %d tokens, no more. The work continues from this summary, so keep, most important first:\n"+
+		"- the user's requests and corrections, in their own words when short;\n"+
+		"- work in flight: what was started and not finished, agents and jobs still running and what each was asked, changes not yet committed;\n"+
+		"- discoveries: facts learned, causes found, approaches tried and ruled out, and why;\n"+
+		"- decisions and their reasons; files, identifiers, agent ids and commits touched;\n"+
+		"- open questions.\n"+
+		"Drop output that bears on none of these. Output the summary only — no preamble.\n\n", budget)
+	return b.String()
+}
+
+func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget int) (string, error) {
+	var b strings.Builder
+	prompt, system := sh.SummaryPrompt, sh.SummarySystem
+	if prompt == nil {
+		prompt = DefaultSummaryPrompt
+	}
+	if system == "" {
+		system = DefaultSummarySystem
+	}
+	b.WriteString(prompt(task, budget))
 	for i, e := range entries {
 		label := string(e.Kind)
 		if e.Tag != "" {
@@ -683,10 +781,15 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string) (
 		resume = sh.Pause()
 	}
 	defer resume()
+	var opts llm.ChatOpts
+	if sh.SummaryOpts != nil {
+		opts = *sh.SummaryOpts
+	}
+	opts.MaxTokens = SummaryCap(budget)
 	ch, err := sh.Runner.ChatStream(ctx, []llm.Message{
-		{Role: "system", Content: "You are a compaction worker. Summarize event logs concisely."},
+		{Role: "system", Content: system},
 		{Role: "user", Content: b.String()},
-	}, nil, nil)
+	}, nil, &opts)
 	if err != nil {
 		return "", summarizeErr(ctx, err)
 	}

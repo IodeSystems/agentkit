@@ -67,13 +67,15 @@ func (m *memStore) queue(e Entry) {
 type scriptRunner struct {
 	turns [][]llm.StreamChunk
 	seen  [][]llm.Message
+	opts  []*llm.ChatOpts
 	i     int
 }
 
-func (r *scriptRunner) ChatStream(_ context.Context, msgs []llm.Message, _ []llm.ToolDef, _ *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
+func (r *scriptRunner) ChatStream(_ context.Context, msgs []llm.Message, _ []llm.ToolDef, opts *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
 	cp := make([]llm.Message, len(msgs))
 	copy(cp, msgs)
 	r.seen = append(r.seen, cp)
+	r.opts = append(r.opts, opts)
 	var chunks []llm.StreamChunk
 	if r.i < len(r.turns) {
 		chunks = r.turns[r.i]
