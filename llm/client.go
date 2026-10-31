@@ -467,6 +467,12 @@ type Client struct {
 	// RepetitionGuard for why this is not opt-in.
 	Repetition RepetitionGuard
 
+	// Watch, when set, REPLACES the Repetition guard for a stream: it is called
+	// once per stream with the messages that were sent, and what it returns
+	// sees every delta. loopdetector.Install is the usual way to set it. Repetition.Off
+	// has no effect on it.
+	Watch func(history []Message) StreamWatcher
+
 	// OnRetry, when set, is called once per retry decision (and once when the
 	// loop recovers or gives up), so a caller can SHOW the wait instead of
 	// sitting mute through it. See RetryEvent.
@@ -1441,7 +1447,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	}
 
 	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, resp.Body, ch, callStart, c.metaFrom(resp.Header))
+	go c.readStream(ctx, resp.Body, ch, messages, callStart, c.metaFrom(resp.Header))
 	return ch, nil
 }
 
@@ -1544,7 +1550,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // `stream_options.include_usage=true`); forward as soon as seen.
 // readStream parses the SSE body. callStart is when the request was issued, so
 // usage chunks can carry the round-trip latency no provider reports.
-func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, callStart time.Time, meta responseMeta) {
+func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta) {
 	defer body.Close()
 	defer close(ch)
 
@@ -1586,11 +1592,14 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	var sawDone, sawFinish bool
 	var events, contentChars int
 
-	// Degenerate-loop watchers, one per logical byte stream: content, plus each
-	// tool call's arguments (keyed by the protocol's index). Created lazily so a
-	// stream that never uses a channel never allocates its window.
-	var contentRep *repWatcher
-	toolRep := map[int]*repWatcher{}
+	// The degenerate-loop watcher for this stream. Nil only when the guard is
+	// off and the host installed none.
+	var watch StreamWatcher
+	if c.Watch != nil {
+		watch = c.Watch(history)
+	} else if !c.Repetition.Off {
+		watch = NewStreamWatcher(c.Repetition)
+	}
 	// cutLoop reports the loop and ends the stream. Returning closes the body
 	// (deferred above), which disconnects — and the disconnect is what makes the
 	// server abandon the generation instead of running it to the context limit.
@@ -1691,6 +1700,8 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *Usage `json:"usage"`
+			// Loop is set by a proxy that cut the stream for looping.
+			Loop *RepetitionInfo `json:"loop"`
 			// Timings is a SIBLING of usage in llama.cpp's final event, not a
 			// member of it; folded into Usage where Usage is stamped below.
 			Timings *Timings `json:"timings"`
@@ -1723,17 +1734,23 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// from it: it is not part of the reply and must not be replayed as one.
 		if r := choice.Delta.ReasoningContent + choice.Delta.Reasoning; r != "" {
 			ch <- StreamChunk{Reasoning: r}
+			if watch != nil {
+				if info := watch.Watch(ChannelReasoning, r); info != nil {
+					// The copies are in the reasoning, not the reply: there is
+					// nothing of them for the caller to trim.
+					info.Trailing = 0
+					cutLoop(info)
+					return
+				}
+			}
 		}
 
 		// Forward content immediately for token-level streaming.
 		if choice.Delta.Content != "" {
 			contentChars += len(choice.Delta.Content)
 			ch <- StreamChunk{Content: choice.Delta.Content}
-			if !c.Repetition.Off {
-				if contentRep == nil {
-					contentRep = newRepWatcher(c.Repetition, "content")
-				}
-				if info := contentRep.feed(choice.Delta.Content); info != nil {
+			if watch != nil {
+				if info := watch.Watch(ChannelContent, choice.Delta.Content); info != nil {
 					cutLoop(info)
 					return
 				}
@@ -1762,15 +1779,10 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// the raw characters the model produced.
 			if frag := normalizeArgs(td.Function.Arguments); frag != "" {
 				tc.Function.Arguments += frag
-				if c.Repetition.Off {
+				if watch == nil {
 					continue
 				}
-				w := toolRep[td.Index]
-				if w == nil {
-					w = newRepWatcher(c.Repetition, "tool arguments")
-					toolRep[td.Index] = w
-				}
-				if info := w.feed(frag); info != nil {
+				if info := watch.Watch(ToolChannel(td.Index), frag); info != nil {
 					// The name is known by now even though it arrived on an
 					// earlier delta than the fragment that tripped this.
 					if tc.Function.Name != "" {
@@ -1791,6 +1803,22 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// for "stop" with no tool calls accumulated, just done.
 		if choice.FinishReason != "" {
 			sawFinish = true
+			// A proxy cut this stream for looping. The caller answers it like a
+			// cut of our own, and open tool calls are dropped for the same reason
+			// as there. A bare content_filter is some provider's own refusal.
+			if choice.FinishReason == "content_filter" && event.Loop != nil {
+				ch <- StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: event.Loop}
+				return
+			}
+			if tw, ok := watch.(ToolCallWatcher); ok {
+				for _, idx := range toolOrder {
+					tc := toolBuf[idx]
+					if info := tw.WatchToolCall(tc.Function.Name, tc.Function.Arguments); info != nil {
+						cutLoop(info)
+						return
+					}
+				}
+			}
 			truncated := flushTools(choice.FinishReason)
 			done := StreamChunk{Done: true}
 			// "length" is the provider saying it ran out of room. Reported on

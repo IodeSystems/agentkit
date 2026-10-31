@@ -19,10 +19,12 @@ import (
 // abandons the generation — so the detector does not just fail faster, it stops
 // paying for tokens nobody will read.
 //
-// It watches BOTH channels. The measured case arrived inside a tool call's
+// It watches ALL THREE channels: content, tool arguments and reasoning. The
+// measured case arrived inside a tool call's
 // `arguments` (the fragment carried literal `\n` escapes, i.e. it was already
 // JSON-encoded), streamed as tool_calls deltas — a detector on content deltas
-// alone would have watched that 30 minutes go by.
+// alone would have watched that 30 minutes go by. Reasoning is the same bytes on
+// another channel, and a model looping there has told the caller nothing yet.
 
 // StopReason names why a stream ended other than the model finishing. Empty on
 // a normal completion, so a consumer that ignores it behaves as before.
@@ -53,26 +55,46 @@ const StopReasonLength StopReason = "length"
 // RepetitionInfo describes the loop that was cut: enough to log it, to tell the
 // model what it did, and to trim the redundant copies before they are persisted
 // into the next context (which would otherwise TEACH the loop).
+//
+// Its JSON is the `loop` object a proxy that cut the stream sends with
+// finish_reason "content_filter". See the stream reader.
 type RepetitionInfo struct {
-	// Where the loop was detected: "content", or "tool:<name>" for a call's
-	// arguments.
-	Where string
-	// Period is the length in bytes of the repeating block; Reps is how many
-	// consecutive copies of it were seen.
-	Period int
-	Reps   int
+	// Where the loop was detected: "content", "reasoning", or "tool:<name>" for
+	// a call's arguments.
+	Where string `json:"where"`
+	// Kind names the detector when it was not RepetitionGuard, which leaves it
+	// empty. See package loopdetector.
+	Kind string `json:"kind,omitempty"`
+	// Period is the length in bytes of the repeating block, 0 when the loop has
+	// no one block (Kind is set); Reps is how many copies of it were seen.
+	Period int `json:"period,omitempty"`
+	Reps   int `json:"loops"`
 	// Trailing is the byte count of redundant copies — (Reps-1)*Period — i.e.
 	// how much can be trimmed from the end of the accumulated text while leaving
 	// one intact copy of the block.
-	Trailing int
+	Trailing int `json:"trailing,omitempty"`
 	// Sample is one copy of the repeating block, capped for logging.
-	Sample string
+	Sample string `json:"sample,omitempty"`
+	// First and Last are the earliest repeat in view and the one that tripped
+	// this, capped: sentences, or for KindTool the call's name and arguments.
+	// They show where the loop was entered and where it has got to, which one
+	// sample cannot. Empty from RepetitionGuard.
+	First string `json:"first,omitempty"`
+	Last  string `json:"last,omitempty"`
 }
+
+// KindTool is RepetitionInfo.Kind for the same tool call returning the same
+// result, where nothing in the text repeated and there is nothing to reword.
+const KindTool = "tool"
 
 // String renders the finding for a log line or a message to the model.
 func (r *RepetitionInfo) String() string {
 	if r == nil {
 		return ""
+	}
+	if r.Period == 0 {
+		return "went round a " + r.Kind + " loop " + strconv.Itoa(r.Reps) + " times in " +
+			r.Where + ": " + strconv.Quote(r.Sample)
 	}
 	return "repeated a " + strconv.Itoa(r.Period) + "-character block " +
 		strconv.Itoa(r.Reps) + " times in " + r.Where + ": " + strconv.Quote(r.Sample)
@@ -140,6 +162,53 @@ func (g RepetitionGuard) window() int {
 	return n
 }
 
+// StreamWatcher sees a stream's output as it arrives, one delta at a time, on
+// the channel it came from: ChannelContent, ChannelReasoning or ToolChannel. A
+// non-nil return cuts the stream. One watcher serves one stream.
+type StreamWatcher interface {
+	Watch(channel, delta string) *RepetitionInfo
+}
+
+// ToolCallWatcher is a StreamWatcher that also wants each tool call whole, when
+// the model has finished it. A non-nil return cuts the stream and the calls are
+// not delivered.
+type ToolCallWatcher interface {
+	WatchToolCall(name, args string) *RepetitionInfo
+}
+
+// The channels a StreamWatcher is fed.
+const (
+	ChannelContent   = "content"
+	ChannelReasoning = "reasoning"
+)
+
+// ToolChannel names the channel of the arguments of the tool call at index.
+func ToolChannel(index int) string { return "tool:" + strconv.Itoa(index) }
+
+// NewStreamWatcher returns the guard's watcher, with one window per channel so
+// that no channel can break up a repeat in another.
+func NewStreamWatcher(g RepetitionGuard) StreamWatcher {
+	return &guardWatcher{cfg: g, channels: map[string]*repWatcher{}}
+}
+
+type guardWatcher struct {
+	cfg      RepetitionGuard
+	channels map[string]*repWatcher
+}
+
+func (g *guardWatcher) Watch(channel, delta string) *RepetitionInfo {
+	w := g.channels[channel]
+	if w == nil {
+		where := channel
+		if channel != ChannelContent && channel != ChannelReasoning {
+			where = "tool arguments"
+		}
+		w = newRepWatcher(g.cfg, where)
+		g.channels[channel] = w
+	}
+	return w.feed(delta)
+}
+
 // repWatcher accumulates one logical byte stream (the content channel, or one
 // tool call's arguments) and reports the first degenerate repetition in it.
 type repWatcher struct {
@@ -154,7 +223,7 @@ func newRepWatcher(cfg RepetitionGuard, where string) *repWatcher {
 }
 
 // feed appends a delta and scans when enough new bytes have arrived. It returns
-// non-nil exactly once the stream has collapsed into a loop; the caller cuts.
+// non-nil at each scan that finds the stream collapsed into a loop.
 func (w *repWatcher) feed(s string) *RepetitionInfo {
 	if w == nil || s == "" || w.cfg.Off {
 		return nil

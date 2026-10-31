@@ -268,3 +268,87 @@ func TestSamplingCarriesRepetitionControls(t *testing.T) {
 		}
 	}
 }
+
+// Thinking is a channel like the others, and a generation looping there has
+// shown the caller nothing yet. Trailing stays 0: the copies are not in the reply.
+func TestRepetitionCutsALoopInReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for range 200 {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":%q}}]}\n\n", loopingBlock)
+		}
+	}))
+	defer srv.Close()
+
+	ch, err := NewClient(srv.URL, "", "m").ChatStream(context.Background(), []Message{{Role: "user", Content: "go"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last StreamChunk
+	for c := range ch {
+		if c.Done {
+			last = c
+		}
+	}
+	if last.StopReason != StopReasonRepetition || last.Repetition == nil {
+		t.Fatalf("final chunk = %+v", last)
+	}
+	if r := last.Repetition; r.Where != ChannelReasoning || r.Trailing != 0 {
+		t.Errorf("finding = %+v", r)
+	}
+}
+
+func finalChunks(t *testing.T, sse string) (last StreamChunk, calls int) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, sse)
+	}))
+	defer srv.Close()
+	ch, err := NewClient(srv.URL, "", "m").ChatStream(context.Background(), []Message{{Role: "user", Content: "go"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for c := range ch {
+		if c.ToolCall != nil {
+			calls++
+		}
+		if c.Done {
+			last = c
+		}
+	}
+	return last, calls
+}
+
+// A proxy that cut the stream reports it in the finish event. The caller must
+// see what it sees for a cut of its own, and the open tool call must not arrive
+// as broken JSON.
+func TestAProxyCutIsAnsweredLikeOurOwn(t *testing.T) {
+	last, calls := finalChunks(t, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"write","arguments":"{\"pa"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"content_filter"}],"loop":{"where":"content","kind":"cycle","loops":3,"trailing":40,"sample":"again"}}
+
+data: [DONE]
+
+`)
+	if last.StopReason != StopReasonRepetition || last.Repetition == nil {
+		t.Fatalf("final chunk = %+v", last)
+	}
+	if r := last.Repetition; r.Kind != "cycle" || r.Reps != 3 || r.Trailing != 40 {
+		t.Errorf("finding = %+v", r)
+	}
+	if calls != 0 {
+		t.Errorf("%d tool calls delivered from a cut stream", calls)
+	}
+}
+
+func TestAProviderContentFilterIsNotALoop(t *testing.T) {
+	last, _ := finalChunks(t, `data: {"choices":[{"delta":{"content":"x"},"finish_reason":"content_filter"}]}
+
+data: [DONE]
+
+`)
+	if last.StopReason != "" || last.Repetition != nil {
+		t.Fatalf("final chunk = %+v", last)
+	}
+}
