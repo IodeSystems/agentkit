@@ -137,7 +137,10 @@ message on, so a user asking again is not a loop, and a loop that goes on only
 across user messages is not seen. History is counted but cannot cut: only a reply
 that continues the loop is interrupted. `ToolTolerance` counts tools while text is
 cut. A finding carries `First` and `Last`, the earliest repeat in view and the one
-that tripped it, capped at `SampleBytes`. Random data inside every copy
+that tripped it, capped at `SampleBytes`. `Finding()` returns it whether or not the
+stream was cut. A proxy that found a loop and let the stream pass sends it on the
+final event, where it arrives as `StreamChunk.Repetition` with no `StopReason`:
+nothing was cut, and what it means is the caller's to judge. Random data inside every copy
 of a line, and real churn that is new text each time, are not found.
 
 ## 3. Schema validation + fix loop — `schema`

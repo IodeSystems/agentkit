@@ -292,6 +292,9 @@ func TestNegativeToleranceCountsAndNeverInterrupts(t *testing.T) {
 	if loops < 20 || kind != KindCycle {
 		t.Errorf("Loops() = %d, %q, want about 21 cycle", loops, kind)
 	}
+	if f := s.Finding(); f == nil || f.Reps != loops || f.First == "" {
+		t.Errorf("Finding() = %+v", f)
+	}
 	c := d.Counters()
 	if c.Detected[KindCycle] != 1 || c.Interrupted[KindCycle] != 0 {
 		t.Errorf("counters: %+v", c)

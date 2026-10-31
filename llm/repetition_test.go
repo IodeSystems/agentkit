@@ -309,12 +309,14 @@ func finalChunks(t *testing.T, sse string) (last StreamChunk, calls int) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	done := false
 	for c := range ch {
 		if c.ToolCall != nil {
 			calls++
 		}
-		if c.Done {
-			last = c
+		// The first Done is what a caller acts on: [DONE] adds a bare one.
+		if c.Done && !done {
+			last, done = c, true
 		}
 	}
 	return last, calls
@@ -350,5 +352,21 @@ data: [DONE]
 `)
 	if last.StopReason != "" || last.Repetition != nil {
 		t.Fatalf("final chunk = %+v", last)
+	}
+}
+
+// A proxy reports a loop it let pass. Nothing was cut, so nothing changes for a
+// caller that does not look.
+func TestALoopThatPassedIsReportedAndCutsNothing(t *testing.T) {
+	last, _ := finalChunks(t, `data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}],"loop":{"where":"content","kind":"cycle","loops":2}}
+
+data: [DONE]
+
+`)
+	if last.StopReason != "" {
+		t.Errorf("StopReason = %q", last.StopReason)
+	}
+	if last.Repetition == nil || last.Repetition.Reps != 2 {
+		t.Errorf("Repetition = %+v", last.Repetition)
 	}
 }

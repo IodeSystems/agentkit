@@ -231,7 +231,8 @@ type StreamChunk struct {
 	TruncatedToolCalls []string
 
 	// Repetition describes the degenerate loop that was cut, when StopReason is
-	// StopReasonRepetition. It carries what to log, what to tell the model, and
+	// StopReasonRepetition. With no StopReason, a proxy found a loop and let the
+	// stream pass: nothing was cut and the finding is for the caller to weigh. It carries what to log, what to tell the model, and
 	// how many trailing bytes are redundant copies. Nil otherwise.
 	Repetition *RepetitionInfo
 }
@@ -1833,6 +1834,9 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				stampUsage(event.Usage, event.Timings, data)
 				done.Usage = event.Usage
 			}
+			// A proxy saw a loop and let the stream pass. Information only: with
+			// no StopReason nothing was cut, and what it means is the caller's.
+			done.Repetition = event.Loop
 			ch <- done
 		} else if event.Usage != nil {
 			// Same stamp as the other two emission points: a usage chunk that

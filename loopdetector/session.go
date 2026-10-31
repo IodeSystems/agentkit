@@ -19,6 +19,7 @@ type Session struct {
 	recent  []mark // tool calls
 	loops   int
 	kind    string
+	found   *llm.RepetitionInfo
 	seen    [4]bool
 	stopped bool
 }
@@ -108,6 +109,10 @@ func (s *Session) track(channel string) *track {
 // Loops reports the highest loop count seen so far and the kind of loop it was
 // in, 0 and "" when the session is not looping.
 func (s *Session) Loops() (int, string) { return s.loops, s.kind }
+
+// Finding returns the highest finding so far, cut or not, nil when the session is
+// not looping. It is for a caller who wants to pass it on.
+func (s *Session) Finding() *llm.RepetitionInfo { return s.found }
 
 // Watch feeds one delta of the reply: llm.StreamWatcher. A non-nil return means
 // the loop count reached Tolerance and the stream should be cut. It says so
@@ -327,7 +332,7 @@ func (s *Session) note(info *llm.RepetitionInfo) {
 		s.d.detected[i].Add(1)
 	}
 	if info.Reps > s.loops {
-		s.loops, s.kind = info.Reps, info.Kind
+		s.loops, s.kind, s.found = info.Reps, info.Kind, info
 	}
 }
 
