@@ -70,8 +70,8 @@ Two different failures, two guards.
 re-emitting an 85-character fragment, to the server's context limit. `Stop`
 can't catch it (the text isn't known in advance) and a grammar can't (the
 output is well-formed) — only something watching the bytes arrive can, so
-`llm.Client` does. It watches content **and** tool-call arguments (the measured
-loop was inside `arguments`), and on a trip it closes the stream, which
+`llm.Client` does. It watches content, reasoning **and** tool-call arguments (the
+measured loop was inside `arguments`), and on a trip it closes the stream, which
 disconnects and makes the server abandon the generation.
 
 The caller sees a final chunk carrying the reason; `Session.Turn` handles it for
@@ -103,6 +103,42 @@ that is correctly waiting. A poll whose result advances never trips this.
 ```go
 session.MaxRepeatedExchanges = -1 // off
 ```
+
+**A loop with no period: `loopdetector`.** Opt-in. The guards above need identical
+bytes back to back or identical rounds. A model can also go round many variations,
+in any order, with other output between the copies: one production reply was 291
+sentences of which 40 were distinct, each said about 21 times, and no exact guard
+saw it. `loopdetector.LoopDetector` finds those.
+
+Its input is the session plus the stream: `Begin(history)` takes the request's
+messages, `Watch(channel, delta)` the reply as it arrives, thinking included. There
+is no cache; nothing outlives the reply. Its output is a count, and `Tolerance` says
+at what count the stream is cut:
+
+```go
+d := loopdetector.New(loopdetector.Config{
+	Tolerance: 3, // cut at 3 loops. Negative: count, never cut
+})
+d.Install(client) // replaces client.Repetition for this client's streams
+
+// Or feed it yourself, which is what a proxy does:
+s := d.Begin(messages)
+if info := s.Watch(llm.ChannelReasoning, delta); info != nil { /* cut */ }
+loops, kind := s.Loops()
+d.Counters() // totals, for metrics
+```
+
+It finds four kinds: `exact` (the guard), `cycle` (the same sentences recurring),
+`phrase` (the same, a little reworded, matched by BM25) and `tool` (the same call
+with the same result; no tool is exempt, so polling for an unchanged result counts,
+and a host should wait on an event instead). A window of recent sentences has to be mostly repeats, so a
+sentence the model says often is not a loop. History is read from the last user
+message on, so a user asking again is not a loop, and a loop that goes on only
+across user messages is not seen. History is counted but cannot cut: only a reply
+that continues the loop is interrupted. `ToolTolerance` counts tools while text is
+cut. A finding carries `First` and `Last`, the earliest repeat in view and the one
+that tripped it, capped at `SampleBytes`. Random data inside every copy
+of a line, and real churn that is new text each time, are not found.
 
 ## 3. Schema validation + fix loop — `schema`
 

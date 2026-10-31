@@ -21,6 +21,8 @@ agent/    the tablestakes engine: Session.Turn loop + Shaper + primitives. impor
 files/    mountable file toolset (read/edit/write/grep/list, opt-in delete/move) for a
           host's tool list: Defs() + Wrap(dispatcher). imports llm + stdlib only;
           shells out to rg/git when on PATH, works without either.
+loopdetector/  opt-in loop detection from session + stream: a count and a tolerance.
+          imports llm + stdlib only. Hosts install it; agent does not import it.
 examples/agentkit-demo/  runnable CLI, one subcommand per feature.
 plan/     living plan. Only plan.md exists today; it carries its own Icebox
           section rather than the separate done.md / icebox.md the global
