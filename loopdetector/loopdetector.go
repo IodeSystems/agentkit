@@ -68,11 +68,12 @@ type Config struct {
 	Exact llm.RepetitionGuard
 
 	// Window is how many recent sentences the cycle and phrase detectors look at
-	// (default 24), and MinShare the share of them that must be repeats (default
-	// 0.6). What is not a repeat is the room left for other output between the
-	// copies. Measured on 1,315 sessions of production traffic: 0.75 finds 3
-	// sessions, 0.5 finds 6, and 0.5 is also where a document that alternates a
-	// boilerplate line with a distinct one reaches the bar.
+	// (default 48), and MinShare the share of them that must be repeats (default
+	// 0.7). What is not a repeat is the room left for other output between the
+	// copies. A list worked through in thinking is a false hit, and such lists
+	// are shorter than 48 sentences: over 13,454 blocks of real thinking, 24 and
+	// 0.6 gave 14 cuts at Tolerance 3, these gave none, and a real reply of 40
+	// sentences said about 21 times was still found.
 	Window   int
 	MinShare float64
 	// MinSpan is the bytes the Window must cover (default 1024), so that a run
@@ -84,10 +85,10 @@ type Config struct {
 	// MaxSegment splits text with no sentence end in it (default 512 bytes).
 	MaxSegment int
 	// Similarity is the BM25 score, as a share of a sentence's score against
-	// itself, at which two sentences are the same (default 0.8). Words are
-	// stemmed first. Below 0.8 a list whose lines differ only in a number is
-	// taken for one line said thirty times. Negative turns the phrase detector
-	// off.
+	// itself, at which two sentences are the same (default 0.85). Words are
+	// stemmed first. Most false hits came from here: lower, a list whose lines
+	// differ in a few words is taken for one line said many times. Negative
+	// turns the phrase detector off.
 	Similarity float64
 
 	// SampleBytes caps the First, Last and Sample of a finding (default 200).
@@ -105,10 +106,10 @@ func (c Config) resolve() Config {
 		c.Tolerance = 3
 	}
 	if c.Window <= 0 {
-		c.Window = 24
+		c.Window = 48
 	}
 	if c.MinShare <= 0 {
-		c.MinShare = 0.6
+		c.MinShare = 0.7
 	}
 	if c.MinSpan <= 0 {
 		c.MinSpan = 1024
@@ -120,7 +121,7 @@ func (c Config) resolve() Config {
 		c.MaxSegment = 512
 	}
 	if c.Similarity == 0 {
-		c.Similarity = 0.8
+		c.Similarity = 0.85
 	}
 	if c.SampleBytes <= 0 {
 		c.SampleBytes = 200

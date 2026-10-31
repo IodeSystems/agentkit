@@ -56,10 +56,11 @@ Reviewed by aw4 and dun 10-31. Measured on 1,315 sessions of corrallm traffic: f
 including a real 40-sentence reply cycle the exact guard missed; 1 of 2,172 replies.
 
 - **next:** dun installs it count-only; the numbers decide when text cutting turns on.
-- **risks:** text Tolerance is not settled. Measured in thinking: aw4 (13,454 blocks, 48 h, its
-  own replay) cuts 14 at 3, 5 at 4, 1 at 5-8 (a plan aw4 expects to pass), 0 at 9. dun (298
-  sessions) has one real text loop at 6. No single number separates those; tools do: dun's
-  tool cuts at 3 were all stuck loops where read. aw4's tool sequences were not replayed.
+- **risks:** defaults (Window 48, MinShare 0.7, Similarity 0.85) tuned on real traces: 0 cuts at
+  Tolerance 3 in aw4's 13,454 thinking blocks, measured there (48 h); the real 40-sentence cycle
+  is still found, at 19; dun's tool loops still trip. Lost: dun's idle sub-agent, too few
+  sentences for the window. No real runaway in thinking has been seen yet, so that side is
+  unproven. aw4's tool sequences were not replayed.
 - **decisions (owner 10-31):** no polling exemption: an unchanged result counts, clients
   wait on an event. dun keeps `loopguard.go` beside this; aw4 keeps `MaxRepeatedExchanges`.
 - **assumptions:** `agent` must not import it (invariant 2), so a host installs it.
