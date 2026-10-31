@@ -132,9 +132,9 @@ It finds four kinds: `exact` (the guard), `cycle` (the same sentences recurring)
 `phrase` (the same, a little reworded, matched by BM25) and `tool` (the same call
 with the same result; no tool is exempt, so polling for an unchanged result counts,
 and a host should wait on an event instead). A window of recent sentences has to be mostly repeats, so a
-sentence the model says often is not a loop. History is read from the last user
-message on, so a user asking again is not a loop, and a loop that goes on only
-across user messages is not seen. History is counted but cannot cut: only a reply
+sentence the model says often is not a loop. History is read from the last message by a
+person on, so a person asking again is not a loop, and a loop that goes on only
+across their messages is not seen. Host notices (`[tag] text`) do not end a turn. History is counted but cannot cut: only a reply
 that continues the loop is interrupted. `ToolTolerance` counts tools while text is
 cut. A finding carries `First` and `Last`, the earliest repeat in view and the one
 that tripped it, capped at `SampleBytes`. `Finding()` returns it whether or not the

@@ -56,14 +56,17 @@ Reviewed by aw4 and dun 10-31. Measured on 1,315 sessions of corrallm traffic: f
 including a real 40-sentence reply cycle the exact guard missed; 1 of 2,172 replies.
 
 - **next:** dun installs it count-only; the numbers decide when text cutting turns on.
-- **risks:** no thinking text was in the corpus (clients do not send it back), so
-  false positives in thinking are unmeasured. Default thresholds come from that one sample.
+- **risks:** text Tolerance is not settled. Measured in thinking: aw4 (13,454 blocks, 48 h, its
+  own replay) cuts 14 at 3, 5 at 4, 1 at 5-8 (a plan aw4 expects to pass), 0 at 9. dun (298
+  sessions) has one real text loop at 6. No single number separates those; tools do: dun's
+  tool cuts at 3 were all stuck loops where read. aw4's tool sequences were not replayed.
 - **decisions (owner 10-31):** no polling exemption: an unchanged result counts, clients
   wait on an event. dun keeps `loopguard.go` beside this; aw4 keeps `MaxRepeatedExchanges`.
 - **assumptions:** `agent` must not import it (invariant 2), so a host installs it.
   Tool arguments get the exact detector only: writing a file again is not a loop.
-  History is read from the last user message: a user asking again is not a loop, and a loop
-  that goes on only across user messages is not seen. A notice sent as a user message resets it.
+  History is read from the last message by a person: a person asking again is not a loop, and
+  a loop that goes on only across their messages is not seen. Host notices (`[tag] text`, read
+  from the text because a proxy has nothing else) do not end a turn.
   Edit then re-run with the same failure stays under MinShare, because edits are distinct calls.
 - **optional extensions:** digit-insensitive matching for random data inside a line.
 

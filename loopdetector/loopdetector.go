@@ -7,7 +7,7 @@
 // no period for it to find. This package finds them, for a host that installs it.
 //
 // THE INPUT IS THE SESSION PLUS THE STREAM. Begin takes the messages the request
-// was sent with, and reads the turn since the last user message; Watch takes the reply's deltas as they arrive, thinking
+// was sent with, and reads the turn since a person last spoke; Watch takes the reply's deltas as they arrive, thinking
 // included. There is no cache to size or to go stale, and nothing lives past
 // the reply: what the detector compares against is the conversation itself,
 // which any party that can see the request already holds, the corrallm proxy

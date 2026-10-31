@@ -3,6 +3,7 @@ package loopdetector
 import (
 	"encoding/json"
 	"hash/fnv"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -65,10 +66,10 @@ func (d *LoopDetector) Begin(history []llm.Message) *Session {
 	if d.cfg.Off {
 		return s
 	}
-	// The turn starts at the last user message. A user who asks again gets the
-	// same answer again, and that is not a loop. The cost is a loop that goes on
-	// only across user messages, which this does not see.
-	turn := history[lastUser(history)+1:]
+	// The turn starts at the last message from a person. A person who asks again
+	// gets the same answer again, and that is not a loop. The cost is a loop that
+	// goes on only across their messages, which this does not see.
+	turn := history[lastPerson(history)+1:]
 	results := map[string]string{}
 	for _, m := range turn {
 		if m.Role == "tool" {
@@ -88,14 +89,22 @@ func (d *LoopDetector) Begin(history []llm.Message) *Session {
 	return s
 }
 
-func lastUser(history []llm.Message) int {
+func lastPerson(history []llm.Message) int {
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "user" {
+		if history[i].Role == "user" && !notice.MatchString(history[i].Content) {
 			return i
 		}
 	}
 	return -1
 }
+
+// notice matches a user message written by the host, not a person: agent's
+// render.go gives those a "[tag] " or "[compacted]\n" prefix. It is read from the
+// text because that is all a proxy has. Without this the warning about a loop
+// restarts the count of that loop: measured in dun, 11 identical failed calls
+// with the warning after the fifth, and the window never filled. A person who
+// starts a message with a tag extends the turn, which costs a count, not a cut.
+var notice = regexp.MustCompile(`^\[[A-Za-z0-9_.:-]+\][ \n]`)
 
 func (s *Session) track(channel string) *track {
 	t := s.tracks[channel]

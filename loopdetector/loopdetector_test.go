@@ -177,6 +177,30 @@ func TestAUserAskingAgainIsNotALoop(t *testing.T) {
 	}
 }
 
+// dun's trace: the same failed call 11 times, a loop warning after the fifth. The
+// warning is a user message on the wire and must not restart what it warns about.
+func TestAHostNoticeDoesNotEndTheTurn(t *testing.T) {
+	calls := make([]string, 7)
+	for i := range calls {
+		calls[i] = fmt.Sprintf("tool%d", i)
+	}
+	same := func(_, c int) string { return fmt.Sprint("same ", c) }
+	history := []llm.Message{{Role: "user", Content: "go"}}
+	history = append(history, toolHistory(2, calls, same)...)
+	history = append(history, llm.Message{Role: "user", Content: "[tool_loop] You have called tool0 5 times"})
+	history = append(history, toolHistory(3, calls, same)...)
+	history = append(history, llm.Message{Role: "user", Content: "[compacted]\nearlier"})
+	s := New(Config{}).Begin(history)
+	if info := s.WatchToolCall("tool0", `{"call":0,"path":"a"}`); info == nil {
+		t.Fatal("a notice restarted the count")
+	}
+	// A person ends it, even one writing a bracket mid-sentence.
+	s = New(Config{}).Begin(append(history, llm.Message{Role: "user", Content: "stop [now] and rethink"}))
+	if info := s.WatchToolCall("tool0", `{"call":0,"path":"a"}`); info != nil {
+		t.Fatalf("a person's message did not end the turn: %v", info)
+	}
+}
+
 func TestAReplyDraftedInThinkingIsNotALoop(t *testing.T) {
 	draft := strings.Join(variations(30), "")
 	s := New(Config{}).Begin(nil)
