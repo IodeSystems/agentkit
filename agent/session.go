@@ -494,14 +494,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// to answer. A notification is tail-kept and budget-neutral, so the
 			// notice survives to the next round without competing with history.
 			if e := s.Store.Append(ctx, s.SessionID, Entry{
-				ID:   NewID(),
-				Kind: KindNotification,
-				Tag:  "repetition",
-				Content: fmt.Sprintf(
-					"Your previous response was CUT OFF because it had started repeating itself: "+
-						"you %s. The repeated copies were discarded. Do not resume that text — "+
-						"continue from where the repetition began, differently, and if you have "+
-						"nothing further to add then stop.", rep),
+				ID:        NewID(),
+				Kind:      KindNotification,
+				Tag:       "repetition",
+				Content:   repetitionNotice(rep),
 				CreatedAt: now(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist repetition notice: %w", e)
@@ -765,6 +761,23 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	}
 	endReason = TurnMaxTurns
 	return result, fmt.Errorf("agent: max turns (%d) exceeded", maxTurns)
+}
+
+// repetitionNotice tells the model why its reply was cut. A tool loop has no text
+// to resume, and its calls were not run: told to reword, it makes the same call.
+func repetitionNotice(rep *llm.RepetitionInfo) string {
+	if rep.Kind == llm.KindTool {
+		return fmt.Sprintf(
+			"Your previous response was CUT OFF and its tool calls were NOT run: you made the "+
+				"same call for the same result %d times, from %q to %q. Calling it again will "+
+				"not change the answer. Wait on an event if you can, change the approach, or "+
+				"report what you have and stop.", rep.Reps, rep.First, rep.Last)
+	}
+	return fmt.Sprintf(
+		"Your previous response was CUT OFF because it had started repeating itself: "+
+			"you %s. The repeated copies were discarded. Do not resume that text — "+
+			"continue from where the repetition began, differently, and if you have "+
+			"nothing further to add then stop.", rep)
 }
 
 // exchangeSignature fingerprints one round's tool calls together with what they

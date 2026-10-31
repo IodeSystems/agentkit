@@ -135,3 +135,46 @@ func TestRepetitionInToolArgumentsRetries(t *testing.T) {
 		t.Errorf("notice does not name the offending tool: %q", notice)
 	}
 }
+
+// A loop in thinking is cut before there is any reply: the round is retried
+// like any other, and an empty reply is not persisted as one.
+func TestRepetitionInReasoningRetries(t *testing.T) {
+	store := &memStore{}
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		{
+			{Reasoning: strings.Repeat(repBlock, 6)},
+			{Done: true, StopReason: llm.StopReasonRepetition, Repetition: &llm.RepetitionInfo{
+				Where: llm.ChannelReasoning, Period: len(repBlock), Reps: 6, Sample: repBlock,
+			}},
+		},
+		{{Content: "The parcel covers lots 7 to 10."}},
+	}}
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5}
+
+	res, err := s.Turn(context.Background())
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if res.Reply != "The parcel covers lots 7 to 10." {
+		t.Errorf("Reply = %q", res.Reply)
+	}
+	for _, e := range store.entries {
+		if e.Kind == KindAssistant && e.Content == "" {
+			t.Error("an empty assistant reply was persisted")
+		}
+	}
+}
+
+// A tool loop has no text to resume. The stock notice would tell the model to
+// reword, and it would make the same call.
+func TestAToolLoopNoticeSaysTheCallsWereNotRun(t *testing.T) {
+	got := repetitionNotice(&llm.RepetitionInfo{Kind: llm.KindTool, Reps: 4, First: "read a", Last: "read b"})
+	for _, want := range []string{"NOT run", "4 times", `"read a"`, `"read b"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("notice lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "resume") {
+		t.Errorf("notice talks about text: %s", got)
+	}
+}
