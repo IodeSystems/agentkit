@@ -46,6 +46,27 @@ final though.
 
 ## Active work
 
+### ◐ `loopdetector` — loops with no period (2026-10-31)
+
+Owner: centralize loop detection here, input is session + stream chunk (no cache),
+output is a loop count, the cut is a configurable tolerance. Package and `llm` seam
+done (`Client.Watch`, `StreamWatcher`, `ToolCallWatcher`); the default guard now
+watches reasoning too; a proxy's `content_filter` + `loop` reads as StopReasonRepetition.
+Reviewed by aw4 and dun 10-31. Measured on 1,315 sessions of corrallm traffic: fires on 4,
+including a real 40-sentence reply cycle the exact guard missed; 1 of 2,172 replies.
+
+- **next:** dun installs it count-only; the numbers decide when text cutting turns on.
+- **risks:** no thinking text was in the corpus (clients do not send it back), so
+  false positives in thinking are unmeasured. Default thresholds come from that one sample.
+- **decisions (owner 10-31):** no polling exemption: an unchanged result counts, clients
+  wait on an event. dun keeps `loopguard.go` beside this; aw4 keeps `MaxRepeatedExchanges`.
+- **assumptions:** `agent` must not import it (invariant 2), so a host installs it.
+  Tool arguments get the exact detector only: writing a file again is not a loop.
+  History is read from the last user message: a user asking again is not a loop, and a loop
+  that goes on only across user messages is not seen. A notice sent as a user message resets it.
+  Edit then re-run with the same failure stays under MinShare, because edits are distinct calls.
+- **optional extensions:** digit-insensitive matching for random data inside a line.
+
 ### ◐ `files` — a mountable file toolset (2026-10-22, branch `files-tools`)
 
 USER: dun had no file tools; wanted one "minimal, configurable, but efficient and
