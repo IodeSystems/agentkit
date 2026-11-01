@@ -118,7 +118,7 @@ func TestRefused(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"nope"}}`)
 	}))
 	defer srv.Close()
-	if _, err := (Source{KeyFile: keyFile(t), Base: srv.URL}).MonthToDate(context.Background(), now); err == nil || !strings.Contains(err.Error(), "403") {
+	if _, err := (Source{KeyFile: keyFile(t), Base: srv.URL}).MonthToDate(context.Background(), now); !errors.Is(err, ErrNotPermitted) {
 		t.Errorf("%v", err)
 	}
 }

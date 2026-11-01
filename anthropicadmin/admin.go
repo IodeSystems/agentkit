@@ -44,6 +44,11 @@ const (
 // ErrNoCredential means neither a key file nor an ant login is set up.
 var ErrNoCredential = errors.New("no Anthropic admin credential")
 
+// ErrNotPermitted means the credential works and Anthropic refuses this account
+// the report. An individual account has no Admin API, and logging in again will
+// not change that, so a host should say so and not retry.
+var ErrNotPermitted = errors.New("this Anthropic account has no access to the cost report")
+
 // Source is where an admin credential comes from.
 type Source struct {
 	KeyFile string // path; "" or a missing file is no key
@@ -177,6 +182,9 @@ func (s Source) costCents(ctx context.Context, since time.Time) (float64, error)
 		resp.Body.Close()
 		if err != nil {
 			return 0, err
+		}
+		if resp.StatusCode == http.StatusForbidden {
+			return 0, fmt.Errorf("%w: %s", ErrNotPermitted, firstLine(body))
 		}
 		if resp.StatusCode != http.StatusOK {
 			return 0, fmt.Errorf("cost report: status %d: %s", resp.StatusCode, firstLine(body))
