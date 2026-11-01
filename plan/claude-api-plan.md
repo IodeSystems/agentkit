@@ -118,6 +118,32 @@ which workload (Carl). He is an admin of his personal org, not of the corp one.
 **blocking decisions:** the version (Carl). Slice 1 is in; slice 2 has no consumer
 and need not block it.
 
+## Future: corrallm owns Claude
+
+⏸ Direction (Carl, 2026-11-01): the key lives in corrallm, and corrallm does this
+translation for every client. A client speaks OpenAI to corrallm and Claude works:
+aw4 and dun manage no Claude pathway, and no client holds a Claude key.
+
+The translation stays in agentkit, which corrallm already imports. agentkit is where
+this work belongs either way; corrallm is one more caller of it.
+
+What it takes:
+
+- Export the two halves. The proxy has an OpenAI request and must write OpenAI SSE, so
+  it needs `anthropicParams` and `transcodeAnthropic` as public functions, not only
+  through `Client.ChatStream`.
+- Keep the request's cache breakpoints stable across clients: placement is in
+  `anthropicParams`, so a proxied client gets it without asking.
+- Pass through what corrallm already sends a client: usage with
+  `cache_read_input_tokens`, and `loop` from its own detector.
+- Gaps 1 to 13 are then corrallm's too. Each one fixed here is fixed there.
+
+**next:** nothing until the direct path has run in daily use. **risks:** a client that
+sends OpenAI `tools` gains nothing it lacks today, but thinking replay (gap 11) would
+need a field the OpenAI shape does not have. **blocking decisions:** when; and whether
+the direct path stays for a host with no corrallm in front of it. Recommended: keep it,
+because `llm/anthropic.go` is the same code either way.
+
 ## Assumptions
 
 - `api.anthropic.com` in the base URL is the right trigger. A proxy in front of Claude
