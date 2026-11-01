@@ -32,6 +32,14 @@ Decided (Carl, 2026-11-01): the shim replaced the SDK, which had broken invarian
 Thinking text is not expected back from Claude, so an empty thinking stream is not a
 fault.
 
+Cross-provider, live 2026-11-01: a parent on `chat` at llm.iodesystems.com ran a child
+on `claude-haiku-5-5` at Anthropic; the child called a tool and answered.
+
+OpenRouter stays on the OpenAI path. For Claude models on `openrouter.ai` the client
+sends its top-level `cache_control`, from OpenRouter's docs. **Not tested live: no
+OpenRouter key here.** Check `cached_tokens` on a second round; its `session_id` is the
+next thing to try if hits are low.
+
 ## Gaps: OpenAI shape to Claude
 
 The caller asks for something the Messages API does not take.
@@ -76,7 +84,7 @@ error.
 | 10 | ◻ | Cache lifetime | 5 minutes; an idle session misses | Option for the 1-hour TTL | Small |
 | 11 | ◻ | Thinking blocks | Not replayed | See below | Large |
 | 12 | ◻ | Context measuring | `tokenize.go` routes do not know this API | `count_tokens` | Small |
-| 13 | ◻ | Spend | dun's meter showed no cost for this provider on the compatible path; not re-checked here | Check first, then price from usage | Small |
+| 13 | ◻ | Spend | Confirmed live: no cost reaches a ledger, because Anthropic reports none. Usage has the tokens | Price from usage, cache writes at their rate | Small |
 
 **Thinking replay (11).** `Message` has no place for a signed block, so nothing is
 sent back, and no request has failed for it. That is 4 rounds on Opus 5.5, not a long

@@ -1375,6 +1375,12 @@ type ChatOpts struct {
 // are dialect-dependent, and the dialect is a property of the client (its model
 // and base URL), not of the options.
 func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
+	// OpenRouter caches Claude when asked, with one top-level field that it
+	// advances along the conversation. Its address only: a proxy in front of it
+	// may refuse the field.
+	if strings.Contains(c.baseURL, "openrouter.ai") && strings.Contains(c.model, "claude") {
+		body["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
 	if opts == nil {
 		return
 	}

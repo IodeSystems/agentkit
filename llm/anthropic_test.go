@@ -204,3 +204,21 @@ func TestMessagesAPI_Retries(t *testing.T) {
 		t.Errorf("%q %v after %d calls", text, err, calls)
 	}
 }
+
+// OpenRouter is asked to cache Claude, and nothing else is.
+func TestOpenRouterCachesClaude(t *testing.T) {
+	for _, tc := range []struct {
+		url, model string
+		want       bool
+	}{
+		{"https://openrouter.ai/api/v1", "anthropic/claude-opus-5-5", true},
+		{"https://openrouter.ai/api/v1", "deepseek/x", false},
+		{"http://localhost:8080/v1", "claude-opus-5-5", false},
+	} {
+		body := map[string]any{}
+		NewClient(tc.url, "k", tc.model).applySampling(body, nil)
+		if _, got := body["cache_control"]; got != tc.want {
+			t.Errorf("%s %s: %v", tc.url, tc.model, got)
+		}
+	}
+}
