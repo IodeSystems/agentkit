@@ -1,0 +1,118 @@
+# agentkit — Claude Messages API plan
+
+> How this plan works: the gaps between the OpenAI shape agentkit speaks and the
+> Claude Messages API, with a proposal for each. Rules are in `plan/plan.md`.
+> Status marks: ◻ todo · ◐ in progress · ✅ done · ⏸ parked · ❓ blocked.
+> Move a finished slice to `plan/done.md` and delete it here.
+
+## State
+
+✅ Built: `llm/anthropic.go` (2ed3442, local, no tag). A client pointed at
+`api.anthropic.com`, or with `MessagesAPI: true`, talks to `/v1/messages`. Callers
+keep `Message`, `ToolDef`, `ChatOpts`, `StreamChunk`. The request is translated; the
+stream is transcoded into the OpenAI SSE that `readStream` reads, so the loop
+watcher, usage and truncated-call handling are one code path. Other providers are
+unchanged.
+
+Measured live through dun, 2026-11-01:
+
+| Check | Result |
+|---|---|
+| Opus 5.5, 2 user turns, 4 rounds, tools | Works; 20,058 tokens read from cache |
+| Raw `/v1/messages`, Haiku, Sonnet, Opus 5.5 | Second round read 11,484 from cache |
+| The same on the OpenAI-compatible endpoint, through dun | 0 read from cache |
+| No key on the client, `ANTHROPIC_API_KEY` in the environment | Works |
+| Workload Identity Federation | Not tested: needs an identity token |
+
+Decided (Carl, 2026-11-01): keep the SDK dependency for now. agentkit had none
+before; `anthropic-sdk-go` adds 22 lines to `go.mod` and 137 to `go.sum`, and every
+consumer inherits them. Thinking text is not expected back from Claude, so an empty
+thinking stream is not a fault.
+
+## Gaps: OpenAI shape to Claude
+
+The caller asks for something the Messages API does not take.
+
+| # | Status | Gap | Now | Proposal |
+|---|---|---|---|---|
+| 1 | ◻ | Forced `ToolChoice` (object or `required`) | Becomes `auto` | Send `tool_choice` on models that accept it. On Opus 5.5, Sonnet 5.5 and Fable 5.1, which return a 400, send only the named tool with `auto` |
+| 2 | ◻ | `ResponseFormat` | Ignored | Map to `output_config.format` |
+| 3 | ⏸ | `Grammar` | Ignored | None. It belongs to the heredoc transport, which this path does not use |
+| 4 | ⏸ | `Temperature`, `Seed`, penalties | Not sent | None. Current models reject them |
+
+Slice 1 and 2 matter to dun today:
+
+- `fork.go` forces one tool on a side call. With `auto` the model may answer in text
+  or call another tool, and the fork returns nothing.
+- `suggest.go` sets `ToolChoice` from `forkTools`, and `json_object` when it has no
+  tools.
+
+**next:** read `forkTools`, then write a test per case against the fake server in
+`llm/anthropic_test.go`. **risks:** which models reject forced choice changes by
+release; prefer asking `/v1/models` over a list in code. **blocking decisions:** none.
+
+## Gaps: Claude features the conversion flattens
+
+| # | Status | Gap | Now | Proposal | Size |
+|---|---|---|---|---|---|
+| 5 | ◻ | Tool errors | Text, `is_error` false | Carry an error flag on the tool `Message`; dun's results start `ERROR:` | Small |
+| 6 | ◻ | Refusals | A stream error; the turn fails | `fallbacks: "default"` on the beta endpoint for Opus and Sonnet 5.5 | Small |
+| 7 | ◻ | Rate limits and cost | `responseMeta{}` is empty | Read the response headers through SDK middleware | Small |
+| 8 | ◻ | Retries | SDK retries; `RetryBudget`, `OnRetry` and `/retry budget` do nothing | Report and bound them in SDK middleware | Medium |
+| 9 | ◻ | Host notices | User messages | Mid-conversation system messages, which keep the cached prefix | Medium |
+| 10 | ◻ | Cache lifetime | 5 minutes; an idle session misses | Option for the 1-hour TTL | Small |
+| 11 | ◻ | Thinking blocks | Not replayed | See below | Large |
+| 12 | ◻ | Context measuring | `tokenize.go` routes do not know this API | `count_tokens` | Small |
+| 13 | ◻ | Spend | dun's meter showed no cost for this provider on the compatible path; not re-checked here | Check first, then price from usage | Small |
+
+**Thinking replay (11).** `Message` has no place for a signed block, so nothing is
+sent back, and no request has failed for it. That is 4 rounds on Opus 5.5, not a long
+session. Replay needs a field on `llm.Message`, on `agent.Entry` and in the session
+file, and a rule for folds: a block is valid only for the conversation that produced
+it, so a fold or an edited tool result invalidates what follows.
+
+**next:** run one long tool session on Opus 5.5 and compare work done with and without
+replay. Do not build replay on a guess. **risks:** storing blocks grows session files;
+a fold that keeps a block can be a 400 on an enforced account. **blocking decisions:**
+whether replay is worth a change to `Entry` (Carl).
+
+## Not exposed
+
+Nothing depends on these; a host folds its own history. Each needs a field on
+`ChatOpts` or a new surface.
+
+- Server compaction and context editing
+- Server tools: web search, web fetch, code execution
+- Citations and document blocks
+- Task budgets
+- Strict tools
+- Batches
+- Thinking summaries (`display`)
+
+## Credentials
+
+◐ With no key on the client the SDK resolves credentials from the environment. That
+is the path Workload Identity Federation takes: `ANTHROPIC_FEDERATION_RULE_ID`,
+`ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
+`ANTHROPIC_IDENTITY_TOKEN_FILE`. Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+`ANTHROPIC_PROFILE`, set at all, shadows it.
+
+**next:** test against a real federation rule. **risks:** a laptop has no identity
+token, so this fits CI and server runs, not interactive dun. **blocking decisions:**
+which workload (Carl). He is an admin of his personal org, not of the corp one.
+
+## Release
+
+◻ Tag agentkit, then dun bumps it. dun needs no code change.
+
+**blocking decisions:** the version, and whether slices 1 and 2 go in first (Carl).
+Recommended: yes, because `fork.go` and `suggest.go` run on every provider.
+
+## Assumptions
+
+- `api.anthropic.com` in the base URL is the right trigger. A proxy in front of Claude
+  stays on the OpenAI path unless the host sets `MessagesAPI`.
+- Effort `none` is `low`, because thinking cannot be off on every model. Sonnet 5.5's
+  `between_tools` is not used.
+- `anthropicEffort` lists the models that reject effort by name.
+- `max_tokens` defaults to 64,000.
