@@ -66,30 +66,17 @@ loop after its result is persisted (used with `tool_choice=required` roles).
 
 A client pointed at `api.anthropic.com` (or with `MessagesAPI: true`) talks to
 `/v1/messages`. Callers change nothing: messages, tools, options and stream chunks
-stay in the OpenAI shape, `llm/anthropic.go` translates the request, and the stream
-is transcoded into what `readStream` already reads, so the loop watcher, usage and
-truncated-call handling are the same code. The reason is cost: Anthropic's
-OpenAI-compatible endpoint reads nothing from the prompt cache, and this path sets
-breakpoints on the system prompt and on the end of the conversation.
+stay in the OpenAI shape. The body is built as for any provider, translated by
+[openai-claude-api-shim](https://github.com/iodesystems/openai-claude-api-shim), and
+sent through the same retries; the reply is transcoded back into what `readStream`
+reads. The decision is per client, so a parent on one provider can run a child on
+another. The reason is cost: Anthropic's OpenAI-compatible endpoint reads nothing from
+the prompt cache, and the shim places breakpoints.
 
-With no key on the client, the SDK resolves credentials from the environment,
-Workload Identity Federation included. `ReasoningEffort` becomes
-`output_config.effort`; thinking cannot be switched off on every model, so `none`
-is `low`.
-
-`ToolChoice` maps to `tool_choice`: `required` is `{type:any}`, a named function
-`{"type":"function","function":{"name":"X"}}` is `{type:tool,name:X}`, `none` is
-`none`. Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 return a 400 for a forced
-choice, so there it is sent as `auto`. A named function is then the only tool
-sent: the model can call it or answer in text, but cannot call another tool.
-`required` on those models is `auto` over every tool. The list is
-`noForcedToolChoice`, by model name.
-
-Not carried: thinking blocks are not replayed (`Message` has no place for their
-signatures); temperature, seed and the penalties are not sent; `Grammar` and
-`ResponseFormat` are ignored; a refusal is a
-stream error, with no fallback model. `RetryBudget` and `OnRetry` do not apply: the
-SDK retries, up to `Retry5xxAttempts` times.
+`ReasoningEffort` becomes `output_config.effort`; thinking cannot be switched off on
+every model, so `none` is `low`. A refusal is a stream error. The client needs a key:
+Workload Identity Federation went with the SDK. What the shape cannot carry is listed
+in the shim's README.
 
 ### Runaway-loop detection (on by default)
 

@@ -7,12 +7,17 @@
 
 ## State
 
-✅ Built: `llm/anthropic.go` (2ed3442, local, no tag). A client pointed at
-`api.anthropic.com`, or with `MessagesAPI: true`, talks to `/v1/messages`. Callers
-keep `Message`, `ToolDef`, `ChatOpts`, `StreamChunk`. The request is translated; the
-stream is transcoded into the OpenAI SSE that `readStream` reads, so the loop
-watcher, usage and truncated-call handling are one code path. Other providers are
-unchanged.
+✅ Built: `llm/anthropic.go` on top of
+[openai-claude-api-shim](https://github.com/iodesystems/openai-claude-api-shim)
+(v0.1.0, public). A client pointed at `api.anthropic.com`, or with `MessagesAPI: true`,
+talks to `/v1/messages`. Callers keep `Message`, `ToolDef`, `ChatOpts`, `StreamChunk`.
+The body is built as for any provider and translated, so retries, headers and
+`readStream` are one code path. Other providers are unchanged.
+
+The direct path stays first-class (Carl, 2026-11-01): not every dun user runs corrallm,
+some use OpenRouter directly, and switching providers and cross-provider sub-agents
+must work. The choice is per client, so a child can be on Anthropic while its parent is
+elsewhere.
 
 Measured live through dun, 2026-11-01:
 
@@ -21,16 +26,11 @@ Measured live through dun, 2026-11-01:
 | Opus 5.5, 2 user turns, 4 rounds, tools | Works; 20,058 tokens read from cache |
 | Raw `/v1/messages`, Haiku, Sonnet, Opus 5.5 | Second round read 11,484 from cache |
 | The same on the OpenAI-compatible endpoint, through dun | 0 read from cache |
-| No key on the client, `ANTHROPIC_API_KEY` in the environment | Works |
-| Workload Identity Federation | Not tested: needs an identity token |
 
-Decided (Carl, 2026-11-01): keep the SDK dependency for now. **This breaks invariant
-0 in `CLAUDE.md`, which still states the old rule**: `go list -m all` went from 1
-module to 73, and `llm` is no longer standalone. The invariant was not read when the
-SDK was added, and Carl was told the cost in lines, not that it broke a stated rule.
-A separate shim project (below) would restore it. agentkit had none before; `anthropic-sdk-go` adds 22 lines to `go.mod` and 137 to `go.sum`, and every
-consumer inherits them. Thinking text is not expected back from Claude, so an empty
-thinking stream is not a fault.
+Decided (Carl, 2026-11-01): the shim replaced the SDK, which had broken invariant 0
+(1 module to 73). `go list -m all` is now 2. v0.17.0 carries the SDK; do not adopt it.
+Thinking text is not expected back from Claude, so an empty thinking stream is not a
+fault.
 
 ## Gaps: OpenAI shape to Claude
 
@@ -70,8 +70,8 @@ error.
 |---|---|---|---|---|---|
 | 5 | ◻ | Tool errors | Text, `is_error` false | Carry an error flag on the tool `Message`; dun's results start `ERROR:` | Small |
 | 6 | ◻ | Refusals | A stream error; the turn fails | `fallbacks: "default"` on the beta endpoint for Opus and Sonnet 5.5 | Small |
-| 7 | ◻ | Rate limits and cost | `responseMeta{}` is empty | Read the response headers through SDK middleware | Small |
-| 8 | ◻ | Retries | SDK retries; `RetryBudget`, `OnRetry` and `/retry budget` do nothing | Report and bound them in SDK middleware | Medium |
+| 7 | ✅ | Rate limits and cost | Response headers read as on any provider | Check Anthropic's header names reach `rateLimitsFrom` | Small |
+| 8 | ✅ | Retries | The client's own retries, `RetryBudget` and `OnRetry` | Done by the shim move | Done |
 | 9 | ◻ | Host notices | User messages | Mid-conversation system messages, which keep the cached prefix | Medium |
 | 10 | ◻ | Cache lifetime | 5 minutes; an idle session misses | Option for the 1-hour TTL | Small |
 | 11 | ◻ | Thinking blocks | Not replayed | See below | Large |
@@ -104,15 +104,13 @@ Nothing depends on these; a host folds its own history. Each needs a field on
 
 ## Credentials
 
-◐ With no key on the client the SDK resolves credentials from the environment. That
-is the path Workload Identity Federation takes: `ANTHROPIC_FEDERATION_RULE_ID`,
-`ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
-`ANTHROPIC_IDENTITY_TOKEN_FILE`. Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
-`ANTHROPIC_PROFILE`, set at all, shadows it.
+⏸ The client needs a key. Workload Identity Federation came free with the SDK and went
+with it. Adding it means an exchange at `/v1/oauth/token` with an identity token, in a
+small optional package, not in the shim, which holds no credentials.
 
-**next:** test against a real federation rule. **risks:** a laptop has no identity
-token, so this fits CI and server runs, not interactive dun. **blocking decisions:**
-which workload (Carl). He is an admin of his personal org, not of the corp one.
+**next:** nothing until a workload needs it. **risks:** a laptop has no identity token,
+so this fits CI and server runs, not interactive dun. **blocking decisions:** which
+workload (Carl). He is an admin of his personal org, not of the corp one.
 
 ## Release
 

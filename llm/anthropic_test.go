@@ -9,8 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // fakeMessages answers /v1/messages with events, and keeps the request.
@@ -83,7 +81,7 @@ func TestMessagesAPI_TextAndUsage(t *testing.T) {
 		t.Errorf("OnUsage %+v", saw)
 	}
 	req := *got
-	if req["stream"] != true || req["cache_control"] == nil || req["max_tokens"].(float64) != anthropicMaxTokens {
+	if req["stream"] != true || req["max_tokens"].(float64) != 64000 {
 		t.Errorf("request %v", req)
 	}
 	if req["output_config"].(map[string]any)["effort"] != "low" {
@@ -168,143 +166,41 @@ func TestMessagesAPI_LoopIsCut(t *testing.T) {
 	}
 }
 
-func TestMessagesAPI_SchemaAndChat(t *testing.T) {
-	c, got := fakeMessages(t, evStart,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
-		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
-	var td ToolDef
-	td.Function.Name, td.Function.Description = "exec", "run"
-	td.Function.Parameters = map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}}, "required": []string{"command"}}
-	text, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, []ToolDef{td}, nil)
+// Not streaming, with the key and version a Messages endpoint asks for.
+func TestMessagesAPI_Chat(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
+	c.MessagesAPI = true
+	text, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
 	if err != nil || text != "ok" {
 		t.Fatalf("%q %v", text, err)
 	}
-	tool := (*got)["tools"].([]any)[0].(map[string]any)
-	schema := tool["input_schema"].(map[string]any)
-	if tool["name"] != "exec" || schema["properties"] == nil || len(schema["required"].([]any)) != 1 {
-		t.Errorf("tool %v", tool)
+	if got.Get("x-api-key") != "k" || got.Get("anthropic-version") == "" || got.Get("Authorization") != "" {
+		t.Errorf("headers %v", got)
 	}
 }
 
-func roles(m []anthropic.MessageParam) string {
-	var out []string
-	for _, x := range m {
-		out = append(out, string(x.Role)[:1])
-	}
-	return strings.Join(out, "")
-}
-
-func msgCall(id string) ToolCall {
-	tc := ToolCall{ID: id, Type: "function"}
-	tc.Function.Name, tc.Function.Arguments = "exec", `{"command":"ls"}`
-	return tc
-}
-
-// A transcript dun folded or interrupted still makes a valid request.
-func TestAnthropicMessages_Order(t *testing.T) {
-	for name, tc := range map[string]struct {
-		in   []Message
-		want string
-	}{
-		"plain":         {[]Message{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}, {Role: "user", Content: "c"}}, "uau"},
-		"two users":     {[]Message{{Role: "user", Content: "a"}, {Role: "user", Content: "b"}}, "u"},
-		"starts fold":   {[]Message{{Role: "assistant", Content: "a"}, {Role: "user", Content: "b"}}, "uau"},
-		"ends assist":   {[]Message{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}}, "uau"},
-		"notice inside": {[]Message{{Role: "user", Content: "a"}, {Role: "assistant", ToolCalls: []ToolCall{msgCall("1"), msgCall("2")}}, {Role: "tool", ToolCallID: "1", Content: "x"}, {Role: "user", Content: "[note] n"}, {Role: "tool", ToolCallID: "2", Content: "y"}}, "uau"},
-		"no result":     {[]Message{{Role: "user", Content: "a"}, {Role: "assistant", ToolCalls: []ToolCall{msgCall("1")}}, {Role: "user", Content: "b"}}, "uau"},
-		"no call":       {[]Message{{Role: "tool", ToolCallID: "gone", Content: "x"}, {Role: "user", Content: "b"}}, "u"},
-		"empty reply":   {[]Message{{Role: "user", Content: "a"}, {Role: "assistant"}, {Role: "user", Content: "b"}}, "u"},
-	} {
-		if got := roles(anthropicMessages(tc.in)); got != tc.want {
-			t.Errorf("%s: %s, want %s", name, got, tc.want)
+// A 429 goes through the client's own retries, as on any other provider.
+func TestMessagesAPI_Retries(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
 		}
-	}
-	// Results lead the user message, whatever came between them.
-	m := anthropicMessages([]Message{{Role: "user", Content: "a"}, {Role: "assistant", ToolCalls: []ToolCall{msgCall("1"), msgCall("2")}},
-		{Role: "tool", ToolCallID: "1", Content: "x"}, {Role: "user", Content: "[note] n"}, {Role: "tool", ToolCallID: "2", Content: "y"}})
-	blocks := m[2].Content
-	if blocks[0].OfToolResult == nil || blocks[1].OfToolResult == nil || blocks[2].OfText == nil {
-		t.Errorf("order %+v", blocks)
-	}
-	// A call with no result gets one.
-	m = anthropicMessages([]Message{{Role: "user", Content: "a"}, {Role: "assistant", ToolCalls: []ToolCall{msgCall("1")}}, {Role: "user", Content: "b"}})
-	if r := m[2].Content[0].OfToolResult; r == nil || r.ToolUseID != "1" || !r.IsError.Value {
-		t.Errorf("missing result %+v", m[2].Content[0])
-	}
-}
-
-func TestAnthropicMessages_Image(t *testing.T) {
-	m := anthropicMessages([]Message{{Role: "user", Parts: []ContentPart{TextPart("see"), {Type: "image_url", ImageURL: &ImageURL{URL: "data:image/png;base64,QUJD"}}}}})
-	img := m[0].Content[1].OfImage
-	if img == nil || img.Source.OfBase64 == nil || img.Source.OfBase64.Data != "QUJD" || string(img.Source.OfBase64.MediaType) != "image/png" {
-		t.Errorf("image %+v", m[0].Content[1])
-	}
-}
-
-func TestAnthropicEffort(t *testing.T) {
-	if e := anthropicEffort("claude-haiku-4-5-20251001", "high"); e != "" {
-		t.Errorf("an old model got %q", e)
-	}
-	if e := anthropicEffort("claude-opus-5-5", "high"); e != "high" {
-		t.Errorf("effort %q", e)
-	}
-	if e := anthropicEffort("claude-opus-5-5", ""); e != "" {
-		t.Errorf("default %q", e)
-	}
-}
-
-// A forced ToolChoice is forced where the model takes it, and on the models that
-// 400 on it, auto narrowed to the named tool rather than a failed request.
-func TestMessagesAPI_ForcedToolChoice(t *testing.T) {
-	defs := func(names ...string) []ToolDef {
-		var out []ToolDef
-		for _, n := range names {
-			var td ToolDef
-			td.Function.Name = n
-			td.Function.Parameters = map[string]any{"type": "object", "properties": map[string]any{}}
-			out = append(out, td)
-		}
-		return out
-	}
-	named := `{"type":"function","function":{"name":"answer"}}`
-	for _, tc := range []struct {
-		model, choice string
-		want          string // tool_choice as JSON, "" for not sent
-		tools         string
-	}{
-		{"claude-haiku-5-5", "required", `{"type":"any"}`, "exec,answer"},
-		{"claude-haiku-5-5", named, `{"name":"answer","type":"tool"}`, "exec,answer"},
-		{"claude-haiku-5-5", "none", `{"type":"none"}`, "exec,answer"},
-		{"claude-haiku-5-5", "auto", "", "exec,answer"},
-		{"claude-haiku-5-5", "", "", "exec,answer"},
-		{"claude-haiku-5-5", `{"type":"function"}`, "", "exec,answer"},
-		{"claude-opus-5-5", named, `{"type":"auto"}`, "answer"},
-		{"claude-sonnet-5-5", named, `{"type":"auto"}`, "answer"},
-		{"claude-fable-5-1", named, `{"type":"auto"}`, "answer"},
-		{"claude-mythos-5-1", named, `{"type":"auto"}`, "answer"},
-		{"claude-opus-5-5", "required", `{"type":"auto"}`, "exec,answer"},
-		{"claude-opus-5-5", `{"type":"function","function":{"name":"gone"}}`, `{"type":"auto"}`, "exec,answer"},
-		{"claude-opus-5-5", "none", `{"type":"none"}`, "exec,answer"},
-	} {
-		c, got := fakeMessages(t, evStart,
-			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
-		c.model = tc.model
-		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, defs("exec", "answer"), &ChatOpts{ToolChoice: tc.choice}); err != nil {
-			t.Fatalf("%s %s: %v", tc.model, tc.choice, err)
-		}
-		req := *got
-		var choice string
-		if v, ok := req["tool_choice"]; ok {
-			b, _ := json.Marshal(v)
-			choice = string(b)
-		}
-		var names []string
-		for _, x := range req["tools"].([]any) {
-			names = append(names, x.(map[string]any)["name"].(string))
-		}
-		if choice != tc.want || strings.Join(names, ",") != tc.tools {
-			t.Errorf("%s %s: tool_choice %s tools %v, want %s %s", tc.model, tc.choice, choice, names, tc.want, tc.tools)
-		}
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
+	c.MessagesAPI = true
+	if text, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil || text != "ok" || calls != 2 {
+		t.Errorf("%q %v after %d calls", text, err, calls)
 	}
 }

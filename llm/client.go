@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	shim "github.com/iodesystems/openai-claude-api-shim"
 	"io"
 	"log"
 	"math/rand/v2"
@@ -469,7 +470,7 @@ type Client struct {
 	Repetition RepetitionGuard
 
 	// MessagesAPI talks to the endpoint with the Claude Messages API whatever its
-	// address; api.anthropic.com always does. See anthropic.go.
+	// address; api.anthropic.com always does.
 	MessagesAPI bool
 
 	// Watch, when set, REPLACES the Repetition guard for a stream: it is called
@@ -567,6 +568,9 @@ func (c *Client) chatURL() string {
 	u := c.baseURL
 	if !strings.HasSuffix(u, "/v1") {
 		u += "/v1"
+	}
+	if c.usesMessagesAPI() {
+		return u + "/messages"
 	}
 	return u + "/chat/completions"
 }
@@ -785,6 +789,12 @@ var retry5xxMaxAttempts = 5
 // ctx cancel, RetryBudget exhaustion, or repeated 5xx). Pushing this
 // into the harness would duplicate the loop in every role.
 func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, ident callIdent) (*http.Response, error) {
+	if c.usesMessagesAPI() {
+		var err error
+		if payload, err = shim.Request(payload, shim.Options{}); err != nil {
+			return nil, fmt.Errorf("llm: messages request: %w", err)
+		}
+	}
 	return c.postWithRetry(ctx, c.chatURL(), payload, ident)
 }
 
@@ -850,7 +860,11 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		// fork: it maps the key to a priority. Configure the key on the
 		// provider (api_key_env / secrets store); empty = no auth, default
 		// priority.
-		if c.apiKey != "" {
+		switch {
+		case c.usesMessagesAPI():
+			req.Header.Set("x-api-key", c.apiKey)
+			req.Header.Set("anthropic-version", shim.APIVersion)
+		case c.apiKey != "":
 			req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		}
 		// Echo the ticket the server gave us when it turned this same request
@@ -1391,9 +1405,6 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 // ChatStream sends a chat completion request with streaming enabled.
 // It returns a channel that emits StreamChunks as they arrive.
 func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
-	if c.usesMessagesAPI() {
-		return c.anthropicChatStream(ctx, messages, tools, opts)
-	}
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
@@ -1455,7 +1466,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 	}
 
 	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, resp.Body, ch, messages, callStart, c.metaFrom(resp.Header))
+	go c.readStream(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header))
 	return ch, nil
 }
 
@@ -1481,9 +1492,6 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
-	if c.usesMessagesAPI() {
-		return c.anthropicChat(ctx, messages, tools, opts)
-	}
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
@@ -1526,6 +1534,11 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", nil, fmt.Errorf("llm: read: %w", err)
+	}
+	if c.usesMessagesAPI() {
+		if raw, err = shim.Response(raw); err != nil {
+			return "", nil, fmt.Errorf("llm: messages reply: %w", err)
+		}
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return "", nil, fmt.Errorf("llm: decode: %w", err)

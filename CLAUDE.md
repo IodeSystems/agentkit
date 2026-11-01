@@ -32,8 +32,9 @@ plan/     living plan. Only plan.md exists today; it carries its own Icebox
 ## Invariants — do not break
 
 0. **The module has NO third-party dependencies.** `go.mod` declares a module
-   path and a Go version, nothing else. Verify with `go list -m all` — one
-   line. Adding a `require` is a decision, not a convenience: this library sits
+   path, a Go version and one `require`: openai-claude-api-shim, which is ours and
+   standard-library only (Carl, 2026-11-01). Verify with `go list -m all` — two
+   lines. Adding a `require` is a decision, not a convenience: this library sits
    under a host's tree where every module it pulls in is one the host cannot
    refuse, and it runs a loop that executes tool calls. Reach for stdlib, or
    write the ~50 lines. (What that bought so far: mark3labs/mcp-go → `mcpmgr`'s

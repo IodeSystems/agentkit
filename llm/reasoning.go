@@ -76,6 +76,13 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 	if opts == nil {
 		return
 	}
+	if c.usesMessagesAPI() {
+		// The shim reads the effort and refuses nothing it does not know.
+		if opts.ReasoningEffort != "" {
+			body["reasoning_effort"] = opts.ReasoningEffort
+		}
+		return
+	}
 	switch c.dialect() {
 	case DialectOpenRouter:
 		applyOpenRouterReasoning(body, opts)
