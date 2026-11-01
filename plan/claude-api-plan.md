@@ -124,18 +124,31 @@ and need not block it.
 translation for every client. A client speaks OpenAI to corrallm and Claude works:
 aw4 and dun manage no Claude pathway, and no client holds a Claude key.
 
-The translation stays in agentkit, which corrallm already imports. agentkit is where
-this work belongs either way; corrallm is one more caller of it.
+**corrallm already has a translator.** `internal/proxy/anthropic.go` (51142ad, 1,055
+lines) is a shim for a backend with `api: anthropic`: OpenAI in, `/v1/messages`, OpenAI
+JSON or SSE back, with its own cache breakpoints. This file was written without
+knowing that. There are two translators now, and they should become one, in agentkit,
+which corrallm already imports.
+
+| | corrallm shim | `llm/anthropic.go` |
+|---|---|---|
+| Cache breakpoints | `placeCacheBreakpoints`, TTL option, cap of 4 | System and end of conversation, 5 minutes |
+| Non-streaming replies | Yes | Collected from the stream |
+| Unsupported content | Refused with a 400 | Dropped or passed as text |
+| Forced `tool_choice` | Sent; the provider's 400 is passed back | Sent, or `auto` on models that reject it |
+| Effort | Dropped | `output_config.effort` |
+| Broken transcripts | Not read | Repaired (missing results, orphans) |
+| Credentials | Key, caller auth | SDK: key or federation |
+| Transport | Raw HTTP | SDK |
 
 What it takes:
 
-- Export the two halves. The proxy has an OpenAI request and must write OpenAI SSE, so
-  it needs `anthropicParams` and `transcodeAnthropic` as public functions, not only
-  through `Client.ChatStream`.
-- Keep the request's cache breakpoints stable across clients: placement is in
-  `anthropicParams`, so a proxied client gets it without asking.
-- Pass through what corrallm already sends a client: usage with
-  `cache_read_input_tokens`, and `loop` from its own detector.
+- Export the two halves from agentkit. The proxy has an OpenAI request and must write
+  OpenAI SSE, so it needs them as public functions on bytes, not only through
+  `Client.ChatStream`.
+- Take the better half of each row above, then delete corrallm's copy.
+- Pass through what corrallm already sends a client: usage, and `loop` from its own
+  detector.
 - Gaps 1 to 13 are then corrallm's too. Each one fixed here is fixed there.
 
 **next:** nothing until the direct path has run in daily use. **risks:** a client that
