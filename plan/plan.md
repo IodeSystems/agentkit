@@ -46,6 +46,9 @@ final though.
 
 ## Active work
 
+◐ **Claude Messages API** (`llm/anthropic.go`, `docs/features.md`): live against api.anthropic.com through dun.
+**next:** tag it, then dun bumps. **risks:** thinking blocks are not replayed, and nothing has tested a long session of thinking and tools; preserved thinking applies only to blocks we send, so none. **blocking decisions:** whether to replay thinking and map `RetryBudget`/`OnRetry`. **optional:** `fallbacks` on refusal, 1h cache TTL, `count_tokens`.
+
 ### ◐ `loopdetector` — loops with no period (2026-10-31)
 
 Owner: centralize loop detection here, input is session + stream chunk (no cache),

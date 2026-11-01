@@ -62,6 +62,27 @@ string so the loop stays alive and the model can recover. A returned Go error
 aborts the Turn. A terminal tool returns `agent.ErrSessionClosed` to stop the
 loop after its result is persisted (used with `tool_choice=required` roles).
 
+### Claude Messages API
+
+A client pointed at `api.anthropic.com` (or with `MessagesAPI: true`) talks to
+`/v1/messages`. Callers change nothing: messages, tools, options and stream chunks
+stay in the OpenAI shape, `llm/anthropic.go` translates the request, and the stream
+is transcoded into what `readStream` already reads, so the loop watcher, usage and
+truncated-call handling are the same code. The reason is cost: Anthropic's
+OpenAI-compatible endpoint reads nothing from the prompt cache, and this path sets
+breakpoints on the system prompt and on the end of the conversation.
+
+With no key on the client, the SDK resolves credentials from the environment,
+Workload Identity Federation included. `ReasoningEffort` becomes
+`output_config.effort`; thinking cannot be switched off on every model, so `none`
+is `low`.
+
+Not carried: thinking blocks are not replayed (`Message` has no place for their
+signatures); temperature, seed and the penalties are not sent; `Grammar` and
+`ResponseFormat` are ignored; a forced `ToolChoice` becomes `auto`; a refusal is a
+stream error, with no fallback model. `RetryBudget` and `OnRetry` do not apply: the
+SDK retries, up to `Retry5xxAttempts` times.
+
 ### Runaway-loop detection (on by default)
 
 Two different failures, two guards.

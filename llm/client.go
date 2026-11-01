@@ -468,6 +468,10 @@ type Client struct {
 	// RepetitionGuard for why this is not opt-in.
 	Repetition RepetitionGuard
 
+	// MessagesAPI talks to the endpoint with the Claude Messages API whatever its
+	// address; api.anthropic.com always does. See anthropic.go.
+	MessagesAPI bool
+
 	// Watch, when set, REPLACES the Repetition guard for a stream: it is called
 	// once per stream with the messages that were sent, and what it returns
 	// sees every delta. loopdetector.Install is the usual way to set it. Repetition.Off
@@ -1387,6 +1391,9 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 // ChatStream sends a chat completion request with streaming enabled.
 // It returns a channel that emits StreamChunks as they arrive.
 func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
+	if c.usesMessagesAPI() {
+		return c.anthropicChatStream(ctx, messages, tools, opts)
+	}
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
@@ -1474,6 +1481,9 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
+	if c.usesMessagesAPI() {
+		return c.anthropicChat(ctx, messages, tools, opts)
+	}
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
