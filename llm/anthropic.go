@@ -23,7 +23,8 @@ package llm
 //     signatures. The model thinks again from the transcript.
 //   - temperature, seed and the penalties are not sent: current models reject
 //     them with a 400. Neither are Grammar and ResponseFormat.
-//   - A forced ToolChoice becomes auto: the newest models reject forced choice.
+//   - A forced ToolChoice is any or tool, except on the models that reject it
+//     (anthropicToolChoice): there it is auto, narrowed to the named tool.
 
 import (
 	"context"
@@ -143,6 +144,9 @@ func (c *Client) anthropicParams(messages []Message, tools []ToolDef, opts *Chat
 		}}
 	}
 	p.Messages = anthropicMessages(rest)
+	if opts != nil {
+		p.ToolChoice, tools = anthropicToolChoice(c.model, opts.ToolChoice, tools)
+	}
 	for _, t := range tools {
 		tool, err := anthropicTool(t)
 		if err != nil {
@@ -157,13 +161,61 @@ func (c *Client) anthropicParams(messages []Message, tools []ToolDef, opts *Chat
 		p.MaxTokens = int64(opts.MaxTokens)
 	}
 	p.StopSequences = opts.Stop
-	if opts.ToolChoice == "none" {
-		p.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
-	}
 	if e := anthropicEffort(c.model, opts.ReasoningEffort); e != "" {
 		p.OutputConfig.Effort = e
 	}
 	return p, nil
+}
+
+// noForcedToolChoice lists the models that answer a forced tool_choice (any or
+// tool) with a 400. By name, like anthropicEffort: which models reject it moves
+// by release, and a list is what can be read and fixed in one place.
+var noForcedToolChoice = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1"}
+
+// anthropicToolChoice maps ChatOpts.ToolChoice, and returns the tools to send.
+// "required" is any; {"type":"function","function":{"name":X}} is tool X; "none"
+// is none; anything else, malformed objects included, is auto (the zero value).
+//
+// On a model in noForcedToolChoice a forced choice is sent as auto instead. A
+// named tool is still honored as far as it can be: it is the only tool sent, so
+// the model can call that or answer in text, never call another. That is what a
+// host forcing one tool on a side call needs. "required" names no tool, so there
+// it is plain auto over every tool.
+func anthropicToolChoice(model, choice string, tools []ToolDef) (anthropic.ToolChoiceUnionParam, []ToolDef) {
+	var name string
+	switch {
+	case choice == "none":
+		return anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}, tools
+	case choice == "required":
+	case strings.HasPrefix(choice, "{"):
+		var obj struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal([]byte(choice), &obj) != nil || obj.Function.Name == "" {
+			return anthropic.ToolChoiceUnionParam{}, tools
+		}
+		name = obj.Function.Name
+	default:
+		return anthropic.ToolChoiceUnionParam{}, tools
+	}
+	for _, m := range noForcedToolChoice {
+		if !strings.HasPrefix(model, m) {
+			continue
+		}
+		auto := anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+		for _, t := range tools {
+			if name != "" && t.Function.Name == name {
+				return auto, []ToolDef{t}
+			}
+		}
+		return auto, tools
+	}
+	if name == "" {
+		return anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}, tools
+	}
+	return anthropic.ToolChoiceUnionParam{OfTool: &anthropic.ToolChoiceToolParam{Name: name}}, tools
 }
 
 // anthropicEffort is the effort to send, "" for none. Thinking cannot be turned

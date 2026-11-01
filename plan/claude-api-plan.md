@@ -35,21 +35,25 @@ The caller asks for something the Messages API does not take.
 
 | # | Status | Gap | Now | Proposal |
 |---|---|---|---|---|
-| 1 | ◻ | Forced `ToolChoice` (object or `required`) | Becomes `auto` | Send `tool_choice` on models that accept it. On Opus 5.5, Sonnet 5.5 and Fable 5.1, which return a 400, send only the named tool with `auto` |
+| 1 | ✅ | Forced `ToolChoice` (object or `required`) | `required` is `{type:any}`, a named function `{type:tool,name:X}` | Done. On Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1, which return a 400, it is `auto`; a named function is then the only tool sent, and `required` stays `auto` over every tool (`noForcedToolChoice`) |
 | 2 | ◻ | `ResponseFormat` | Ignored | Map to `output_config.format` |
 | 3 | ⏸ | `Grammar` | Ignored | None. It belongs to the heredoc transport, which this path does not use |
 | 4 | ⏸ | `Temperature`, `Seed`, penalties | Not sent | None. Current models reject them |
 
-Slice 1 and 2 matter to dun today:
+Only slice 1 mattered to dun today, and it is done:
 
-- `fork.go` forces one tool on a side call. With `auto` the model may answer in text
-  or call another tool, and the fork returns nothing.
-- `suggest.go` sets `ToolChoice` from `forkTools`, and `json_object` when it has no
-  tools.
+- `fork.go` forces one tool on a side call. With `auto` and every tool, the model
+  could answer in text or call another tool, and the fork returned nothing. On the
+  models that reject forced choice it can still answer in text, but cannot call
+  another tool.
+- `suggest.go` is not affected. It passes `tool_choice` `none`, which already worked,
+  and uses `ResponseFormat` only in heredoc mode, which this path does not use. So
+  gap 2 has no consumer yet.
 
-**next:** read `forkTools`, then write a test per case against the fake server in
-`llm/anthropic_test.go`. **risks:** which models reject forced choice changes by
-release; prefer asking `/v1/models` over a list in code. **blocking decisions:** none.
+**next:** gap 2 only when a host needs `ResponseFormat` on this path. **risks:** which
+models reject forced choice changes by release; `noForcedToolChoice` is a list in
+code, and asking `/v1/models` would be better if it ever reports this. **blocking
+decisions:** none.
 
 ## Gaps: Claude features the conversion flattens
 
@@ -105,8 +109,8 @@ which workload (Carl). He is an admin of his personal org, not of the corp one.
 
 ◻ Tag agentkit, then dun bumps it. dun needs no code change.
 
-**blocking decisions:** the version, and whether slices 1 and 2 go in first (Carl).
-Recommended: yes, because `fork.go` and `suggest.go` run on every provider.
+**blocking decisions:** the version (Carl). Slice 1 is in; slice 2 has no consumer
+and need not block it.
 
 ## Assumptions
 

@@ -253,3 +253,58 @@ func TestAnthropicEffort(t *testing.T) {
 		t.Errorf("default %q", e)
 	}
 }
+
+// A forced ToolChoice is forced where the model takes it, and on the models that
+// 400 on it, auto narrowed to the named tool rather than a failed request.
+func TestMessagesAPI_ForcedToolChoice(t *testing.T) {
+	defs := func(names ...string) []ToolDef {
+		var out []ToolDef
+		for _, n := range names {
+			var td ToolDef
+			td.Function.Name = n
+			td.Function.Parameters = map[string]any{"type": "object", "properties": map[string]any{}}
+			out = append(out, td)
+		}
+		return out
+	}
+	named := `{"type":"function","function":{"name":"answer"}}`
+	for _, tc := range []struct {
+		model, choice string
+		want          string // tool_choice as JSON, "" for not sent
+		tools         string
+	}{
+		{"claude-haiku-5-5", "required", `{"type":"any"}`, "exec,answer"},
+		{"claude-haiku-5-5", named, `{"name":"answer","type":"tool"}`, "exec,answer"},
+		{"claude-haiku-5-5", "none", `{"type":"none"}`, "exec,answer"},
+		{"claude-haiku-5-5", "auto", "", "exec,answer"},
+		{"claude-haiku-5-5", "", "", "exec,answer"},
+		{"claude-haiku-5-5", `{"type":"function"}`, "", "exec,answer"},
+		{"claude-opus-5-5", named, `{"type":"auto"}`, "answer"},
+		{"claude-sonnet-5-5", named, `{"type":"auto"}`, "answer"},
+		{"claude-fable-5-1", named, `{"type":"auto"}`, "answer"},
+		{"claude-mythos-5-1", named, `{"type":"auto"}`, "answer"},
+		{"claude-opus-5-5", "required", `{"type":"auto"}`, "exec,answer"},
+		{"claude-opus-5-5", `{"type":"function","function":{"name":"gone"}}`, `{"type":"auto"}`, "exec,answer"},
+		{"claude-opus-5-5", "none", `{"type":"none"}`, "exec,answer"},
+	} {
+		c, got := fakeMessages(t, evStart,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
+		c.model = tc.model
+		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, defs("exec", "answer"), &ChatOpts{ToolChoice: tc.choice}); err != nil {
+			t.Fatalf("%s %s: %v", tc.model, tc.choice, err)
+		}
+		req := *got
+		var choice string
+		if v, ok := req["tool_choice"]; ok {
+			b, _ := json.Marshal(v)
+			choice = string(b)
+		}
+		var names []string
+		for _, x := range req["tools"].([]any) {
+			names = append(names, x.(map[string]any)["name"].(string))
+		}
+		if choice != tc.want || strings.Join(names, ",") != tc.tools {
+			t.Errorf("%s %s: tool_choice %s tools %v, want %s %s", tc.model, tc.choice, choice, names, tc.want, tc.tools)
+		}
+	}
+}
