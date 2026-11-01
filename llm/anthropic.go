@@ -28,7 +28,7 @@ func (c *Client) streamBody(body io.ReadCloser) io.ReadCloser {
 	if !c.usesMessagesAPI() {
 		return body
 	}
-	return transcoded{Reader: shim.Transcode(body, shim.StreamOptions{RefusalAsError: true}), Closer: body}
+	return transcoded{Reader: shim.Transcode(body, shim.StreamOptions{RefusalAsError: true, Prices: c.ClaudePrices}), Closer: body}
 }
 
 // transcoded reads the transcoder and closes the response, which is what cuts a

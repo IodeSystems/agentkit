@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	shim "github.com/iodesystems/openai-claude-api-shim"
 )
 
 // fakeMessages answers /v1/messages with events, and keeps the request.
@@ -82,7 +84,7 @@ func TestMessagesAPI_TextAndUsage(t *testing.T) {
 	}
 	// 10 new at $4, 900 read at $0.20, 90 written at $5, 7 out at $20, per MTok.
 	want := (10*4 + 900*0.20 + 90*5 + 7*20) / 1e6
-	if !saw.Cost.Reported || saw.Cost.Currency != CurrencyUSD || saw.Cost.Amount < want*0.999 || saw.Cost.Amount > want*1.001 {
+	if !saw.Cost.Reported || saw.Cost.Currency != CurrencyUSDEstimate || saw.Cost.Amount < want*0.999 || saw.Cost.Amount > want*1.001 {
 		t.Errorf("cost %+v, want %v USD", saw.Cost, want)
 	}
 	req := *got
@@ -225,5 +227,18 @@ func TestOpenRouterCachesClaude(t *testing.T) {
 		if _, got := body["cache_control"]; got != tc.want {
 			t.Errorf("%s %s: %v", tc.url, tc.model, got)
 		}
+	}
+}
+
+// A host's price wins.
+func TestMessagesAPI_ClaudePrices(t *testing.T) {
+	c, _ := fakeMessages(t, `{"type":"message_start","message":{"id":"m","model":"claude-opus-5-5","usage":{"input_tokens":1000000}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}`, evStop)
+	c.ClaudePrices = shim.Prices{"claude-opus-5-5": {Input: 1}}
+	var saw Usage
+	c.OnUsage = func(u Usage) { saw = u }
+	msgChunks(t, c, []Message{{Role: "user", Content: "hi"}}, nil)
+	if saw.Cost.Amount != 1 || saw.Cost.Currency != CurrencyUSDEstimate {
+		t.Errorf("cost %+v", saw.Cost)
 	}
 }

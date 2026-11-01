@@ -90,7 +90,7 @@ func TestCostFromOpenRouterBodyStreaming(t *testing.T) {
 	m := (&Client{baseURL: "https://openrouter.ai/api/v1"}).metaFrom(http.Header{})
 	var u2 Usage
 	cost := 0.5
-	m.stamp(&u2, &cost)
+	m.stamp(&u2, &bodyCost{amount: cost})
 	if u2.Cost.Currency != CurrencyCredits {
 		t.Errorf("openrouter currency = %q", u2.Cost.Currency)
 	}
@@ -124,7 +124,7 @@ func TestBodyCostWinsOverHeader(t *testing.T) {
 	m := (&Client{}).metaFrom(h)
 	var u Usage
 	body := 2.0
-	m.stamp(&u, &body)
+	m.stamp(&u, &bodyCost{amount: body})
 	if u.Cost.Amount != 2 || u.Cost.Currency != CurrencyUSD {
 		t.Errorf("Cost = %+v", u.Cost)
 	}

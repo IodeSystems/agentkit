@@ -36,6 +36,10 @@ import (
 // Currencies a cost or budget can be in. Empty means the source did not say.
 const (
 	CurrencyUSD = "USD"
+	// CurrencyUSDEstimate is USD worked out from tokens and a price list, not a
+	// figure the provider reported. A currency of its own, so that it is never
+	// summed into a reported amount and every total shows which it is.
+	CurrencyUSDEstimate = "USD estimate"
 	// CurrencyCredits is OpenRouter's unit for usage.cost and its key limits.
 	// Its docs do not state the exchange rate, so it is not relabelled USD.
 	CurrencyCredits = "credits"
@@ -296,8 +300,6 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 		budget: keyBudgetFromHeader(h),
 	}
 	switch {
-	case c.usesMessagesAPI():
-		m.bodyCurrency = CurrencyUSD // the shim prices from Anthropic's USD list
 	case isLiteLLM(h):
 		m.bodyCurrency = CurrencyUSD // LiteLLM prices from its own USD cost map
 	case strings.Contains(c.baseURL, "openrouter.ai"):
@@ -309,11 +311,14 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 // stamp copies the response's header facts onto a Usage, and the body's
 // usage.cost when it had one. A cost in the body wins over the header: on a
 // stream only the body knows it, and where both exist they are one number.
-func (m responseMeta) stamp(u *Usage, bodyCost *float64) {
+func (m responseMeta) stamp(u *Usage, body *bodyCost) {
 	u.Server = m.timing
 	u.Cost = m.cost
-	if bodyCost != nil && *bodyCost >= 0 {
-		u.Cost = Cost{Amount: *bodyCost, Currency: m.bodyCurrency, Reported: true}
+	if body != nil && body.amount >= 0 {
+		u.Cost = Cost{Amount: body.amount, Currency: m.bodyCurrency, Reported: true}
+		if body.estimated {
+			u.Cost.Currency = CurrencyUSDEstimate
+		}
 	}
 	u.Limits = m.limits
 	u.KeyBudget = m.budget
@@ -327,14 +332,21 @@ func (m responseMeta) reported() bool {
 // usageCost pulls usage.cost out of a raw event or response. A second, narrow
 // decode rather than a field on Usage: the wire carries a bare number, and
 // Usage.Cost is a struct that also needs a currency the body does not state.
-func usageCost(data []byte) *float64 {
+func usageCost(data []byte) *bodyCost {
 	var v struct {
 		Usage struct {
-			Cost *float64 `json:"cost"`
+			Cost      *float64 `json:"cost"`
+			Estimated bool     `json:"cost_estimated"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(data, &v) != nil {
+	if json.Unmarshal(data, &v) != nil || v.Usage.Cost == nil {
 		return nil
 	}
-	return v.Usage.Cost
+	return &bodyCost{amount: *v.Usage.Cost, estimated: v.Usage.Estimated}
+}
+
+// bodyCost is a usage.cost, and whether the sender says it worked it out.
+type bodyCost struct {
+	amount    float64
+	estimated bool
 }

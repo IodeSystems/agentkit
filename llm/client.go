@@ -473,6 +473,10 @@ type Client struct {
 	// address; api.anthropic.com always does.
 	MessagesAPI bool
 
+	// ClaudePrices override the shim's price list for the estimated cost of a
+	// Messages API reply. A host loads its own.
+	ClaudePrices shim.Prices
+
 	// Watch, when set, REPLACES the Repetition guard for a stream: it is called
 	// once per stream with the messages that were sent, and what it returns
 	// sees every delta. loopdetector.Install is the usual way to set it. Repetition.Off
@@ -1542,7 +1546,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		return "", nil, fmt.Errorf("llm: read: %w", err)
 	}
 	if c.usesMessagesAPI() {
-		if raw, err = shim.Response(raw); err != nil {
+		if raw, err = shim.Response(raw, shim.StreamOptions{Prices: c.ClaudePrices}); err != nil {
 			return "", nil, fmt.Errorf("llm: messages reply: %w", err)
 		}
 	}
