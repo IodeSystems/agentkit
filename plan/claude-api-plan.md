@@ -110,6 +110,23 @@ Nothing depends on these; a host folds its own history. Each needs a field on
 - Batches
 - Thinking summaries (`display`)
 
+## Cost: three numbers
+
+Carl, 2026-11-01: estimated cost, remaining budget, and true cost when possible. The
+shim houses the estimator; dun and corrallm supply prices, each from its own file.
+
+| Number | Source | Status |
+|---|---|---|
+| Estimated cost | Shim, from tokens and prices; `CurrencyUSDEstimate` | ✅ |
+| True cost, gateway | `usage.cost` or a header, where the provider reports it (OpenRouter, LiteLLM) | ✅ already read |
+| True cost, Anthropic | `GET /v1/organizations/cost_report`: daily, org-wide, needs an Admin key (`sk-ant-admin…`) | ◻ |
+| Remaining, gateway | `KeyBudget`, where the provider reports it | ✅ already read |
+| Remaining, Anthropic | No balance in the docs read so far. A budget the host sets, minus spend | ◻ |
+
+**next:** a host-set budget in dun, reported beside spend. **risks:** the cost report is
+daily, so it reconciles past days and cannot price a turn; today stays an estimate.
+**blocking decisions:** whether to supply an Admin key, and the budget figure (Carl).
+
 ## Credentials
 
 ⏸ The client needs a key. Workload Identity Federation came free with the SDK and went
@@ -132,6 +149,9 @@ and need not block it.
 ⏸ Direction (Carl, 2026-11-01): the key lives in corrallm, and corrallm does this
 translation for every client. A client speaks OpenAI to corrallm and Claude works:
 aw4 and dun manage no Claude pathway, and no client holds a Claude key.
+
+**Moved (2026-11-01):** the shim v0.3.0 has the translation from both of corrallm's files;
+corrallm adopts it next. The notes below are from before that.
 
 **corrallm already has a translator.** `internal/proxy/anthropic.go` (51142ad, 1,055
 lines) is a shim for a backend with `api: anthropic`: OpenAI in, `/v1/messages`, OpenAI
