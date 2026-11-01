@@ -2,7 +2,10 @@ module github.com/iodesystems/agentkit
 
 go 1.26.2
 
-require github.com/anthropics/anthropic-sdk-go v1.84.0
+require (
+	github.com/anthropics/anthropic-sdk-go v1.84.0
+	github.com/anthropics/anthropic-sdk-go/v2 v2.4.0
+)
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
