@@ -84,7 +84,7 @@ error.
 | 10 | ◻ | Cache lifetime | 5 minutes; an idle session misses | Option for the 1-hour TTL | Small |
 | 11 | ◻ | Thinking blocks | Not replayed | See below | Large |
 | 12 | ◻ | Context measuring | `tokenize.go` routes do not know this API | `count_tokens` | Small |
-| 13 | ◻ | Spend | Confirmed live: no cost reaches a ledger, because Anthropic reports none. Usage has the tokens | Price from usage, cache writes at their rate | Small |
+| 13 | ✅ | Spend | The shim prices usage from Anthropic's list (`price.go`); `usage.cost` reaches `OnUsage` in USD | Keep `PricesAsOf` current | Done |
 
 **Thinking replay (11).** `Message` has no place for a signed block, so nothing is
 sent back, and no request has failed for it. That is 4 rounds on Opus 5.5, not a long

@@ -296,6 +296,8 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 		budget: keyBudgetFromHeader(h),
 	}
 	switch {
+	case c.usesMessagesAPI():
+		m.bodyCurrency = CurrencyUSD // the shim prices from Anthropic's USD list
 	case isLiteLLM(h):
 		m.bodyCurrency = CurrencyUSD // LiteLLM prices from its own USD cost map
 	case strings.Contains(c.baseURL, "openrouter.ai"):

@@ -37,7 +37,7 @@ func fakeMessages(t *testing.T, events ...string) (*Client, *map[string]any) {
 }
 
 const (
-	evStart = `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}}}`
+	evStart = `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"claude-opus-5-5","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":1}}}`
 	evStop  = `{"type":"message_stop"}`
 )
 
@@ -79,6 +79,11 @@ func TestMessagesAPI_TextAndUsage(t *testing.T) {
 	}
 	if saw.PromptTokens != 1000 {
 		t.Errorf("OnUsage %+v", saw)
+	}
+	// 10 new at $4, 900 read at $0.20, 90 written at $5, 7 out at $20, per MTok.
+	want := (10*4 + 900*0.20 + 90*5 + 7*20) / 1e6
+	if !saw.Cost.Reported || saw.Cost.Currency != CurrencyUSD || saw.Cost.Amount < want*0.999 || saw.Cost.Amount > want*1.001 {
+		t.Errorf("cost %+v, want %v USD", saw.Cost, want)
 	}
 	req := *got
 	if req["stream"] != true || req["max_tokens"].(float64) != 64000 {
