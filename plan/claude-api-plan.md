@@ -55,6 +55,12 @@ models reject forced choice changes by release; `noForcedToolChoice` is a list i
 code, and asking `/v1/models` would be better if it ever reports this. **blocking
 decisions:** none.
 
+Known cost of gap 1: tools lead the cached prefix, so a forced named tool on Opus
+5.5, Sonnet 5.5, Fable 5.1 or Mythos 5.1 narrows `tools` and that call misses the
+cache and rewrites it. Kept: a side call that can only call that tool is worth one
+miss, and dun's one such caller, `/remember`, is rare and reports a text reply as an
+error.
+
 ## Gaps: Claude features the conversion flattens
 
 | # | Status | Gap | Now | Proposal | Size |
