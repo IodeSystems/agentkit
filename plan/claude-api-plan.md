@@ -24,8 +24,11 @@ Measured live through dun, 2026-11-01:
 | No key on the client, `ANTHROPIC_API_KEY` in the environment | Works |
 | Workload Identity Federation | Not tested: needs an identity token |
 
-Decided (Carl, 2026-11-01): keep the SDK dependency for now. agentkit had none
-before; `anthropic-sdk-go` adds 22 lines to `go.mod` and 137 to `go.sum`, and every
+Decided (Carl, 2026-11-01): keep the SDK dependency for now. **This breaks invariant
+0 in `CLAUDE.md`, which still states the old rule**: `go list -m all` went from 1
+module to 73, and `llm` is no longer standalone. The invariant was not read when the
+SDK was added, and Carl was told the cost in lines, not that it broke a stated rule.
+A separate shim project (below) would restore it. agentkit had none before; `anthropic-sdk-go` adds 22 lines to `go.mod` and 137 to `go.sum`, and every
 consumer inherits them. Thinking text is not expected back from Claude, so an empty
 thinking stream is not a fault.
 
@@ -140,6 +143,23 @@ which corrallm already imports.
 | Broken transcripts | Not read | Repaired (missing results, orphans) |
 | Credentials | Key, caller auth | SDK: key or federation |
 | Transport | Raw HTTP | SDK |
+
+Also in scope, from corrallm-f2's review of this table (it read the code and ran
+nothing):
+
+- `internal/proxy/messages.go` (1,017 lines) is a reverse translator: Anthropic in,
+  OpenAI backends out. Claude Code depends on it. "One translator" must say whether
+  it stays.
+- `callerAuth` is a subscription passthrough: the caller's own sign-in goes to
+  Anthropic. "The key lives in corrallm" does not cover that path.
+- Caller-placed `cache_control` markers are kept verbatim and count against the cap
+  of 4.
+- Cache writes bill at 1.25× (2× for 1h); corrallm's cost model counts them at 1×.
+- `loop`: the detector sits behind the translator and reads OpenAI events, so a shared
+  translator must keep emitting OpenAI SSE ahead of it. `/v1/messages` is not watched.
+
+Proposed (Carl, undecided): a separate Go project, `openai-claude-api-shim`, pure
+bytes, no HTTP, no SDK, no agentkit import. agentkit and corrallm both call it.
 
 What it takes:
 
