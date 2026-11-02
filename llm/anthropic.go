@@ -11,8 +11,13 @@ package llm
 // 11,484 on /v1/messages.
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"strings"
+	"time"
 
 	shim "github.com/iodesystems/openai-claude-api-shim"
 )
@@ -36,4 +41,62 @@ func (c *Client) streamBody(body io.ReadCloser) io.ReadCloser {
 type transcoded struct {
 	io.Reader
 	io.Closer
+}
+
+// aliasTTL is how long an alias stays resolved. A new model is a new alias target,
+// and a session should not change model under itself more than it has to.
+const aliasTTL = time.Hour
+
+// wireModel is the model to send: an alias (opus-latest) resolved from the
+// endpoint's model list, anything else as it is. A list that cannot be read leaves
+// the alias, and the provider's refusal says what is wrong.
+func (c *Client) wireModel(ctx context.Context) string {
+	if !c.usesMessagesAPI() || !shim.IsAlias(c.model) {
+		return c.model
+	}
+	c.aliasMu.Lock()
+	defer c.aliasMu.Unlock()
+	if c.aliasID != "" && time.Since(c.aliasAt) < aliasTTL {
+		return c.aliasID
+	}
+	id, err := c.resolveAlias(ctx)
+	if err != nil {
+		log.Printf("llm: could not resolve %s: %v", c.model, err)
+		if c.aliasID != "" {
+			return c.aliasID // the last answer beats none
+		}
+		return c.model
+	}
+	c.aliasID, c.aliasAt = id, time.Now()
+	return id
+}
+
+func (c *Client) resolveAlias(ctx context.Context) (string, error) {
+	u := c.baseURL
+	if !strings.HasSuffix(u, "/v1") {
+		u += "/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"/models?limit=100", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", shim.APIVersion)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", statusError(resp)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	id, ok := shim.LatestIn(body, c.model)
+	if !ok {
+		return "", fmt.Errorf("no model in that line")
+	}
+	return id, nil
 }

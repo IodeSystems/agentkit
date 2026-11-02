@@ -242,3 +242,30 @@ func TestMessagesAPI_ClaudePrices(t *testing.T) {
 		t.Errorf("cost %+v", saw.Cost)
 	}
 }
+
+// opus-latest goes out as the newest Opus, and the list is asked once.
+func TestMessagesAPI_Alias(t *testing.T) {
+	lists := 0
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/models") {
+			lists++
+			fmt.Fprint(w, `{"data":[{"id":"claude-opus-5","line":"opus","created_at":"2026-07-24T00:00:00Z"},{"id":"claude-opus-5-5","line":"opus","created_at":"2026-09-21T00:00:00Z"}]}`)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &sent)
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "opus-latest")
+	c.MessagesAPI = true
+	for range 2 {
+		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sent["model"] != "claude-opus-5-5" || lists != 1 {
+		t.Errorf("sent %v after %d lists", sent["model"], lists)
+	}
+}

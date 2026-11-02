@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -472,6 +473,10 @@ type Client struct {
 	// MessagesAPI talks to the endpoint with the Claude Messages API whatever its
 	// address; api.anthropic.com always does.
 	MessagesAPI bool
+
+	aliasMu sync.Mutex
+	aliasID string
+	aliasAt time.Time
 
 	// ClaudePrices override the shim's price list for the estimated cost of a
 	// Messages API reply. A host loads its own.
@@ -1416,7 +1421,7 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 // It returns a channel that emits StreamChunks as they arrive.
 func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
 	body := map[string]any{
-		"model":    c.model,
+		"model":    c.wireModel(ctx),
 		"messages": messages,
 		"stream":   true,
 		// Ask the provider for token usage on the final stream chunk.
@@ -1503,7 +1508,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
 	body := map[string]any{
-		"model":    c.model,
+		"model":    c.wireModel(ctx),
 		"messages": messages,
 		"stream":   false,
 	}
