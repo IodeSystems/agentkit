@@ -33,9 +33,15 @@ type Backpressure struct {
 	// "queue-timeout" (waited and never got a slot), "spill" (routed elsewhere),
 	// "exhausted" (budget/quota gone).
 	Reason string
+	// Type is the error's type as the server names it, such as corrallm's
+	// "budget_exhausted". Empty when it sent none.
+	Type string
 	// RetryAfter is when the server says to come back. Ok=false from
 	// backpressureFrom means it did not say.
 	RetryAfter time.Duration
+	// AskedWait is the body's retry_after as sent. RetryAfter is clamped for
+	// the retry loop; a spend window can be days. Zero when it sent none.
+	AskedWait time.Duration
 	// Capacity / InFlight / Waiting describe the queue: total slots, slots busy,
 	// and requests already waiting. Zero = not reported.
 	Capacity, InFlight, Waiting int
@@ -91,6 +97,7 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 		RetryAfter int `json:"retry_after"`
 		Error      struct {
 			Message    string `json:"message"`
+			Type       string `json:"type"`
 			Reason     string `json:"reason"`
 			RetryAfter int    `json:"retry_after"`
 			Capacity   int    `json:"capacity"`
@@ -102,6 +109,8 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 	if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {
 		bp.Reason = parsed.Error.Reason
 		bp.Message = parsed.Error.Message
+		bp.Type = parsed.Error.Type
+		bp.AskedWait = time.Duration(parsed.Error.RetryAfter) * time.Second
 		if bp.Capacity == 0 {
 			bp.Capacity = parsed.Error.Capacity
 		}
