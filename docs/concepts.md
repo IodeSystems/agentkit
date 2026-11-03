@@ -172,7 +172,16 @@ completion tokens billed this session, **Active** = the size of the current
 ## Where orchestration stops
 
 agentkit gives you a `Session` and the loop. It does not decide *which* session
-runs, *when*, or *why*, nor does it model roles or a task graph. That's your
+runs, *when*, or *why*, nor does it model roles or your task graph. That's your
 harness. The line is intentional: a client that couldn't run a tool loop would
 force every host to re-wrap one; a client that owned scheduling would force
 every host to adopt its orchestration model.
+
+A plan the *model* keeps is on the other side of the line: it decides none of
+who, when or why. The optional `taskgraph` package holds one — nodes with
+`done_when`, the edges they wait on, the `plan` tool — shared by a main agent
+and its sub-agents through one `taskgraph.Store` you provide. Each write returns
+`[]Change` naming the owners it touches (a node's owner; the owners of its
+dependents when its status moved); you deliver them, typically as
+`Session.Inject` of a `KindNotification` into each owner's session. What an
+owner is, who may change what, approval, and delegation stay yours.

@@ -20,8 +20,9 @@ TABLESTAKES every real agent client needs, so consumers don't re-wrap them:
 - turn **lifecycle** — `OnTurnStart` / `OnTurnEnd` carrying WHY a turn ended
 - compaction **lifecycle** — `OnCompactionStart` / `OnCompactionComplete`
 
-It does NOT own **orchestration** (roles, task DAG, scheduling, when/why to
-run). That's the harness's job. autowork3 is one consumer; the user's
+It does NOT own **orchestration** (roles, the host's task DAG, scheduling,
+when/why to run). That's the harness's job. A model-kept plan is not
+orchestration: optional `taskgraph` (decided 2026-11-03). autowork3 is one consumer; the user's
 separate **claude-openai project** is the intended second consumer (validate
 the interface against it — path currently unknown, find it).
 
@@ -48,6 +49,26 @@ final though.
 
 ◐ **Claude Messages API** (`llm/anthropic.go`, `docs/features.md`): live against api.anthropic.com through dun.
 Gaps, proposals, next steps and blocking decisions: `plan/claude-api-plan.md`.
+
+### ◐ `taskgraph` — a plan the model keeps, shared by sub-agents (2026-11-03)
+Ported from dun's `internal/taskgraph` (dun `098c15b`), on Carl's go. Graph,
+views and `plan` tool as dun had them, plus: `Store` is interface-only (the
+integration provides it; dun's `MemStore` stays in dun), `Diff`/`Apply` compute
+per-write `[]Change` with `Tell` = owners to notify (node owner before/after;
+dependents' owners on a status move; never the actor), `WithOnChange` hands
+the tool's kept changes to the host. Owner label in views is `(owner X)`, was
+`(agent X)`.
+- Decided: boundary text narrowed in CLAUDE.md / README / concepts.md / here.
+  Moved before dun's delegation shipped and with one consumer — Carl's call.
+- **next:** dun switches to `agentkit/taskgraph` (needs an agentkit tag or a
+  `replace`; dun is on v0.21.0), keeps its own MemStore, routes `OnChange`.
+- **risks:** `Tell` rules untested against real delegation; the delegator is
+  NOT told (host adds it — the graph has no delegator record). `List()` ends
+  with `ReadyLine("")`, the main agent's ready set, even for a sub-agent's `show`.
+  `Node.Files` is carried but unenforced.
+- **blocking decisions:** none open.
+- **optional extensions:** a per-owner view (subtree + what it waits on,
+  read-only) for a sub-agent's `show`; a `delegate` action.
 
 ### ◐ `loopdetector` — loops with no period (2026-10-31)
 

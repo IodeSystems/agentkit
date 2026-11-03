@@ -7,7 +7,9 @@ Guidance for agents working in this repo. (User/global conventions still apply.)
 `github.com/iodesystems/agentkit` — a batteries-included Go client for
 OpenAI-compatible endpoints. It owns the tablestakes every agent client needs
 (tool loop, compaction, injection, lifting, batching, validation, notification
-lifecycle) but **NOT** orchestration (roles, task DAG, scheduling). A host
+lifecycle) but **NOT** orchestration (roles, the host's task DAG, scheduling:
+which session runs, when, why). A plan the MODEL keeps for itself is not
+orchestration and lives in the optional `taskgraph` (Carl, 2026-11-03). A host
 (autowork3 is the first consumer) drives an `agent.Session` and implements the
 small interfaces. See `README.md` + `docs/` for the external story.
 
@@ -23,6 +25,11 @@ files/    mountable file toolset (read/edit/write/grep/list, opt-in delete/move)
           shells out to rg/git when on PATH, works without either.
 loopdetector/  opt-in loop detection from session + stream: a count and a tolerance.
           imports llm + stdlib only. Hosts install it; agent does not import it.
+taskgraph/  opt-in model-kept plan: DAG of nodes, the `plan` tool, and Diff/Apply
+          (what a write changed, which owners to tell). Shared by a main agent and
+          its sub-agents through ONE host-provided Store (no impl shipped). Owner is
+          opaque; permission, approval, delegation and delivery are host hooks.
+          imports llm + stdlib only; agent does not import it. Ported from dun.
 examples/agentkit-demo/  runnable CLI, one subcommand per feature.
 plan/     living plan. Only plan.md exists today; it carries its own Icebox
           section rather than the separate done.md / icebox.md the global

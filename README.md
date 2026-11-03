@@ -20,9 +20,10 @@ have to wrap them yourself:
   whole record of what was folded
 - a fair-share **429/backpressure** retry that honors the server's `retry_after`
 
-What agentkit does **not** own is **orchestration** — roles, a task DAG,
+What agentkit does **not** own is **orchestration** — roles, your task DAG,
 scheduling, when/why to run. That's your harness's job. agentkit gives it a
-`Session` to drive and a few small interfaces to implement.
+`Session` to drive and a few small interfaces to implement. (A plan the model
+keeps for itself is a tool, not orchestration: optional `taskgraph`.)
 
 ```
 go get github.com/iodesystems/agentkit
@@ -38,6 +39,7 @@ Requires Go 1.26+.
 | `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | stdlib only |
 | `agent`  | the tablestakes: `Session.Turn` loop, `Shaper`, injection, lifting, validation, notification lifecycle | `llm` only |
 | `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move; read alone also lists a directory and, with grep, searches a file or a tree) rooted at one directory, with capped reads, exact-once edits and .gitignore-aware search (`rg` when on PATH) | `llm` only |
+| `taskgraph` | a plan the model keeps: a DAG of tasks with `done_when`, the `plan` tool, and per-write changes naming which owners (sub-agents sharing the plan) to notify. Storage, permission and delivery are the host's | `llm` only |
 
 **agentkit has no third-party dependencies at all** — `go.mod` declares a
 module path, a Go version, and nothing else:
