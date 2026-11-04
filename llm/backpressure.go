@@ -57,6 +57,22 @@ type Backpressure struct {
 	// The client echoes this automatically (see postWithRetry). Empty for a
 	// server that does not issue tickets.
 	Ticket string
+	// Budgets names each spent budget behind a refusal: whose it is, its spend
+	// against its limit, and when it has room again. corrallm sends it on a 402
+	// (see BudgetSpentError) and may on a 429. Nil when the server sent none.
+	Budgets []SpentBudget
+}
+
+// SpentBudget is one full hard budget, as corrallm's refusal body reports it
+// (error.budgets[]). Fields are kept as sent.
+type SpentBudget struct {
+	Scope   string  `json:"scope"`   // ledger scope, e.g. "key:sk-x", "cred:fireworks/default"
+	Owner   string  `json:"owner"`   // whose budget, in words
+	Window  string  `json:"window"`  // e.g. "usd/calendar-day"
+	Used    float64 `json:"used"`    // spent in the window
+	Limit   float64 `json:"limit"`   // the window's limit
+	RoomAt  string  `json:"room_at"` // RFC 3339: when it admits again; empty = never (one-off)
+	Summary string  `json:"summary"` // the sentence the message uses
 }
 
 // Queued reports whether the server described a queue we are standing in, i.e.
@@ -96,14 +112,15 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 	var parsed struct {
 		RetryAfter int `json:"retry_after"`
 		Error      struct {
-			Message    string `json:"message"`
-			Type       string `json:"type"`
-			Reason     string `json:"reason"`
-			RetryAfter int    `json:"retry_after"`
-			Capacity   int    `json:"capacity"`
-			InFlight   int    `json:"in_flight"`
-			Waiting    int    `json:"waiting"`
-			Ticket     string `json:"ticket"`
+			Message    string        `json:"message"`
+			Type       string        `json:"type"`
+			Reason     string        `json:"reason"`
+			RetryAfter int           `json:"retry_after"`
+			Capacity   int           `json:"capacity"`
+			InFlight   int           `json:"in_flight"`
+			Waiting    int           `json:"waiting"`
+			Ticket     string        `json:"ticket"`
+			Budgets    []SpentBudget `json:"budgets"`
 		} `json:"error"`
 	}
 	if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {
@@ -111,6 +128,7 @@ func backpressureFrom(h http.Header, body []byte) (Backpressure, bool) {
 		bp.Message = parsed.Error.Message
 		bp.Type = parsed.Error.Type
 		bp.AskedWait = time.Duration(parsed.Error.RetryAfter) * time.Second
+		bp.Budgets = parsed.Error.Budgets
 		if bp.Capacity == 0 {
 			bp.Capacity = parsed.Error.Capacity
 		}

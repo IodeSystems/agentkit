@@ -30,6 +30,12 @@ func TransientUpstream(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A spent budget is the caller's account, not the server going away; its
+	// message can say "limit" or quote a wait, so reject it before the text match.
+	var spent *BudgetSpentError
+	if errors.As(err, &spent) {
+		return false
+	}
 	// Connection-level faults, without string matching where the type is known.
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, syscall.EPIPE) {

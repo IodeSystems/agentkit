@@ -942,6 +942,24 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 
 		status := resp.StatusCode
 		switch {
+		case status == http.StatusPaymentRequired:
+			// 402: a budget that refills at a RESET TIME (calendar day or month,
+			// or a total) is spent. corrallm answers it with 402 rather than 429
+			// so this loop does not honor a retry_after of hours or days: before,
+			// a 429 carrying one slept the whole retryAfterCeiling before the
+			// caller could fall back. Not retried and not slept on — the body is
+			// parsed like a 429's and handed back at once as BudgetSpentError,
+			// with one RetryGiveUp event for hosts that act on the hook.
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			bp, _ := backpressureFrom(resp.Header, bodyBytes)
+			spent := &BudgetSpentError{Status: status, BP: bp, Body: string(bodyBytes)}
+			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+				Body:    strings.TrimSpace(firstLineOfBody(string(bodyBytes))),
+				Elapsed: time.Since(start), Budget: budget, BP: &bp,
+				Reason: "not retried: " + spent.Error()})
+			return nil, spent
 		case status == http.StatusTooManyRequests:
 			// 429 path: drain + close so the connection can be
 			// reused for the retry. A queue-timeout retries at once (see
@@ -1978,6 +1996,37 @@ type TruncatedToolCallError struct {
 
 func (e *TruncatedToolCallError) Error() string {
 	return fmt.Sprintf("llm: tool-call arguments truncated (status %d) — context likely exhausted mid-write", e.Status)
+}
+
+// BudgetSpentError reports an HTTP 402: a spend budget that refills at a reset
+// time is gone. corrallm types it as budget_exhausted, allocation_exhausted or
+// allocation_spent (BP.Type); BP.AskedWait is the time to the reset (absent for
+// allocation_spent, a meaningless 1s for a total), and BP.Budgets names each
+// spent budget.
+//
+// Typed, and never retried, because the useful response is the CALLER'S: fall
+// back to another model or stop. Waiting it out is hours. Its Error() text
+// deliberately avoids the words TransientUpstream matches, and TransientUpstream
+// also rejects the type outright — a spent budget is not the server going away.
+type BudgetSpentError struct {
+	Status int
+	BP     Backpressure
+	Body   string
+}
+
+func (e *BudgetSpentError) Error() string {
+	s := fmt.Sprintf("llm: budget spent (status %d", e.Status)
+	if e.BP.Type != "" {
+		s += ", " + e.BP.Type
+	}
+	s += ", not retried)"
+	if e.BP.Message != "" {
+		return s + ": " + e.BP.Message
+	}
+	if body := strings.TrimSpace(firstLineOfBody(e.Body)); body != "" {
+		return s + ": " + body
+	}
+	return s
 }
 
 // InputTooLargeError reports that the endpoint refused the REQUEST for its size

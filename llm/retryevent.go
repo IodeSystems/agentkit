@@ -63,8 +63,9 @@ type RetryEvent struct {
 	// gets a chance to. Both 0 outside the 5xx path.
 	Attempts5xx, Max5xx int
 	// BP carries the queue detail a fair-share proxy attached to a 429 — slots
-	// busy, requests ahead, why. Non-nil only on the 429 path, and only worth
-	// rendering when BP.Queued().
+	// busy, requests ahead, why. Non-nil only on the 429 path and on the
+	// RetryGiveUp a 402 (spent budget) emits, and only worth rendering as a
+	// queue when BP.Queued().
 	BP *Backpressure
 	// ServerAsked is true when Delay is what the SERVER instructed (Retry-After or
 	// a backpressure body) rather than our own exponential schedule. Worth saying
