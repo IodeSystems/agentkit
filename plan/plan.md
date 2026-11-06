@@ -21,7 +21,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes). 
 - **resume condition:** `a18fe07` is pushed and deployed. Waits on: Carl.
 - **next:** fold corrallm's translator use of the shim into `claude-api-plan.md` "Future: corrallm owns Claude".
 - **risks:** corrallm's `--convert-pdfs` (default on) rewrites PDF parts to pdftotext text before the shim, for every model including Claude. A native `document` block is reached only when conversion is off or fails. Shim errors (incl. `ErrUnsupportedContent`) surface as 400 `invalid_request_error`.
-- **blocking decisions (Carl):** a per-model opt-out of PDF conversion, so Claude gets native PDFs. This is a corrallm behavior change and has not been made.
+- **decided (Carl, 2026-11-06):** PDF conversion off by default unless a conversion strategy is configured (`convert.pdf: text|vision`, global or per model). Sent to corrallm-12 to implement; not yet confirmed. Assumption: "strategy exists" means set explicitly in config, not the `DefaultConvert` built-in.
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### ◐ `taskgraph` — a plan the model keeps, shared by sub-agents (2026-11-03)
