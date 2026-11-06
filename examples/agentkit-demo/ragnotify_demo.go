@@ -17,7 +17,7 @@ import (
 // injects POINTER notices (id + score + one line, "fetch it with the tool").
 //
 // This demo is OFFLINE: the DocFinder is a keyword-overlap stub over a tiny
-// corpus (a real one is ragnotify.MCPFinder over a ragtag MCP server). It shows
+// corpus (a real one calls a retrieval MCP server and parses with ragnotify.ParseHits). It shows
 // the pointer notice, the MinScore threshold, and per-doc dedup across passes.
 
 func runRagnotify(ctx context.Context, _ config) error {

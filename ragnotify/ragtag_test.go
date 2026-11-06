@@ -1,6 +1,9 @@
 package ragnotify
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 func TestParseHits_Shapes(t *testing.T) {
 	cases := []struct {
@@ -77,5 +80,12 @@ func TestClip(t *testing.T) {
 	}
 	if got := clip("aaaa", 2); got != "aa…" {
 		t.Errorf("clip = %q", got)
+	}
+}
+
+func TestClipDoesNotSplitARune(t *testing.T) {
+	got := clip("日本語", 4) // byte 4 is inside the second rune
+	if !utf8.ValidString(got) {
+		t.Errorf("clip produced invalid UTF-8: %q", got)
 	}
 }

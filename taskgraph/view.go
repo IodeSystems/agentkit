@@ -41,10 +41,13 @@ func (g *Graph) Tree() []Row {
 	return rows
 }
 
-// Clip cuts s to max runes, with an ellipsis.
+// Clip cuts s to max runes, with an ellipsis; "" when max is not positive.
 func Clip(s string, max int) string {
 	if utf8.RuneCountInString(s) <= max {
 		return s
+	}
+	if max <= 0 {
+		return ""
 	}
 	r := []rune(s)
 	return string(r[:max-1]) + "…"
@@ -168,6 +171,9 @@ func (g *Graph) Brief(owner string) string {
 				}
 			}
 		}
+	}
+	if total == 0 {
+		return "" // open work belongs to other owners
 	}
 	lines := []string{fmt.Sprintf("plan: %d of %d done", done, total)}
 	if len(doing) > 0 {

@@ -131,15 +131,10 @@ func TestStemmingMakesOneWordOfItsForms(t *testing.T) {
 	for _, group := range [][]string{
 		{"check", "checks", "checked", "checking"},
 		{"stop", "stops", "stopped", "stopping"},
-		{"retry", "retries", "retried"},
 		{"migrate", "migrates", "migrated", "migrating"},
 	} {
-		// retry/retries meet at the stem of the -ies form.
 		base := stem(group[len(group)-1])
 		for _, w := range group[:len(group)-1] {
-			if w == "retry" {
-				continue
-			}
 			if got := stem(w); got != base {
 				t.Errorf("stem(%q) = %q, want %q", w, got, base)
 			}

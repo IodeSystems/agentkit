@@ -138,3 +138,31 @@ func TestLoginArgs(t *testing.T) {
 		t.Errorf("%s", got)
 	}
 }
+
+func TestUnauthorizedIsNoCredential(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":{"message":"expired"}}`)
+	}))
+	defer srv.Close()
+	_, err := Source{KeyFile: keyFile(t), Base: srv.URL}.MonthToDate(context.Background(), now)
+	if !errors.Is(err, ErrNoCredential) {
+		t.Errorf("a 401 is not ErrNoCredential: %v", err)
+	}
+}
+
+func TestPaginationStopsAtPageCap(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		fmt.Fprint(w, `{"data":[],"has_more":true,"next_page":"again"}`)
+	}))
+	defer srv.Close()
+	_, err := Source{KeyFile: keyFile(t), Base: srv.URL}.MonthToDate(context.Background(), now)
+	if err == nil {
+		t.Fatal("endless pagination returned no error")
+	}
+	if n > maxPages {
+		t.Errorf("%d requests, cap is %d", n, maxPages)
+	}
+}

@@ -1,79 +1,20 @@
-// Package ragnotify implements agent.DocFinder over an MCP retrieval server
-// (e.g. ragtag) — the concrete half of agentkit's proactive-retrieval seam.
+// Package ragnotify parses an MCP retrieval server's search result (e.g.
+// ragtag, raglit) into []agent.DocHit, for a host's agent.DocFinder.
 //
-// agent owns the neutral machinery (DocFinder + FinderPreparer in
-// agent/finder.go): observe the conversation, gate/cap/dedup, inject pointer
-// notices. This package owns the one thing agent must NOT (invariant #2: agent
-// imports only llm + mcpmgr + stdlib) — talking to an actual retrieval backend.
-// It depends on agent + mcpmgr only.
-//
-// The whole integration is: point the SAME MCP server at both channels.
-//   - Explicit: advertise the server's search tool to the model normally
-//     (the mcpToolDefs bridge). The model calls it when it knows to.
-//   - Passive: wrap that same tool in an MCPFinder and hand it to
-//     agent.FinderPreparer. A pointer notice says "doc X looks relevant"; the
-//     model fetches the body with the tool it already has.
-//
-// Reranking is the server's job. This finder passes the conversation text
-// straight to the tool and trusts the ordering/scores it returns — agent's
-// MinScore/MaxHits only trims a pre-ranked list. If ragtag returns raw vector
-// top-k without a reranker, expect noise regardless of MinScore.
+// Reranking is the server's job: ParseHits trusts the ordering and scores it
+// returns, and agent's MinScore/MaxHits only trims a pre-ranked list. If the
+// server returns raw vector top-k without a reranker, expect noise regardless
+// of MinScore.
 package ragnotify
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/iodesystems/agentkit/agent"
-	"github.com/iodesystems/agentkit/mcpmgr"
 )
-
-// Opts configures how the conversation text maps onto an MCP tool call and how
-// the tool's JSON result maps back onto []agent.DocHit. All fields default; a
-// backend with different field names overrides them without touching agent.
-type Opts struct {
-	// QueryArg is the tool argument that carries the query text. Default "query".
-	QueryArg string
-	// ExtraArgs are merged into every call (e.g. {"top_k": 8, "strategy":
-	// "hybrid"}) — this is where you pin the server's rerank strategy.
-	ExtraArgs map[string]any
-	// Join combines the observed entry texts into one query string. Default:
-	// newline-join (most recent conversation turns as one query).
-	Join func(texts []string) string
-}
-
-// MCPFinder returns an agent.DocFinder backed by an MCP search tool on mgr.
-// serverID + toolName name the ragtag server and its search tool (the same tool
-// you advertise to the model for the explicit channel).
-func MCPFinder(mgr *mcpmgr.Manager, serverID, toolName string, opts Opts) agent.DocFinder {
-	if opts.QueryArg == "" {
-		opts.QueryArg = "query"
-	}
-	if opts.Join == nil {
-		opts.Join = func(texts []string) string { return strings.Join(texts, "\n") }
-	}
-	return &mcpFinder{mgr: mgr, serverID: serverID, toolName: toolName, opts: opts}
-}
-
-type mcpFinder struct {
-	mgr      *mcpmgr.Manager
-	serverID string
-	toolName string
-	opts     Opts
-}
-
-func (f *mcpFinder) Find(ctx context.Context, texts []string) ([]agent.DocHit, error) {
-	args := map[string]any{f.opts.QueryArg: f.opts.Join(texts)}
-	maps.Copy(args, f.opts.ExtraArgs)
-	raw, err := f.mgr.CallTool(ctx, f.serverID, f.toolName, args)
-	if err != nil {
-		return nil, fmt.Errorf("ragnotify: call %s: %w", f.toolName, err)
-	}
-	return ParseHits(raw)
-}
 
 // ragHit is the expected per-document shape. Field names are lenient — a hit
 // may spell the id/score/snippet several common ways.
@@ -152,6 +93,10 @@ func firstNonEmpty(ss ...string) string {
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Back off to a rune boundary: a cut inside a rune is invalid UTF-8.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

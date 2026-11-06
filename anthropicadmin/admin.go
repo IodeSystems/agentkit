@@ -150,6 +150,10 @@ func (s Source) MonthToDate(ctx context.Context, now time.Time) (Spend, error) {
 	return Spend{USD: cents / 100, Since: since}, nil
 }
 
+// maxPages bounds the pagination loop: a month is a page or two, so a server
+// that never stops saying has_more is broken, and the loop would spend forever.
+const maxPages = 100
+
 func (s Source) costCents(ctx context.Context, since time.Time) (float64, error) {
 	base := s.Base
 	if base == "" {
@@ -161,7 +165,10 @@ func (s Source) costCents(ctx context.Context, since time.Time) (float64, error)
 	}
 	var total float64
 	page := ""
-	for {
+	for pages := 0; ; pages++ {
+		if pages >= maxPages {
+			return 0, fmt.Errorf("cost report: still paging after %d pages", maxPages)
+		}
 		q := url.Values{"starting_at": {since.Format(time.RFC3339)}, "bucket_width": {"1d"}, "limit": {"31"}}
 		if page != "" {
 			q.Set("page", page)
@@ -182,6 +189,9 @@ func (s Source) costCents(ctx context.Context, since time.Time) (float64, error)
 		resp.Body.Close()
 		if err != nil {
 			return 0, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return 0, fmt.Errorf("%w: the credential was rejected (expired or invalid): %s", ErrNoCredential, firstLine(body))
 		}
 		if resp.StatusCode == http.StatusForbidden {
 			return 0, fmt.Errorf("%w: %s", ErrNotPermitted, firstLine(body))

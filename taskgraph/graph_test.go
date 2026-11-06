@@ -451,3 +451,24 @@ func TestBriefIsPerOwner(t *testing.T) {
 		t.Errorf("agent 1:\n%s", got)
 	}
 }
+
+func TestBriefIsEmptyForOwnerWithNoNodes(t *testing.T) {
+	g := &Graph{}
+	if _, err := g.Add(Node{Title: "a", DoneWhen: "a works", Owner: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.Brief("me"); got != "" {
+		t.Errorf("brief for an owner with no nodes = %q, want empty", got)
+	}
+}
+
+func TestClipNonPositiveMaxDoesNotPanic(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		if got := Clip("abc", n); got != "" {
+			t.Errorf("Clip(abc, %d) = %q", n, got)
+		}
+	}
+	if got := Clip("abc", 1); got != "…" {
+		t.Errorf("Clip(abc, 1) = %q", got)
+	}
+}

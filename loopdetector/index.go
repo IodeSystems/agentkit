@@ -73,7 +73,7 @@ func stem(t string) string {
 	if n := len(t); n >= 4 && t[n-1] == t[n-2] && !strings.ContainsRune("aeiou", rune(t[n-1])) {
 		t = t[:n-1]
 	}
-	// so does a final e: "use" and "using" meet at "us".
+	// so does a final e: "migrate" and "migrating" meet at "migrat".
 	if n := len(t); n >= 4 && t[n-1] == 'e' {
 		t = t[:n-1]
 	}
