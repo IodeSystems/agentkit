@@ -364,7 +364,7 @@ func (c *stdioClient) call(ctx context.Context, method string, params, out any) 
 }
 
 // notify sends a fire-and-forget notification. No id, no reply.
-func (c *stdioClient) notify(method string, params any) error {
+func (c *stdioClient) notify(_ context.Context, method string, params any) error {
 	select {
 	case <-c.done:
 		return errTransportClosed

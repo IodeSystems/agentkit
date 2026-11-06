@@ -45,15 +45,22 @@ func watchStderr(r io.Reader, onLine func(string)) *stderrTail {
 	}
 	go func() {
 		defer close(t.done)
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 0, 8*1024), 1024*1024)
-		for sc.Scan() {
-			line := strings.TrimRight(sc.Text(), "\r")
-			if strings.TrimSpace(line) == "" {
-				continue
+		// bufio.Reader, not Scanner: a Scanner stops for good on a line past
+		// its cap, and a drain that stops leaves the child blocked on a full
+		// pipe. Only the head of each line is kept; the rest is read and
+		// dropped.
+		br := bufio.NewReaderSize(r, 4*1024)
+		for {
+			line, err := readLineHead(br, stderrLineMax)
+			if err != nil && line == "" {
+				return
 			}
-			if len(line) > stderrLineMax {
-				line = line[:stderrLineMax] + "…"
+			line = strings.TrimRight(line, "\r")
+			if strings.TrimSpace(line) == "" {
+				if err != nil {
+					return
+				}
+				continue
 			}
 			t.mu.Lock()
 			t.lines = append(t.lines, line)
@@ -64,9 +71,42 @@ func watchStderr(r io.Reader, onLine func(string)) *stderrTail {
 			if onLine != nil {
 				onLine(line)
 			}
+			if err != nil {
+				return
+			}
 		}
 	}()
 	return t
+}
+
+// readLineHead reads one line and returns at most max bytes of it, with "…"
+// appended when it was cut. The remainder of a long line is consumed so the
+// next call starts on the next line. err is non-nil at EOF or a read failure,
+// possibly together with a final unterminated line.
+func readLineHead(br *bufio.Reader, max int) (string, error) {
+	var head []byte
+	total := 0
+	for {
+		chunk, err := br.ReadSlice('\n')
+		total += len(chunk)
+		if room := max - len(head); room > 0 {
+			head = append(head, chunk[:min(room, len(chunk))]...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if n := len(chunk); err == nil && n > 0 {
+			total--
+			if n > 1 && chunk[n-2] == '\r' {
+				total--
+			}
+		}
+		line := strings.TrimRight(string(head), "\r\n")
+		if total > max {
+			line += "…"
+		}
+		return line, err
+	}
 }
 
 // settle waits briefly for the pipe to reach EOF, so a tail read right after a

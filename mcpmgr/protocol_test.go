@@ -198,8 +198,8 @@ func TestCallToolRendersEveryContentKind(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(got, "aGVsbG8=") || !strings.HasPrefix(got, "[image:") {
-			t.Fatalf("got %q; want an [image: <data>] placeholder", got)
+		if got != "[image: image/png, 5 bytes]" {
+			t.Fatalf("got %q; want the type and size, not the base64 payload", got)
 		}
 	})
 

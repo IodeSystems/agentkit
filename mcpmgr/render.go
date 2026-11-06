@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // RenderSecret serialises a flat key/value secret map into one of the
@@ -33,6 +34,18 @@ func RenderSecret(format string, kv map[string]string) ([]byte, error) {
 
 	switch format {
 	case "env", "properties":
+		// One line per entry, no escaping scheme shared by every consumer of
+		// these formats: a value holding a line break would end its own line
+		// and begin another key. Refuse it; a multi-line secret belongs in
+		// "json".
+		for _, k := range keys {
+			if strings.ContainsAny(k, "\r\n=") || k == "" {
+				return nil, fmt.Errorf("mcpmgr: secret key %q is not valid in format %q", k, format)
+			}
+			if strings.ContainsAny(kv[k], "\r\n") {
+				return nil, fmt.Errorf("mcpmgr: secret %q contains a line break, which %q cannot hold (use secret_format json)", k, format)
+			}
+		}
 		var buf bytes.Buffer
 		for _, k := range keys {
 			buf.WriteString(k)

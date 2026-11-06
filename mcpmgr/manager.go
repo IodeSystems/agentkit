@@ -143,10 +143,15 @@ type Manager struct {
 	mu            sync.RWMutex
 	servers       map[string]*MCPServer
 	threadServers map[string]map[string]*MCPServer
+	// spawnLocks serializes StartServer/StartThreadServer per key; see
+	// lockSpawn. Guarded by spawnMu, never by mu: a spawn holds its key lock
+	// for the whole handshake and must not block readers of the maps.
+	spawnMu    sync.Mutex
+	spawnLocks map[string]*sync.Mutex
 	// secrets resolves an MCPConfig.SecretRef into a KV map at spawn
 	// time. Nil when the daemon has no secrets store (e.g. config.json
 	// absent); spawn() errors clearly if a config sets SecretRef in
-	// that mode. Set via NewManagerWithSecrets / SetSecretResolver.
+	// that mode. Set via SetSecretResolver.
 	secrets SecretResolver
 	// onNotify receives server→client notifications. Until this existed the
 	// manager was request/response only — CallTool and nothing else — so a
@@ -205,10 +210,27 @@ func (m *Manager) SetNotificationHandler(fn func(Notification)) {
 	m.onNotify = fn
 }
 
+// lockSpawn serializes start-or-restart of one server key and returns the
+// unlock. Without it two callers both see "nothing running", both spawn, and
+// the second map write orphans the first process: unreachable, never closed.
+// Keys are never removed; the set is the set of ids a host ever starts.
+func (m *Manager) lockSpawn(key string) (unlock func()) {
+	m.spawnMu.Lock()
+	l, ok := m.spawnLocks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		m.spawnLocks[key] = l
+	}
+	m.spawnMu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
 func NewManager() *Manager {
 	return &Manager{
 		servers:       make(map[string]*MCPServer),
 		threadServers: make(map[string]map[string]*MCPServer),
+		spawnLocks:    make(map[string]*sync.Mutex),
 	}
 }
 
@@ -216,6 +238,7 @@ func NewManager() *Manager {
 // connects to it. Idempotent: calling twice for the same cfg.ID
 // closes the previous instance.
 func (m *Manager) StartServer(ctx context.Context, cfg MCPConfig) error {
+	defer m.lockSpawn("project\x00" + cfg.ID)()
 	m.mu.Lock()
 	if existing, ok := m.servers[cfg.ID]; ok {
 		m.mu.Unlock()
@@ -245,6 +268,7 @@ func (m *Manager) StartServer(ctx context.Context, cfg MCPConfig) error {
 // routing, so callers should set cfg.ID = threadServerID(integID,
 // threadID) before calling.
 func (m *Manager) StartThreadServer(ctx context.Context, integrationID, threadID string, cfg MCPConfig) error {
+	defer m.lockSpawn("thread\x00" + integrationID + "\x00" + threadID)()
 	m.mu.Lock()
 	if byThread, ok := m.threadServers[integrationID]; ok {
 		if existing, ok := byThread[threadID]; ok {
@@ -264,6 +288,10 @@ func (m *Manager) StartThreadServer(ctx context.Context, integrationID, threadID
 	}
 
 	m.mu.Lock()
+	// Close may have emptied the map while this server was spawning.
+	if m.threadServers[integrationID] == nil {
+		m.threadServers[integrationID] = map[string]*MCPServer{}
+	}
 	m.threadServers[integrationID][threadID] = srv
 	m.mu.Unlock()
 
@@ -409,9 +437,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 			if secretDir != "" {
 				os.RemoveAll(secretDir)
 			}
-			tail := watchStderr(stdio.stderrPipe(), cfg.OnStderr)
-			tail.settle()
-			return nil, fmt.Errorf("mcp: start %s: %w%s", cfg.Name, err, tail.suffix())
+			return nil, fmt.Errorf("mcp: start %s: %w", cfg.Name, err)
 		}
 		// Drain stderr for the life of the process: it is where a server
 		// explains itself when it refuses to start, and nobody else reads the
@@ -444,7 +470,10 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	}
 
 	go func() {
-		toolsCtx, toolsCancel := context.WithTimeout(ctx, timeout)
+		// Detached from ctx: this runs after StartServer returns, and a caller
+		// that cancels its ctx on return (defer cancel) would otherwise kill
+		// discovery. The timeout is the bound.
+		toolsCtx, toolsCancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer toolsCancel()
 
 		tools, err := mc.listTools(toolsCtx, cfg.Name)
@@ -497,7 +526,7 @@ func (m *Manager) materializeSecret(ctx context.Context, cfg MCPConfig) (args, e
 		return nil, nil, "", fmt.Errorf("mcp: %s: %w", cfg.Name, err)
 	}
 
-	dir, err := os.MkdirTemp("", "aw3-mcp-secret-")
+	dir, err := os.MkdirTemp("", "mcpmgr-secret-")
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("mcp: %s secret tmp dir: %w", cfg.Name, err)
 	}
@@ -637,7 +666,7 @@ func (m *Manager) CallTool(ctx context.Context, serverID string, toolName string
 		return "", fmt.Errorf("mcp tool error: %v", contentText(result.Content))
 	}
 
-	return renderContent(result.Content), nil
+	return renderResult(result), nil
 }
 
 // server finds a connected server by id: a project-scoped id (one of
@@ -728,18 +757,35 @@ func (m *Manager) GetPrompt(ctx context.Context, serverID, name string, args map
 	return srv.client.getPrompt(ctx, name, args)
 }
 
-// Close disconnects all MCP servers (project + thread scope).
+// Close disconnects all MCP servers (project + thread scope). The maps are
+// emptied under the lock and the servers closed outside it, in parallel: a
+// wedged server takes seconds to escalate to SIGKILL, and holding mu for that
+// long froze every reader, while leaving the maps populated reported dead
+// servers as started.
 func (m *Manager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var all []*MCPServer
 	for _, srv := range m.servers {
-		srv.close()
+		all = append(all, srv)
 	}
 	for _, byThread := range m.threadServers {
 		for _, srv := range byThread {
-			srv.close()
+			all = append(all, srv)
 		}
 	}
+	m.servers = make(map[string]*MCPServer)
+	m.threadServers = make(map[string]map[string]*MCPServer)
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, srv := range all {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv.close()
+		}()
+	}
+	wg.Wait()
 }
 
 // close tears down the MCP client and removes any per-server secret

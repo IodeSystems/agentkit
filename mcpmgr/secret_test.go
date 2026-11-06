@@ -25,7 +25,8 @@ func (f fakeResolver) Resolve(ctx context.Context, ref string) (map[string]strin
 }
 
 func TestMaterializeSecret_PlaceholderAndPerms(t *testing.T) {
-	m := NewManagerWithSecrets(fakeResolver{kv: map[string]string{
+	m := NewManager()
+	m.SetSecretResolver(fakeResolver{kv: map[string]string{
 		"GMAIL_USER":         "a@b.com",
 		"GMAIL_APP_PASSWORD": "pw",
 	}})
@@ -102,7 +103,8 @@ func TestMaterializeSecret_NoResolver(t *testing.T) {
 }
 
 func TestMaterializeSecret_ResolverError(t *testing.T) {
-	m := NewManagerWithSecrets(fakeResolver{err: errors.New("boom")})
+	m := NewManager()
+	m.SetSecretResolver(fakeResolver{err: errors.New("boom")})
 	cfg := MCPConfig{Name: "x", SecretRef: "ref", SecretFormat: "env"}
 	_, _, dir, err := m.materializeSecret(context.Background(), cfg)
 	if err == nil {

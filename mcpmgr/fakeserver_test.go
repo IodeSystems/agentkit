@@ -197,6 +197,9 @@ func fakeServerMain(scenario string) {
 			if scenario == "slow-tools" {
 				time.Sleep(30 * time.Second)
 			}
+			if scenario == "delay-tools" {
+				time.Sleep(400 * time.Millisecond)
+			}
 			conn.result(id, map[string]any{"tools": fakeTools()})
 
 		case "tools/call":
@@ -285,6 +288,9 @@ func fakeCallResult(name string, args map[string]any) map[string]any {
 				map[string]any{"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
 			},
 		}
+	case "structured":
+		// The whole answer is in structuredContent; content is absent.
+		return map[string]any{"structuredContent": map[string]any{"temp": 21}}
 	case "audible":
 		// Neither text nor image: must fall through to the JSON-encoded
 		// branch rather than being dropped.

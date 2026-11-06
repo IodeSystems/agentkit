@@ -13,6 +13,7 @@ package mcpmgr
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -61,7 +62,7 @@ type callToolResult struct {
 // transport is one JSON-RPC connection to one MCP server.
 type transport interface {
 	call(ctx context.Context, method string, params, out any) error
-	notify(method string, params any) error
+	notify(ctx context.Context, method string, params any) error
 	close() error
 	setNotificationHandler(fn func(method string, params map[string]any))
 }
@@ -116,7 +117,7 @@ func (c mcpClient) initialize(ctx context.Context, clientName, clientVersion str
 		return nil, fmt.Errorf("server negotiated no protocol version")
 	}
 
-	if err := c.notify("notifications/initialized", map[string]any{}); err != nil {
+	if err := c.notify(ctx, "notifications/initialized", map[string]any{}); err != nil {
 		return nil, fmt.Errorf("initialized notification: %w", err)
 	}
 	return &res, nil
@@ -302,8 +303,15 @@ func renderContent(content []map[string]any) string {
 			s, _ := block["text"].(string)
 			parts = append(parts, s)
 		case "image":
+			// The payload is base64 of a picture: tens of thousands of tokens
+			// of noise the model cannot see through. Say what arrived.
 			data, _ := block["data"].(string)
-			parts = append(parts, fmt.Sprintf("[image: %s]", data))
+			mime, _ := block["mimeType"].(string)
+			n := base64.StdEncoding.DecodedLen(len(data))
+			if raw, err := base64.StdEncoding.DecodeString(data); err == nil {
+				n = len(raw)
+			}
+			parts = append(parts, fmt.Sprintf("[image: %s, %d bytes]", mime, n))
 		default:
 			b, err := json.Marshal(block)
 			if err != nil {
@@ -313,6 +321,17 @@ func renderContent(content []map[string]any) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// renderResult renders a tools/call result. structuredContent is the
+// machine-readable twin of content; a server may send only it, and an empty
+// string would read to the model as a tool that answered nothing.
+func renderResult(res *callToolResult) string {
+	out := renderContent(res.Content)
+	if out == "" && len(res.StructuredContent) > 0 && string(res.StructuredContent) != "null" {
+		return string(res.StructuredContent)
+	}
+	return out
 }
 
 // contentText pulls just the text blocks out, for building an error message

@@ -11,7 +11,7 @@ package mcpmgr
 //
 // Not implemented: the optional GET stream for messages the server sends
 // outside any request, server→client requests (sampling, elicitation — this
-// client advertises none), resumption by Last-Event-ID, and the older
+// client advertises none — it answers them -32601), resumption by Last-Event-ID, and the older
 // HTTP+SSE transport (2024-11-05). Notifications that arrive on a request's
 // stream are delivered.
 //
@@ -189,7 +189,7 @@ func (c *httpClient) call(ctx context.Context, method string, params, out any) e
 	var r *rpcResponse
 	ct, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if ct == "text/event-stream" {
-		r, err = c.readStream(resp.Body, fmt.Sprint(id))
+		r, err = c.readStream(ctx, resp.Body, fmt.Sprint(id))
 	} else {
 		r = &rpcResponse{}
 		err = json.NewDecoder(resp.Body).Decode(r)
@@ -219,14 +219,14 @@ func (c *httpClient) call(ctx context.Context, method string, params, out any) e
 
 // readStream reads SSE events until the response to request id arrives,
 // handing any notification before it to the handler.
-func (c *httpClient) readStream(body io.Reader, id string) (*rpcResponse, error) {
+func (c *httpClient) readStream(ctx context.Context, body io.Reader, id string) (*rpcResponse, error) {
 	br := bufio.NewReader(body)
 	var data strings.Builder
 	for {
 		line, err := br.ReadString('\n')
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" && data.Len() > 0 {
-			if r := c.handleEvent(data.String(), id); r != nil {
+			if r := c.handleEvent(ctx, data.String(), id); r != nil {
 				return r, nil
 			}
 			data.Reset()
@@ -238,7 +238,7 @@ func (c *httpClient) readStream(body io.Reader, id string) (*rpcResponse, error)
 		}
 		if err != nil {
 			if data.Len() > 0 {
-				if r := c.handleEvent(data.String(), id); r != nil {
+				if r := c.handleEvent(ctx, data.String(), id); r != nil {
 					return r, nil
 				}
 			}
@@ -252,7 +252,7 @@ func (c *httpClient) readStream(body io.Reader, id string) (*rpcResponse, error)
 
 // handleEvent returns the event's message when it is the response to id, and
 // delivers it when it is a notification.
-func (c *httpClient) handleEvent(data, id string) *rpcResponse {
+func (c *httpClient) handleEvent(ctx context.Context, data, id string) *rpcResponse {
 	var msg struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -276,14 +276,34 @@ func (c *httpClient) handleEvent(data, id string) *rpcResponse {
 		if fn != nil {
 			fn(msg.Method, msg.Params)
 		}
+		return nil
 	}
-	// A server→client request: this client advertised no capability that
-	// would make one legal, so it is dropped.
+	// A server→client request (sampling, roots, elicitation). This client
+	// implements none, but a server blocking on the reply must not wedge: the
+	// answer goes back as its own POST, exactly the -32601 stdio gives. The
+	// POST is on a separate connection, so it does not wait on this stream.
+	c.rejectRequest(ctx, msg.ID, msg.Method)
 	return nil
 }
 
-func (c *httpClient) notify(method string, params any) error {
-	resp, err := c.post(context.Background(), map[string]any{"jsonrpc": jsonrpcVersion, "method": method, "params": params})
+func (c *httpClient) rejectRequest(ctx context.Context, id json.RawMessage, method string) {
+	resp, err := c.post(ctx, map[string]any{
+		"jsonrpc": jsonrpcVersion,
+		"id":      id,
+		"error": map[string]any{
+			"code":    -32601,
+			"message": "method not found: " + method + " (client implements no server-initiated requests)",
+		},
+	})
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+}
+
+func (c *httpClient) notify(ctx context.Context, method string, params any) error {
+	resp, err := c.post(ctx, map[string]any{"jsonrpc": jsonrpcVersion, "method": method, "params": params})
 	if err != nil {
 		return err
 	}
