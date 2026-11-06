@@ -17,11 +17,11 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 ## Active work
 
 ### ⏸ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
-corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF change as `5cd7b16`. By its own report, build, vet and `go test ./...` pass with GOWORK=off. Not pushed, not deployed.
-- **resume condition:** `a18fe07` + `5cd7b16` are pushed and deployed. Waits on: Carl.
+corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF change as `5cd7b16` (being revised). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Not pushed, not deployed.
+- **resume condition:** `a18fe07` + the revised PDF commit are pushed and deployed. Waits on: Carl.
 - **next:** fold corrallm's translator use of the shim into `claude-api-plan.md` "Future: corrallm owns Claude".
 - **risks:** corrallm's `--convert-pdfs` (default on) rewrites PDF parts to pdftotext text before the shim, for every model including Claude. A native `document` block is reached only when conversion is off or fails. Shim errors (incl. `ErrUnsupportedContent`) surface as 400 `invalid_request_error`.
-- **decided (Carl, 2026-11-06):** PDF conversion off by default unless a conversion strategy is configured (`convert.pdf: text|vision`, global or per model). Implemented in corrallm `5cd7b16` (not pushed): `DefaultConvert` leaves `pdf` unset, unset/off passes the part through byte-for-byte. On deploy, fireworks deepseek-v4p1-flash-1017 and glm-5p3-flash lose PDF reading unless their config sets `pdf: text`; Claude gets native PDFs (billed per page).
+- **decided (Carl, 2026-11-06, revised):** native first, else convert. A model that reads PDFs natively (Claude) gets the part unchanged. Otherwise the configured `pdf:` strategy is used, else the built-in `text` default. This replaces corrallm `5cd7b16` (strategy-only, which cost the fireworks models PDF reading). corrallm-12 is implementing it; push and deploy are held until it confirms with Carl. Open: whether an explicit strategy on a native-PDF model should beat pass-through.
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### ◐ `taskgraph` — a plan the model keeps, shared by sub-agents (2026-11-03)
