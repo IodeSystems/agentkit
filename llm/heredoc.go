@@ -42,17 +42,6 @@ import (
 // native format is therefore what BUYS sampler-level enforcement rather than
 // what loses it.
 
-// HeredocSentinel terminates a raw body. It is deliberately long and
-// unpronounceable: a body line must equal it exactly to end the block, so the
-// only failure mode is content that contains this exact line. Short sentinels
-// like "EOF" or "END" appear in real files and shell scripts.
-//
-// It must not begin with "<". `<|` is a single token in Qwen-family vocabularies,
-// and a delimiter starting with "<" pulls generation toward it: asked to emit
-// `<<END` the model produced `<|<END`. Measured alternatives — `~~~END` and
-// `@@END` reproduced exactly, `<<END` and `:::END` did not.
-const HeredocSentinel = "~~~AGENTKIT_EOF_7F3A"
-
 // HeredocOpen introduces a raw body: `key: <ext>` + this + newline.
 const HeredocOpen = "~~~"
 
@@ -92,14 +81,6 @@ func CloseHeredoc(raw string) string {
 		return raw
 	}
 	return strings.TrimRight(raw, "\n") + "\n" + HeredocEnd + "\n"
-}
-
-// HeredocTypes is the closed set of body type tags the grammar admits. Closed on
-// purpose: an open [a-z]+ let the model place an argument VALUE in the tag slot.
-// `json` is load-bearing (it makes the body a real value rather than a string);
-// the rest are descriptive and only reach the tool as "<key>_type".
-var HeredocTypes = []string{
-	"go", "java", "js", "json", "md", "py", "sh", "sql", "txt", "xml", "yaml",
 }
 
 func quoteAll(ss []string) []string {
@@ -169,9 +150,30 @@ func ParseToolCalls(content string) (calls []ToolCall, prose string, err error) 
 		tc.Function.Name = name
 		tc.Function.Arguments = args
 		calls = append(calls, tc)
-		i = next
+		i = skipHeredocEnd(content, next)
 	}
 	return calls, strings.TrimSpace(rest.String()), nil
+}
+
+// skipHeredocEnd returns the index past a `@@end` terminator line that follows
+// the call ending at i, or i when there is none. The terminator is structure,
+// not prose; a stop sequence consumes it, so it is optional.
+func skipHeredocEnd(s string, i int) int {
+	j := i
+	for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\n') {
+		j++
+	}
+	rest, ok := strings.CutPrefix(s[j:], HeredocEnd)
+	if !ok {
+		return i
+	}
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	if strings.TrimSpace(rest) != "" {
+		return i
+	}
+	return j + len(HeredocEnd)
 }
 
 // HeredocGrammar constrains generation to `@@call <name>` plus one

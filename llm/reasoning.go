@@ -20,16 +20,9 @@ import (
 // `reasoning_budget` cannot be told apart from one that worked, so the mapping
 // has to happen somewhere that a typo is a compile error.
 
-// reasoningDialect is which shape an endpoint understands.
-//
-// Detected from the model id and the base URL rather than probed, unlike
-// tokenizeRoute: there is nothing to probe for. Both dialects share ONE route
-// (/v1/chat/completions) and both silently accept the other's field, so a probe
-// would come back 200 either way and learn nothing. The model id is the honest
-// signal — corrallm's own passthrough is keyed on `claude-*` globs, and a
-// request that reaches Anthropic at all had to name a claude model to get there.
 // Reasoning dialects: how an endpoint is asked to think. "" detects one
-// from the model id and the address; a caller that knows better (a LiteLLM
+// from the model id and the address, never by probing: the dialects share one
+// route and each answers 200 to the other's field, so a probe learns nothing; a caller that knows better (a LiteLLM
 // proxy in front of OpenRouter has neither in its address) names it with
 // SetReasoningDialect.
 const (

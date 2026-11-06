@@ -269,3 +269,28 @@ func TestMessagesAPI_Alias(t *testing.T) {
 		t.Errorf("sent %v after %d lists", sent["model"], lists)
 	}
 }
+
+// A model list that cannot be read is asked again after a pause, not on every
+// call: each ask is a blocking GET held under the alias lock.
+func TestMessagesAPI_FailedAliasResolutionIsNotRetriedEveryCall(t *testing.T) {
+	lists := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/models") {
+			lists++
+			http.Error(w, "down", 500)
+			return
+		}
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "opus-latest")
+	c.MessagesAPI = true
+	for range 4 {
+		if got := c.wireModel(context.Background()); got != "opus-latest" {
+			t.Fatalf("wireModel = %q; an unresolved alias goes out as it is", got)
+		}
+	}
+	if lists != 1 {
+		t.Errorf("model list asked %d times for 4 calls; want 1 inside the failure window", lists)
+	}
+}

@@ -100,6 +100,12 @@ func blockScan(s string, i int) (body string, next int, ok bool, err error) {
 		}
 		fence := strings.Repeat("`", n)
 		rest := s[i+n:]
+		// An info string (```md) names the body's language; it is not part of
+		// the body. Only a plain word on the opening line counts, so an inline
+		// fence such as ```text``` keeps its text.
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 && isFenceInfo(rest[:nl]) {
+			rest = rest[nl:]
+		}
 		rest = strings.TrimPrefix(rest, "\n")
 		end := strings.Index(rest, fence)
 		if end < 0 {
@@ -111,6 +117,23 @@ func blockScan(s string, i int) (body string, next int, ok bool, err error) {
 		return body, consumed, true, nil
 	}
 	return "", i, false, nil
+}
+
+// isFenceInfo reports whether an opening-fence line remainder is a language tag:
+// a short word of the characters markdown info strings use, nothing else.
+func isFenceInfo(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == '+', r == '.', r == '#':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // rewriteLooseHeredoc turns a json-loose-heredoc value into strict JSON, stopping
@@ -233,16 +256,4 @@ func rewriteLooseHeredoc(s string, i int) (string, int, error) {
 	}
 	return "", i, fmt.Errorf("value never closed (generation was cut off; " +
 		"the call was NOT completed)")
-}
-
-// ParseLooseHeredocJSON rewrites one json-loose-heredoc value to strict JSON.
-func ParseLooseHeredocJSON(s string) (string, error) {
-	out, _, err := rewriteLooseHeredoc(s, 0)
-	if err != nil {
-		return "", err
-	}
-	if !json.Valid([]byte(out)) {
-		return "", fmt.Errorf("rewritten value is not valid JSON: %s", out)
-	}
-	return out, nil
 }

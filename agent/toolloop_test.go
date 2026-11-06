@@ -322,3 +322,20 @@ func TestAlternatingCallsWithChangingResultsAreNotALoop(t *testing.T) {
 		}
 	}
 }
+
+// The tool-loop stop is a decision, not a fault: OnTurnEnd must say so rather
+// than report the catch-all TurnError.
+func TestToolLoopStopReportsItsOwnTurnEndReason(t *testing.T) {
+	var end TurnEnd
+	s := &Session{
+		SessionID: "s", Store: &memStore{}, Runner: &scriptRunner{turns: repeatingTurns(30)}, MaxTurns: 30,
+		Dispatch:  func(context.Context, llm.ToolCall) (string, error) { return "still running", nil },
+		OnTurnEnd: func(e TurnEnd) { end = e },
+	}
+	if _, err := s.Turn(context.Background()); err == nil {
+		t.Fatal("no error")
+	}
+	if end.Reason != TurnToolLoop {
+		t.Fatalf("Reason = %q, want %q", end.Reason, TurnToolLoop)
+	}
+}

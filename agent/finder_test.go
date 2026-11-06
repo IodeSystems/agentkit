@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -173,4 +176,31 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+type constFinder []DocHit
+
+func (f constFinder) Find(context.Context, []string) ([]DocHit, error) { return f, nil }
+
+// Two passes for one session at once share the dedup set; writing it outside the
+// lock is a data race (a fatal "concurrent map writes" in production).
+func TestFinderPreparer_ConcurrentPassesDoNotRaceOnTheSeenSet(t *testing.T) {
+	st := &memStore{}
+	var tick atomic.Int64
+	next := func() int64 { return tick.Add(1) }
+	st.Append(context.Background(), "s", Entry{ID: "u1", Kind: KindUser, Content: "q", CreatedAt: next()})
+	hits := make(constFinder, 20)
+	for i := range hits {
+		hits[i] = DocHit{DocID: fmt.Sprintf("d%d", i), Score: 0.9}
+	}
+	p := FinderPreparer(st, hits, FinderOpts{Now: next})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = p.PrepareNotifications(context.Background(), "s")
+		}()
+	}
+	wg.Wait()
 }

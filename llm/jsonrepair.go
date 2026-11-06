@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// repairLooseArgs turns near-JSON tool arguments into JSON, or reports that it
+// RepairLooseJSON turns near-JSON tool arguments into JSON, or reports that it
 // could not. It returns the repaired text, the list of repairs applied (for the
 // log), and whether anything usable came out.
 //

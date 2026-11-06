@@ -1,5 +1,7 @@
 package agent
 
+import "github.com/iodesystems/agentkit/llm"
+
 // TokenEstimator estimates the token count of a string for budget
 // calculations. Real tokenizers plug in behind the same interface.
 //
@@ -78,4 +80,23 @@ func Budget(contextTokens, reservePct int) int {
 		reservePct = 99
 	}
 	return contextTokens * (100 - reservePct) / 100
+}
+
+// ImageTokenEstimate is what one image part is counted as: Claude's per-image
+// maximum. An image given as a URL has no size the client can see, and an
+// estimate that is too low folds too late (see TokenEstimator), so the cap is
+// the number to use.
+const ImageTokenEstimate = 1600
+
+// messageTokens is the estimated cost of one message: its text, each part of a
+// multimodal message (partTokens: a flat ImageTokenEstimate per image, audio,
+// video and files by their bytes — mediatokens.go), and its role and name. A
+// message whose body is in Parts has an empty Content and must not count as
+// free.
+func messageTokens(est TokenEstimator, m llm.Message) int {
+	t := est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name)
+	for _, p := range m.Parts {
+		t += partTokens(est, p)
+	}
+	return t
 }

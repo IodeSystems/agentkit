@@ -210,3 +210,20 @@ func TestRecapReportsWhatItDid(t *testing.T) {
 		t.Error("the report asks a question; the recap has already applied")
 	}
 }
+
+// Turn persists every call of a round before dispatching any, and dispatches in
+// order: the call running is the FIRST without a result, not the last. Picking
+// the last made a recap that was not the final call of its round anchor below,
+// and keep, the wrong call.
+func TestLiveCallIsTheFirstUnansweredCallOfTheRound(t *testing.T) {
+	entries := []agent.Entry{
+		entry(agent.KindUser, "u1", "go"),
+		call("t0", "c0", "read", `{}`),
+		call("t1", "recap1", "recap", `{"from":"go"}`),
+		call("t2", "after", "read", `{}`),
+		result("r0", "c0", "read", "out"),
+	}
+	if got := agent.LiveCallID(entries); got != "recap1" {
+		t.Fatalf("LiveCallID = %q, want recap1", got)
+	}
+}

@@ -67,6 +67,12 @@ func bodyIsContextOverflow(body string) bool {
 // contextProbeCeiling and returns it as a lower bound. That keeps the probe
 // cheap and bounded rather than climbing until requests get enormous.
 func (c *Client) DiscoverContext(ctx context.Context) (int, error) {
+	// The probe body is an OpenAI chat request posted straight to the chat URL.
+	// A Messages API endpoint would answer it with a schema error that reads as
+	// a probe failure, so refuse up front and say why.
+	if c.usesMessagesAPI() {
+		return 0, errors.New("llm: DiscoverContext probes with an OpenAI chat body and does not support a Messages API client")
+	}
 	// probe reports whether ~nTokens of prompt is accepted (no overflow).
 	probe := func(nTokens int) (fits bool, err error) {
 		body, _ := json.Marshal(map[string]any{

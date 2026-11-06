@@ -27,12 +27,3 @@ func TestBodyIsTruncatedToolCall(t *testing.T) {
 		}
 	}
 }
-
-func contains(h, n string) bool {
-	for i := 0; i+len(n) <= len(h); i++ {
-		if h[i:i+len(n)] == n {
-			return true
-		}
-	}
-	return false
-}

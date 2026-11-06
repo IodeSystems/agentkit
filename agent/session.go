@@ -400,12 +400,6 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
 
-		// Host hook: transform the tool calls before they are persisted or
-		// dispatched. A returned nil or empty slice is treated as "no tool
-		// calls" (the turn ends or checks for pending events).
-		if s.OnToolCalls != nil {
-			toolCalls = s.OnToolCalls(toolCalls)
-		}
 		if rep != nil {
 			// The transport cut a looping generation. Keep ONE copy of the
 			// repeated block and drop the rest before this reply is persisted:
@@ -517,6 +511,14 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// so a model that loops, recovers, and loops again much later is not
 		// killed for the sum.
 		repTrips = 0
+
+		// Host hook: transform the tool calls before they are persisted or
+		// dispatched. After the repetition cut, which discards the round: a hook
+		// that injects or records must not act on calls that never run. A returned nil or empty slice is treated as "no tool
+		// calls" (the turn ends or checks for pending events).
+		if s.OnToolCalls != nil {
+			toolCalls = s.OnToolCalls(toolCalls)
+		}
 
 		if cut != nil {
 			// The provider ended this round for room. Ask the host what to do,
@@ -719,6 +721,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				}
 			}
 			if repeatRounds >= 2*maxRepeatRounds {
+				endReason = TurnToolLoop
 				return result, fmt.Errorf(
 					"agent: tool-call loop — the same call(s) returned the same result(s) %d "+
 						"rounds running (last: %s); stopping rather than paying for more identical "+
@@ -819,7 +822,7 @@ func (s *Session) estimateTokens(msgs []llm.Message) int {
 	}
 	t := 0
 	for _, m := range msgs {
-		t += est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name)
+		t += messageTokens(est, m)
 	}
 	return t
 }

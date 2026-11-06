@@ -50,7 +50,8 @@ type Entry struct {
 	ID      string
 	Kind    EntryKind
 	Content string
-	// Parts, when non-empty, carries MULTIMODAL content (text + image parts)
+	// Parts, when non-empty, carries MULTIMODAL content (text + image, audio,
+	// video or file parts)
 	// for this entry and replaces Content when the entry is rendered to an
 	// llm.Message. Content should still be set to a plain-text summary of the
 	// parts: it is what LOD truncation, compaction summaries, and any
@@ -60,7 +61,9 @@ type Entry struct {
 	// Empty Parts (the overwhelming majority) renders exactly as before, so
 	// existing hosts and stores are unaffected. A Store that does not persist
 	// Parts simply loses the attachment across a reload, degrading to the text
-	// Content — acceptable, and the reason Content stays authoritative.
+	// Content — acceptable, and the reason Content stays authoritative. Media
+	// parts hold their bytes as base64: a Store keeps a reference and rebuilds
+	// Parts on load rather than persisting them.
 	//
 	// Only KindUser is rendered multimodally today; provider APIs accept image
 	// parts on user messages, not on tool results or assistant turns.
@@ -134,9 +137,10 @@ type LLMRunner interface {
 
 // ToolDispatcher executes a tool call and returns the string the model will
 // see as the tool result. Errors meant to reach the model (unknown tool,
-// bad args) should be formatted into the result; return a non-nil error only
-// to abort the whole turn. Returning ErrSessionClosed tells the loop to stop
-// after the result is persisted — used by terminal tools so the loop doesn't
+// bad args) should be formatted into the result. A returned non-nil error does
+// NOT abort the Turn: the loop records it as an "ERROR: ..." tool result and
+// continues, so the model can react to it. Returning ErrSessionClosed tells the
+// loop to stop after the result is persisted — used by terminal tools so the loop doesn't
 // keep prompting an already-closed session under tool_choice=required.
 type ToolDispatcher func(ctx context.Context, tc llm.ToolCall) (string, error)
 
@@ -340,6 +344,9 @@ const (
 	// TurnRepetition — the model's generation kept collapsing into repetition
 	// past MaxRepetitionRetries, so the loop stopped re-prompting it.
 	TurnRepetition TurnEndReason = "repetition"
+	// TurnToolLoop — the model made the same call(s) and got the same result(s)
+	// for 2*MaxRepeatedExchanges rounds, so the loop stopped paying for more.
+	TurnToolLoop TurnEndReason = "tool_loop"
 	// TurnCanceled — the caller's context was canceled or its deadline passed.
 	// Separated from TurnError because it is usually not a fault: it is a host
 	// shutting a session down, and a host that logs it as a failure cries wolf.

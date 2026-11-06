@@ -178,3 +178,25 @@ func TestAToolLoopNoticeSaysTheCallsWereNotRun(t *testing.T) {
 		t.Errorf("notice talks about text: %s", got)
 	}
 }
+
+// A cut round is discarded and re-prompted, so a host's OnToolCalls must not see
+// it: the hook can have side effects (injecting, counting, recording) for calls
+// that are never persisted or dispatched.
+func TestOnToolCallsIsNotRunForARoundTheRepetitionGuardCut(t *testing.T) {
+	tc := &llm.ToolCall{ID: "c1", Type: "function"}
+	tc.Function.Name = "write"
+	tc.Function.Arguments = `{"a":`
+	cut := []llm.StreamChunk{{ToolCall: tc}, {Done: true, StopReason: llm.StopReasonRepetition, Repetition: &llm.RepetitionInfo{
+		Where: "tool:write arguments", Period: len(repBlock), Reps: 6, Trailing: 5 * len(repBlock), Sample: repBlock,
+	}}}
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{cut, {{Content: "done"}}}}
+	hooked := 0
+	s := &Session{SessionID: "s", Store: &memStore{}, Runner: runner, MaxTurns: 5,
+		OnToolCalls: func(c []llm.ToolCall) []llm.ToolCall { hooked++; return c }}
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if hooked != 1 {
+		t.Fatalf("OnToolCalls ran %d times, want 1 (clean rounds only: the cut round is discarded; the idle round still calls it once)", hooked)
+	}
+}

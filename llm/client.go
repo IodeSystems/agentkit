@@ -40,7 +40,7 @@ type Message struct {
 	Content string `json:"content"`
 	Name    string `json:"name,omitempty"`
 	// Parts, when non-empty, replaces Content with a multimodal content array
-	// (text + image parts). Send-only: responses are always plain text, so this
+	// (text + image, audio, video or file parts). Send-only: responses are always plain text, so this
 	// is never populated on a decoded reply. Tagged "-" — MarshalJSON emits it
 	// under "content" itself.
 	Parts []ContentPart `json:"-"`
@@ -53,12 +53,73 @@ type Message struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
-// ContentPart is one element of a multimodal content array. Type is "text" or
-// "image_url"; exactly one of Text / ImageURL is set to match.
+// ContentPart is one element of a multimodal content array, in OpenAI's chat
+// completions shape. Type names the one payload field that is set:
+//
+//	"text"        Text
+//	"image_url"   ImageURL
+//	"input_audio" InputAudio
+//	"video_url"   VideoURL
+//	"file"        File
+//
+// Which kinds a server reads is the server's business; agentkit sends what it is
+// given. The Claude Messages API path refuses audio, video and any file that is
+// not a PDF or text with an error wrapping ErrUnsupportedContent, before
+// anything is sent. Other servers answer an unsupported part with their own 400.
+// No kind is ever stripped on the way: a model that answers about media it never
+// saw is worse than a refusal, and the fallback (transcribe, describe, caption)
+// belongs to the host.
 type ContentPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Type       string      `json:"type"`
+	Text       string      `json:"text,omitempty"`
+	ImageURL   *ImageURL   `json:"image_url,omitempty"`
+	InputAudio *InputAudio `json:"input_audio,omitempty"`
+	VideoURL   *VideoURL   `json:"video_url,omitempty"`
+	File       *FileRef    `json:"file,omitempty"`
+}
+
+// ErrUnsupportedContent is wrapped by the error a request returns when the
+// Claude Messages API cannot take one of its content parts (audio, video, a
+// file that is neither PDF nor text, a file by id). Nothing was sent. Test with
+// errors.Is to fall back. It is the shim's sentinel, re-exported so a host need
+// not import the shim.
+var ErrUnsupportedContent = shim.ErrUnsupportedContent
+
+// InputAudio is an audio clip, OpenAI's input_audio. Data is BARE base64 — not a
+// data: URI, unlike every other inline part. Format is the container: OpenAI
+// takes "wav" or "mp3"; vLLM builds "data:audio/<format>;base64,…" from it, so
+// it must be set (vllm/renderers/chat_utils/content_parser.py, parse_input_audio);
+// llama.cpp ignores it and sniffs the bytes (tools/server/server-common.cpp,
+// "don't need to validate format"; mp3, wav, flac via miniaudio).
+type InputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
+}
+
+// VideoURL is a video clip: an http(s) URL or a data: URI
+// ("data:video/mp4;base64,…"). OpenAI's chat completions and the Claude
+// Messages API have no video input. The video_url shape is vLLM's
+// (vllm/renderers/chat_utils/types.py, chat_message.py: part.video_url.url) and
+// llama.cpp server takes it as an alias of its own input_video
+// (tools/server/server-common.cpp oaicompat_content_load_media: "accept the
+// OpenAI-style video_url key as an alias"; a data: URI must be data:video/…;
+// ffmpeg decodes it). Verified against vLLM main b2094acc and llama.cpp
+// master 6c01da62, 2026-11-06.
+type VideoURL struct {
+	URL string `json:"url"`
+}
+
+// FileRef is a document, OpenAI's file part. FileData is a data: URI
+// ("data:application/pdf;base64,…"); FileID names a file uploaded to the
+// provider's own store and is not portable between providers. OpenAI's chat
+// completions take PDF only; the Claude Messages API takes PDF and text;
+// OpenRouter parses PDFs with its file-parser plugin; llama.cpp server refuses a
+// file part outright ("unsupported content[].type") — a corrallm in front of it
+// converts a PDF to text or page images first.
+type FileRef struct {
+	Filename string `json:"filename,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
 }
 
 // ImageURL is an image reference: either an https URL or an inline data: URI
@@ -83,6 +144,37 @@ func ImagePart(url string) ContentPart {
 func ImageData(mime string, raw []byte) ContentPart {
 	uri := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
 	return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: uri}}
+}
+
+// AudioData builds an audio part from raw bytes. format is the container
+// ("wav", "mp3"; OpenAI takes only those two, vLLM and llama.cpp more).
+func AudioData(format string, raw []byte) ContentPart {
+	return ContentPart{Type: "input_audio", InputAudio: &InputAudio{
+		Data: base64.StdEncoding.EncodeToString(raw), Format: format}}
+}
+
+// VideoPart builds a video part from a URL or data: URI.
+func VideoPart(url string) ContentPart {
+	return ContentPart{Type: "video_url", VideoURL: &VideoURL{URL: url}}
+}
+
+// VideoData builds a video part from raw bytes as a base64 data: URI with the
+// given MIME type (e.g. "video/mp4").
+func VideoData(mime string, raw []byte) ContentPart {
+	return VideoPart("data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw))
+}
+
+// FileData builds a file part from raw bytes as a base64 data: URI. Only
+// "application/pdf" is portable (see FileRef); the Messages API path also takes
+// text/*. For text, a TextPart is the form every server reads.
+func FileData(mime, filename string, raw []byte) ContentPart {
+	return ContentPart{Type: "file", File: &FileRef{Filename: filename,
+		FileData: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)}}
+}
+
+// PDFData builds a PDF file part: FileData("application/pdf", filename, raw).
+func PDFData(filename string, raw []byte) ContentPart {
+	return FileData("application/pdf", filename, raw)
 }
 
 // MarshalJSON renders "content" as a bare string (Parts empty, the default) or
@@ -477,6 +569,8 @@ type Client struct {
 	aliasMu sync.Mutex
 	aliasID string
 	aliasAt time.Time
+	// aliasFailAt is when resolution last failed; see aliasRetryAfter.
+	aliasFailAt time.Time
 
 	// ClaudePrices override the shim's price list for the estimated cost of a
 	// Messages API reply. A host loads its own.
@@ -1133,7 +1227,14 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 				}
 				return nil, fmt.Errorf("llm: status %d (after %d retries)", status, fiveXXAttempts-1)
 			}
-			if time.Now().Add(sleep).After(deadline) {
+			// A wait past the budget is cut to what is left, as on the 429 path:
+			// refusing it gave up at once on a server whose Retry-After equals
+			// the budget. Only a budget with nothing left ends the retrying.
+			remaining := time.Until(deadline)
+			if sleep > remaining {
+				sleep = remaining
+			}
+			if remaining <= 0 {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
 					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
 					Attempts5xx: fiveXXAttempts, Max5xx: c.retry5xxAttempts(),
@@ -1207,7 +1308,7 @@ func transportRetryable(ctx context.Context, err error) bool {
 }
 
 // retryAfterFrom extracts a retry delay from a throttled/failed response.
-// The Retry-After HEADER wins (HTTP standard, integer seconds). When absent,
+// The Retry-After HEADER wins (HTTP standard: seconds, or an HTTP-date; fractions accepted). When absent,
 // corrallm-style backpressure BODIES carry the hint as JSON — either a
 // top-level "retry_after" or one nested under "error" (the shape corrallm's
 // fair-share proxy returns on 429: {"error":{"reason":"queue-timeout",
@@ -1216,15 +1317,20 @@ func transportRetryable(ctx context.Context, err error) bool {
 // retryAfterCeiling so a misbehaving server can't park the daemon.
 func retryAfterFrom(h http.Header, body []byte) (time.Duration, bool) {
 	if ra := strings.TrimSpace(h.Get("Retry-After")); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+		if secs, err := strconv.ParseFloat(ra, 64); err == nil && secs > 0 {
 			return clampRetry(secs), true
+		}
+		if when, err := http.ParseTime(ra); err == nil {
+			if d := time.Until(when); d > 0 {
+				return clampRetry(d.Seconds()), true
+			}
 		}
 	}
 	if len(body) > 0 {
 		var parsed struct {
-			RetryAfter int `json:"retry_after"`
+			RetryAfter float64 `json:"retry_after"`
 			Error      struct {
-				RetryAfter int `json:"retry_after"`
+				RetryAfter float64 `json:"retry_after"`
 			} `json:"error"`
 		}
 		if json.Unmarshal(body, &parsed) == nil {
@@ -1240,8 +1346,8 @@ func retryAfterFrom(h http.Header, body []byte) (time.Duration, bool) {
 	return 0, false
 }
 
-func clampRetry(secs int) time.Duration {
-	d := time.Duration(secs) * time.Second
+func clampRetry(secs float64) time.Duration {
+	d := time.Duration(secs * float64(time.Second))
 	if d > retryAfterCeiling {
 		d = retryAfterCeiling
 	}
@@ -1390,9 +1496,12 @@ type ChatOpts struct {
 	EnableThinking *bool
 
 	// ReasoningEffort is "low", "medium" or "high" ("none": no thinking), for
-	// an endpoint that takes an effort rather than a budget: the openrouter
-	// and openai dialects send it (see reasoning.go); llama.cpp's and
-	// Anthropic's use EnableThinking and ReasoningBudgetTokens.
+	// an endpoint that takes an effort rather than a budget. Sent by the
+	// openrouter and openai dialects and on the Messages API, where it is the
+	// ONLY reasoning field forwarded (EnableThinking and ReasoningBudgetTokens
+	// are ignored there). The llama.cpp dialect and Anthropic's OpenAI-compat
+	// dialect use EnableThinking and ReasoningBudgetTokens instead (see
+	// reasoning.go).
 	ReasoningEffort string
 }
 
@@ -1435,17 +1544,20 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 	}
 }
 
-// ChatStream sends a chat completion request with streaming enabled.
-// It returns a channel that emits StreamChunks as they arrive.
-func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
+// chatBody is the request body both chat paths send, so a field one honors the
+// other cannot drop: tool_choice, grammar and response_format are as binding on
+// a non-streaming call as on a streaming one.
+func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) map[string]any {
 	body := map[string]any{
 		"model":    c.wireModel(ctx),
 		"messages": messages,
-		"stream":   true,
+		"stream":   stream,
+	}
+	if stream {
 		// Ask the provider for token usage on the final stream chunk.
 		// Honored by OpenAI; Anthropic-via-compat provides usage by
 		// default; other providers silently ignore.
-		"stream_options": map[string]any{"include_usage": true},
+		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if c.User != "" {
 		body["user"] = c.User
@@ -1476,6 +1588,13 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		body["response_format"] = opts.ResponseFormat
 	}
 	c.applySampling(body, opts)
+	return body
+}
+
+// ChatStream sends a chat completion request with streaming enabled.
+// It returns a channel that emits StreamChunks as they arrive.
+func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
+	body := c.chatBody(ctx, messages, tools, opts, true)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -1525,28 +1644,19 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
-	body := map[string]any{
-		"model":    c.wireModel(ctx),
-		"messages": messages,
-		"stream":   false,
-	}
-	if c.User != "" {
-		body["user"] = c.User
-	}
-	if len(tools) > 0 {
-		body["tools"] = tools
-	}
-	c.applySampling(body, opts)
+	body := c.chatBody(ctx, messages, tools, opts, false)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", nil, fmt.Errorf("llm: marshal: %w", err)
 	}
 
-	// Chat is the non-streaming path; today no caller passes a trace
-	// id here, so X-Trace-Id stays unset.
+	var ident callIdent
+	if opts != nil {
+		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
+	}
 	callStart := time.Now()
-	resp, err := c.postChatWithRetry(ctx, payload, callIdent{})
+	resp, err := c.postChatWithRetry(ctx, payload, ident)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1636,8 +1746,11 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		lastUsage = u
 	}
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 65536), 65536)
+	// A Reader, not a Scanner: one SSE event is one line and a provider may
+	// send a single data line far larger than any fixed token cap (a big
+	// tool-call argument or a base64 payload).
+	reader := bufio.NewReader(body)
+	var readErr error
 
 	// Tool-call accumulator. Keyed by index from the streaming protocol.
 	// Order is maintained via toolOrder (deltas might arrive out of
@@ -1714,15 +1827,27 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		return truncated
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			if line == "" {
+				break
+			}
+			// A final line without its newline is still a line.
+		}
+		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		// The SSE spec makes the space after the colon optional.
+		data, isData := strings.CutPrefix(line, "data:")
+		if !isData {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data = strings.TrimPrefix(data, " ")
 		events++
 		if data == "[DONE]" {
 			sawDone = true
@@ -1901,8 +2026,8 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			ch <- StreamChunk{Usage: event.Usage}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		ch <- StreamChunk{Error: err.Error()}
+	if readErr != nil {
+		ch <- StreamChunk{Error: readErr.Error()}
 	}
 	// The stream ended WITHOUT a finish_reason — a dropped connection, a server
 	// that gave up mid-generation, a truncated body. Anything still in the
@@ -1938,6 +2063,19 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			events, contentChars, sawFinish, sawDone, len(partial), names, bytes)
 		log.Print(detail)
 		ch <- StreamChunk{Error: detail, PartialToolCalls: partial}
+		return
+	}
+	// No partial call, but also no terminator: the body closed with neither
+	// [DONE] nor a finish_reason. The text so far reads as a complete answer to
+	// a caller that sees only a closed channel, so say it is not. A read error
+	// has already been reported above.
+	if readErr == nil && !sawDone && !sawFinish {
+		detail := fmt.Sprintf(
+			"llm: PROVIDER TRUNCATED THE STREAM — body closed after %d events (%d content chars) "+
+				"with no finish_reason and no [DONE]. The reply is incomplete. Cause is upstream "+
+				"(a dropped connection or a server that gave up), not the caller.", events, contentChars)
+		log.Print(detail)
+		ch <- StreamChunk{Error: detail}
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/iodesystems/agentkit/llm"
@@ -28,11 +30,6 @@ import (
 type Validator interface {
 	ValidateArgs(toolName, argsJSON string) error
 }
-
-// ValidatorFunc adapts a function to Validator.
-type ValidatorFunc func(toolName, argsJSON string) error
-
-func (f ValidatorFunc) ValidateArgs(toolName, argsJSON string) error { return f(toolName, argsJSON) }
 
 // ValidatingDispatcher returns a ToolDispatcher that validates arguments
 // before delegating to inner. On validation failure it returns the fix
@@ -73,7 +70,7 @@ type SchemaValidator struct {
 
 type toolSchema struct {
 	required []string
-	types    map[string]string // property name → declared JSON type (if any)
+	types    map[string][]string // property name → declared JSON type(s) (if any)
 }
 
 // NewSchemaValidator indexes the required-keys + declared types from each
@@ -88,7 +85,7 @@ func NewSchemaValidator(tools []llm.ToolDef) *SchemaValidator {
 }
 
 func parseToolSchema(params any) toolSchema {
-	ts := toolSchema{types: map[string]string{}}
+	ts := toolSchema{types: map[string][]string{}}
 	// params is typically map[string]any from JSON, or a Go value the caller
 	// built. Normalize via a JSON round-trip so both shapes work.
 	raw, err := json.Marshal(params)
@@ -98,7 +95,8 @@ func parseToolSchema(params any) toolSchema {
 	var schema struct {
 		Required   []string `json:"required"`
 		Properties map[string]struct {
-			Type string `json:"type"`
+			// JSON Schema allows one name or a list ("integer", "null").
+			Type json.RawMessage `json:"type"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
@@ -106,8 +104,13 @@ func parseToolSchema(params any) toolSchema {
 	}
 	ts.required = schema.Required
 	for name, p := range schema.Properties {
-		if p.Type != "" {
-			ts.types[name] = p.Type
+		var one string
+		var many []string
+		switch {
+		case json.Unmarshal(p.Type, &one) == nil && one != "":
+			ts.types[name] = []string{one}
+		case json.Unmarshal(p.Type, &many) == nil && len(many) > 0:
+			ts.types[name] = many
 		}
 	}
 	return ts
@@ -143,8 +146,8 @@ func (sv *SchemaValidator) ValidateArgs(toolName, argsJSON string) error {
 		if !ok || string(v) == "null" {
 			continue // absent optional field — fine
 		}
-		if got := jsonKind(v); got != "" && !typeMatches(want, got) {
-			typeErrs = append(typeErrs, fmt.Sprintf("%s should be %s, got %s", name, want, got))
+		if got := jsonKind(v); got != "" && !typeMatches(want, got, v) {
+			typeErrs = append(typeErrs, fmt.Sprintf("%s should be %s, got %s", name, strings.Join(want, " or "), got))
 		}
 	}
 	if len(typeErrs) > 0 {
@@ -176,11 +179,28 @@ func jsonKind(v json.RawMessage) string {
 	}
 }
 
-func typeMatches(want, got string) bool {
-	switch want {
-	case "integer", "number":
-		return got == "number"
-	default:
-		return want == got
+// typeMatches reports whether a value of JSON kind got satisfies any declared
+// type. "integer" is a number with no fractional part: 2 and 2.0 pass, 1.5 does
+// not.
+func typeMatches(want []string, got string, v json.RawMessage) bool {
+	for _, w := range want {
+		switch w {
+		case "number":
+			if got == "number" {
+				return true
+			}
+		case "integer":
+			if got != "number" {
+				continue
+			}
+			if f, err := strconv.ParseFloat(strings.TrimSpace(string(v)), 64); err == nil && f == math.Trunc(f) {
+				return true
+			}
+		default:
+			if w == got {
+				return true
+			}
+		}
 	}
+	return false
 }

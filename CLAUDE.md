@@ -63,8 +63,9 @@ plan/     living plan. Only plan.md exists today; it carries its own Icebox
 - `agent.Store` — 4 methods: `ClaimPending`, `Append`, `Context`, `Compact`
   (+ the host's own inbox/publish helpers, not part of the interface).
 - `agent.ToolDispatcher` — `func(ctx, llm.ToolCall) (string, error)`. Errors
-  meant for the MODEL go INTO the result string; a returned Go error aborts the
-  whole Turn. Return `agent.ErrSessionClosed` from a terminal tool to stop the loop.
+  meant for the MODEL go INTO the result string; any other returned Go error is
+  recorded as an `ERROR: ...` tool result and the loop continues (it does not
+  abort the Turn). Return `agent.ErrSessionClosed` from a terminal tool to stop the loop.
   It is a func type, so DECORATING it is the extension seam — `ValidatingDispatcher`
   is one, and dun's `withLiftedQueue` (fold buffered news into the in-flight
   tool's result) is another. Reach for a wrapper before a new primitive.

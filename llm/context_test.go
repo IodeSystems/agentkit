@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,20 @@ func TestBodyIsContextOverflow(t *testing.T) {
 	}
 	if bodyIsContextOverflow("invalid api key") {
 		t.Error("must not treat an auth error as a context overflow")
+	}
+}
+
+func TestDiscoverContext_MessagesAPIClientIsRefusedNotProbed(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer srv.Close()
+	c := NewClient(srv.URL, "k", "claude-x")
+	c.MessagesAPI = true
+	_, err := c.DiscoverContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "Messages API") {
+		t.Fatalf("err = %v; want a clear Messages API error", err)
+	}
+	if hits != 0 {
+		t.Fatalf("%d requests sent; none expected", hits)
 	}
 }

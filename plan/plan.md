@@ -993,6 +993,24 @@ ignored these, so the information was on the wire and thrown away.
   `thinking` set returned prompt_tokens 46 / completion 182 against 17 / 53
   without it. Thinking content is not surfaced in the OpenAI response shape.
 
+### ✅ Slice N — audio, video and files on a user message (`llm/client.go`, `agent/mediatokens.go`, 2026-11-06)
+- `ContentPart` gains `InputAudio` (`input_audio`, BARE base64 + format),
+  `VideoURL` (`video_url`: vLLM's shape, and llama.cpp's alias of its
+  `input_video`), `File` (`file`, data: URI in `file_data`). Helpers `AudioData`,
+  `VideoPart`/`VideoData`, `FileData`/`PDFData`. Wire shapes verified in source:
+  vLLM main b2094acc, llama.cpp master 6c01da62.
+- shim v0.5.0 (`dd29649`): a file → `document` (PDF base64, text → plain-text
+  source); audio, video, file_id, file by URL, other mimes → error wrapping
+  `ErrUnsupportedContent` (re-exported as `llm.ErrUnsupportedContent`); reverse
+  maps a base64 PDF document back to `file`. Refused before any HTTP.
+- **Decision (Carl, 2026-11-06):** unsupported media FAILS LOUDLY; agentkit never
+  strips a part. The fallback (transcribe, describe, caption) is host policy.
+- `messageTokens` → `partTokens`: PDF = pages × (3000 + 1600), page objects
+  counted, else 1 per 100 KB; audio 32 tok/s (WAV header, else 128 kbps); video
+  300 tok/s at 1 Mbps, URL = 60 s; text file = its text. All err high.
+- **Not verified:** the token constants against a real server's Usage; no live
+  test run (llama.cpp refuses a `file` part — corrallm converts PDFs first).
+
 ## What's next (open, none blocking)
 - **Deferred/opt-in:** runtime `select_indexes` MCP tool; eager summaries for
   oversized fragments (currently pointer-notify covers it).
@@ -1046,6 +1064,29 @@ ignored these, so the information was on the wire and thrown away.
   project at `agentkit/agent` as the 2nd consumer to validate the seam.
 
 ## Icebox (deferred, opt-in)
+- **Images in tool results** — today only a USER entry carries `Parts`;
+  `renderEntry` drops them on `KindToolResult`, and `mcpmgr/protocol.go`
+  renders an MCP `image` block as `[image: <full base64>]` text. The shim
+  already maps image parts inside a `tool` message to a Claude `tool_result`
+  image; OpenAI-compatible servers reject images in a `tool` message.
+  **Resume condition:** a host needs a tool to show the model a picture.
+  **Blocking decision (Carl):** tool_result image on Claude + follow-up user
+  message elsewhere, vs always a follow-up user message. **Evidence:** dun
+  (`images.go`, user-side only, x/image scaling) and aw4 (`toolpicture`,
+  newest-two-shown aging) each built their own; image aging is the part that
+  may belong here. The base64-as-text render is a bug to fix regardless.
+- **aw4 modelgate counts media parts as free** — `aw4/internal/agent/modelgate.go`
+  `promptTokenEstimate` counts `image_url` as 85 and every other part by
+  `len(p.Text)`, so an `input_audio`, `video_url` or `file` part counts 0.
+  **Resume condition:** aw4 sends a non-image media part to a gated model.
+  **Evidence:** read 2026-11-06 (lines ~494–520); agentkit's own `messageTokens`
+  counts them (`agent/mediatokens.go`). Fix is aw4's: call a shared estimator or
+  copy the per-kind rules.
+- **shim `EstimateTokens` counts base64 as text** — it adds `len(content JSON)/4`,
+  so a 1 MB PDF or image counts ~350k tokens where Claude bills a few thousand.
+  **Resume condition:** a Messages-API front end (corrallm `count_tokens`) answers
+  for requests carrying media. **Evidence:** `reverse.go` `EstimateTokens`, read
+  2026-11-06; it errs high, so it is a cost of folding early, not a refusal.
 - **Daemon-side active recheck** — a notice carrying a shell/MCP command the
   daemon RUNS. NOT built: arbitrary shell from a notification payload is a
   privilege-escalation surface. Superseded by the hook + masked-MCP

@@ -47,6 +47,10 @@ type transcoded struct {
 // and a session should not change model under itself more than it has to.
 const aliasTTL = time.Hour
 
+// aliasRetryAfter is how long a failed resolution is not retried. Without it a
+// down model list costs a blocking GET, held under the alias lock, on every call.
+const aliasRetryAfter = 30 * time.Second
+
 // wireModel is the model to send: an alias (opus-latest) resolved from the
 // endpoint's model list, anything else as it is. A list that cannot be read leaves
 // the alias, and the provider's refusal says what is wrong.
@@ -59,15 +63,22 @@ func (c *Client) wireModel(ctx context.Context) string {
 	if c.aliasID != "" && time.Since(c.aliasAt) < aliasTTL {
 		return c.aliasID
 	}
+	if !c.aliasFailAt.IsZero() && time.Since(c.aliasFailAt) < aliasRetryAfter {
+		if c.aliasID != "" {
+			return c.aliasID
+		}
+		return c.model
+	}
 	id, err := c.resolveAlias(ctx)
 	if err != nil {
 		log.Printf("llm: could not resolve %s: %v", c.model, err)
+		c.aliasFailAt = time.Now()
 		if c.aliasID != "" {
 			return c.aliasID // the last answer beats none
 		}
 		return c.model
 	}
-	c.aliasID, c.aliasAt = id, time.Now()
+	c.aliasID, c.aliasAt, c.aliasFailAt = id, time.Now(), time.Time{}
 	return id
 }
 

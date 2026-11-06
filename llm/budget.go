@@ -140,7 +140,7 @@ func (c *Client) budgetCandidates() []budgetRoute {
 }
 
 // fetchBudget asks one endpoint. definitive reports whether the endpoint
-// ANSWERED (any HTTP status, any body): a definitive failure means "not this
+// gave a final answer (a body, or a status saying the route is absent): a definitive failure means "not this
 // kind of gateway", a non-definitive one means "could not ask".
 func (c *Client) fetchBudget(ctx context.Context, r budgetRoute) (b KeyBudget, definitive bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, budgetProbeTimeout)
@@ -167,7 +167,10 @@ func (c *Client) fetchBudget(ctx context.Context, r budgetRoute) (b KeyBudget, d
 		return KeyBudget{}, false, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return KeyBudget{}, true, fmt.Errorf("llm: key budget %s: status %d", r.url, resp.StatusCode)
+		// Only "no such route" is an answer about the gateway. A 401 or 403 is
+		// about this key, a 5xx about the moment; remembering either as
+		// "unsupported" would hide a budget that exists until the process restarts.
+		return KeyBudget{}, routeAbsentStatus(resp.StatusCode), fmt.Errorf("llm: key budget %s: status %d", r.url, resp.StatusCode)
 	}
 	switch r.source {
 	case BudgetSourceLiteLLM:

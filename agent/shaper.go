@@ -381,8 +381,9 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 // tokensBefore/target are what the CALLER measured, passed in rather than
 // recomputed: Build already rendered the window to decide a fold was needed, and
 // re-measuring here would report a different number than the one that triggered
-// it. Zero from a caller that has no measurement (the public Compact) means the
-// start report carries what it knows and no more.
+// it. CompactionStart and CompactionInfo both carry it. Zero from a caller that
+// has no measurement (the public Compact) means it is measured here, without
+// the system prompt.
 func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target int, task string) (CompactionInfo, bool, error) {
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
@@ -402,18 +403,21 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	pinned := sh.pinnedIndex(entries)
 	var subsumed []Entry
 	var foldable []Entry // what the summarizer reads: the older entries but the pinned one
+	var fresh []Entry    // the subsumed entries that are not markers
 	for i := 0; i < olderEnd; i++ {
 		if i == pinned {
 			continue // the subject stays verbatim
 		}
 		foldable = append(foldable, entries[i])
-		if entries[i].Kind == KindCompaction {
-			// Already-compacted region — don't re-summarize a marker.
-			continue
-		}
 		subsumed = append(subsumed, entries[i])
+		if entries[i].Kind != KindCompaction {
+			fresh = append(fresh, entries[i])
+		}
 	}
-	if len(subsumed) == 0 {
+	// A marker beside nothing new is already as small as it gets. A marker
+	// beside new entries is read by the summarizer, so the new summary carries
+	// it and it is subsumed with them: one marker remains, not one per fold.
+	if len(fresh) == 0 {
 		return CompactionInfo{}, false, nil
 	}
 
@@ -422,10 +426,10 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	// beside it. A fixed 500 tokens was a twentieth of a 10k fold and a
 	// two-hundred-and-fortieth of a 120k one.
 	folded := sh.tokens(sh.render(subsumed, 0, "", false))
-	whole := tokensBefore
-	if whole == 0 {
-		whole = before
+	if tokensBefore == 0 {
+		tokensBefore = before
 	}
+	whole := tokensBefore
 	sizeFor := sh.SummaryTokens
 	if sizeFor == nil {
 		sizeFor = DefaultSummaryTokens
@@ -439,7 +443,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		SessionID:    sessionID,
 		TokensBefore: tokensBefore,
 		Target:       target,
-		Subsuming:    len(subsumed),
+		Subsuming:    len(fresh),
 		At:           startedAt,
 	})
 
@@ -469,7 +473,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	}
 	// After the fold has applied: what was deleted from the transcript is kept
 	// in the index, under the marker that replaced it.
-	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, subsumed)
+	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, fresh)
 
 	// Measure the new active window by re-rendering the post-compaction entries.
 	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
@@ -482,8 +486,8 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 
 	return CompactionInfo{
 		Summary:       summary,
-		SubsumedCount: len(subsumed),
-		TokensBefore:  before,
+		SubsumedCount: len(fresh),
+		TokensBefore:  tokensBefore,
 		TokensAfter:   after,
 		Duration:      time.Since(startedAt),
 		IndexErr:      indexErr,
@@ -551,14 +555,14 @@ func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
 				count++
 				continue
 			}
-			return count
+			return keepCallsWithResults(entries, count)
 		case KindToolCall, KindToolResult:
 			if tools < maxToolCalls {
 				tools++
 				count++
 				continue
 			}
-			return count
+			return keepCallsWithResults(entries, count)
 		case KindCompaction:
 			// Markers are already compressed; always pass through.
 			count++
@@ -568,7 +572,31 @@ func classifyPristineCount(entries []Entry, maxMessages, maxToolCalls int) int {
 			count++
 		}
 	}
-	return count
+	return keepCallsWithResults(entries, count)
+}
+
+// keepCallsWithResults widens a tail so no result in it has its call outside it.
+// A fold that summarized the call and kept the result leaves a tool message with
+// no tool_call before it, and a provider rejects the request. Widening keeps the
+// pair verbatim; it can only keep more, never fold more. An entry with no
+// ToolCallID cannot be paired and is left as classified.
+func keepCallsWithResults(entries []Entry, count int) int {
+	calls := map[string]int{}
+	for i, e := range entries {
+		if e.Kind == KindToolCall && e.ToolCallID != "" {
+			calls[e.ToolCallID] = i
+		}
+	}
+	start := len(entries) - count
+	for i := len(entries) - 1; i >= start; i-- {
+		if entries[i].Kind != KindToolResult {
+			continue
+		}
+		if c, ok := calls[entries[i].ToolCallID]; ok && c < start {
+			start = c
+		}
+	}
+	return len(entries) - start
 }
 
 // render builds the llm.Message list. When lod is true, entries outside the
@@ -597,9 +625,14 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 		if i == pinned {
 			return content
 		}
+		if e.Kind == KindCompaction {
+			// A marker is the only record of what it folded; cutting it loses
+			// that for good, and SummaryMaxTokens already bounds it.
+			return content
+		}
 		if lod && i < olderEnd && len(content) > sh.Policy.LODTruncateAboveChars && sh.Policy.LODTruncateAboveChars > 0 {
 			content = sh.stub(e, sh.Policy.LODTruncateAboveChars, askedBy[e.ToolCallID])
-		} else if n := sh.Policy.MaxToolResultChars; n > 0 && len(content) > n {
+		} else if n := sh.Policy.MaxToolResultChars; n > 0 && e.Kind == KindToolResult && len(content) > n {
 			// Not aged out and not under LOD — the preserved tail. Bounded
 			// anyway, because "recent" is not a reason to be unbounded.
 			content = sh.stub(e, n, askedBy[e.ToolCallID])
@@ -677,13 +710,6 @@ func oneLine(s string, max int) string {
 		s = cutRunes(s[:max], false) + "…"
 	}
 	return s
-}
-
-func ifThen(cond bool, then string) string {
-	if cond {
-		return then
-	}
-	return ""
 }
 
 // summarizeErr wraps a compaction failure so the jsonl says WHY the fold died,
@@ -819,8 +845,7 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 func (sh *Shaper) tokens(msgs []llm.Message) int {
 	t := 0
 	for _, m := range msgs {
-		t += sh.Estimate.Estimate(m.Content)
-		t += sh.Estimate.Estimate(m.Role) + sh.Estimate.Estimate(m.Name)
+		t += messageTokens(sh.Estimate, m)
 	}
 	return t
 }

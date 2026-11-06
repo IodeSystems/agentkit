@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,7 +41,6 @@ type tokenizeRoute struct {
 	url       string
 	vllm      bool // vLLM wants {"model","prompt"} and answers {"count"}
 	anthropic bool // counts a rendered prompt; answers {"input_tokens"}
-	checked   bool
 	ok        bool
 }
 
@@ -83,21 +83,57 @@ func (c *Client) tokenizeRoute(ctx context.Context) *tokenizeRoute {
 		return v.(*tokenizeRoute)
 	}
 	found := &tokenizeRoute{}
+	definitive := true
 	for _, cand := range c.tokenizeCandidates() {
-		if _, err := c.countAt(ctx, &cand, "probe"); err == nil {
+		_, err := c.countAt(ctx, &cand, "probe")
+		if err != nil && !errors.As(err, new(*routeAbsentError)) {
+			definitive = false
+		}
+		if err == nil {
 			// Copy the CANDIDATE, don't rebuild it field by field. The rebuild
 			// silently dropped the dialect flag when one was added, so a
 			// discovered structured endpoint came back out of the cache looking
 			// like a string tokenizer and answered the wrong question.
 			hit := cand
-			hit.checked, hit.ok = true, true
+			hit.ok = true
 			found = &hit
 			break
 		}
 	}
-	found.checked = true
-	tokenizeRoutes.Store(key, found)
+	// Remember only an answer. "No tokenizer" is cached when every candidate
+	// said so (route absent, or a 200 that is not a tokenizer); a transport
+	// fault, a 401/403 or a 5xx says nothing about the endpoint, and caching it
+	// would turn one bad moment into no tokenizer for the life of the process.
+	if found.ok || definitive {
+		tokenizeRoutes.Store(key, found)
+	}
 	return found
+}
+
+// routeAbsentError marks a probe that got a definitive "this route is not a
+// tokenizer here", as opposed to a failure that says nothing about the route.
+type routeAbsentError struct{ msg string }
+
+func (e *routeAbsentError) Error() string { return e.msg }
+
+// routeAbsentStatus reports whether an HTTP status means the route does not
+// exist, as opposed to being refused or broken at the moment.
+func routeAbsentStatus(code int) bool {
+	return code == http.StatusNotFound || code == http.StatusMethodNotAllowed || code == http.StatusNotImplemented
+}
+
+// setProbeHeaders applies what every request this client makes carries: the
+// extra Header set and the credential. Probes go to the same gateway and are
+// refused by it the same way as a chat call.
+func (c *Client) setProbeHeaders(req *http.Request) {
+	for k, vs := range c.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 }
 
 // tokenizeCandidates are the places a tokenizer is known to live, in the order
@@ -150,9 +186,7 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
+	c.setProbeHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
@@ -163,7 +197,11 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 		return 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("llm: tokenize %s: status %d", r.url, resp.StatusCode)
+		err := fmt.Errorf("llm: tokenize %s: status %d", r.url, resp.StatusCode)
+		if routeAbsentStatus(resp.StatusCode) {
+			return 0, &routeAbsentError{err.Error()}
+		}
+		return 0, err
 	}
 	// A single-page app answering 200 with HTML for every unknown path is the
 	// normal shape of a proxy with a UI, and it is why a status check alone
@@ -175,7 +213,7 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 		InputTokens *int              `json:"input_tokens"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return 0, fmt.Errorf("llm: tokenize %s: not a tokenizer response", r.url)
+		return 0, &routeAbsentError{fmt.Sprintf("llm: tokenize %s: not a tokenizer response", r.url)}
 	}
 	if out.InputTokens != nil {
 		return *out.InputTokens, nil
@@ -184,7 +222,7 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 		return *out.Count, nil
 	}
 	if out.Tokens == nil {
-		return 0, fmt.Errorf("llm: tokenize %s: no token count in response", r.url)
+		return 0, &routeAbsentError{fmt.Sprintf("llm: tokenize %s: no token count in response", r.url)}
 	}
 	return len(out.Tokens), nil
 }
@@ -212,9 +250,7 @@ func (c *Client) propsContext(ctx context.Context, url string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
+	c.setProbeHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
@@ -309,9 +345,7 @@ func (c *Client) countPromptAt(ctx context.Context, r *tokenizeRoute, system str
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
+	c.setProbeHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
@@ -322,7 +356,11 @@ func (c *Client) countPromptAt(ctx context.Context, r *tokenizeRoute, system str
 		return 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("llm: count_tokens %s: status %d", r.url, resp.StatusCode)
+		err := fmt.Errorf("llm: count_tokens %s: status %d", r.url, resp.StatusCode)
+		if routeAbsentStatus(resp.StatusCode) {
+			return 0, &routeAbsentError{err.Error()}
+		}
+		return 0, err
 	}
 	var out struct {
 		InputTokens *int `json:"input_tokens"`
@@ -330,7 +368,7 @@ func (c *Client) countPromptAt(ctx context.Context, r *tokenizeRoute, system str
 	if err := json.Unmarshal(raw, &out); err != nil || out.InputTokens == nil {
 		// Same trap as /tokenize: a proxy with a UI answers 200 and HTML for an
 		// unknown path, so only the parsed body proves the route exists.
-		return 0, fmt.Errorf("llm: count_tokens %s: not a count response", r.url)
+		return 0, &routeAbsentError{fmt.Sprintf("llm: count_tokens %s: not a count response", r.url)}
 	}
 	return *out.InputTokens, nil
 }

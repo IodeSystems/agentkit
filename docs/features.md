@@ -59,7 +59,7 @@ func dispatch(ctx context.Context, tc llm.ToolCall) (string, error) {
 
 Errors meant for the **model** (unknown tool, bad args) go into the result
 string so the loop stays alive and the model can recover. A returned Go error
-aborts the Turn. A terminal tool returns `agent.ErrSessionClosed` to stop the
+is recorded as an `ERROR: ...` result and the loop continues. A terminal tool returns `agent.ErrSessionClosed` to stop the
 loop after its result is persisted (used with `tool_choice=required` roles).
 
 ### Claude Messages API

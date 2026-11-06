@@ -197,6 +197,10 @@ func PlanRecap(entries []Entry, from string, keep []string) (RecapSpan, error) {
 
 // LiveCallID is the tool call still awaiting a result — during a recap, the
 // recap call itself.
+//
+// The FIRST unanswered call, not the last: Turn persists every call of a round
+// before it dispatches any, and dispatches them in order, so the call that is
+// running is the earliest one without a result. Calls after it are queued.
 func LiveCallID(entries []Entry) string {
 	results := map[string]bool{}
 	for _, e := range entries {
@@ -204,7 +208,7 @@ func LiveCallID(entries []Entry) string {
 			results[e.ToolCallID] = true
 		}
 	}
-	for i := len(entries) - 1; i >= 0; i-- {
+	for i := range entries {
 		if entries[i].Kind == KindToolCall && !results[entries[i].ToolCallID] {
 			return entries[i].ToolCallID
 		}

@@ -197,6 +197,12 @@ func FinderPreparer(store Store, finder DocFinder, opts FinderOpts) Notification
 		}
 
 		// Threshold, then best-first, so MaxHits keeps the strongest.
+		//
+		// The dedup set is shared by every pass for this session, so it is read
+		// and written under mu. The chosen hits are claimed in it BEFORE the
+		// appends, which also stops a concurrent pass from announcing the same
+		// doc; a failed append releases its claim.
+		mu.Lock()
 		kept := hits[:0:0]
 		for _, h := range hits {
 			if h.Score >= opts.MinScore && h.DocID != "" && !seenIDs[h.DocID] {
@@ -204,12 +210,15 @@ func FinderPreparer(store Store, finder DocFinder, opts FinderOpts) Notification
 			}
 		}
 		sort.SliceStable(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
-
-		injected := 0
+		if opts.MaxHits > 0 && len(kept) > opts.MaxHits {
+			kept = kept[:opts.MaxHits]
+		}
 		for _, h := range kept {
-			if opts.MaxHits > 0 && injected >= opts.MaxHits {
-				break
-			}
+			seenIDs[h.DocID] = true
+		}
+		mu.Unlock()
+
+		for i, h := range kept {
 			if err := store.Append(ctx, sessionID, Entry{
 				ID:        NewID(),
 				Kind:      KindNotification,
@@ -217,10 +226,13 @@ func FinderPreparer(store Store, finder DocFinder, opts FinderOpts) Notification
 				Content:   opts.Render(h),
 				CreatedAt: now(),
 			}); err != nil {
+				mu.Lock()
+				for _, r := range kept[i:] {
+					delete(seenIDs, r.DocID)
+				}
+				mu.Unlock()
 				return err
 			}
-			seenIDs[h.DocID] = true
-			injected++
 		}
 
 		// Advance the watermark only after a successful pass so a fresh entry is

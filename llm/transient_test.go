@@ -1,8 +1,10 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"syscall"
 	"testing"
@@ -68,6 +70,42 @@ func TestTransientReasonNamesTheFault(t *testing.T) {
 	for _, want := range []string{"restarted", "stream"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reason should mention %q, got %q", want, got)
+		}
+	}
+}
+
+func TestTransientUpstream_CallerCancellationAndDeadlineAreNeverTransient(t *testing.T) {
+	for name, err := range map[string]error{
+		"canceled":         &url.Error{Op: "Post", URL: "http://x", Err: context.Canceled},
+		"deadline":         &url.Error{Op: "Post", URL: "http://x", Err: context.DeadlineExceeded},
+		"wrapped canceled": fmt.Errorf("agent: chat: %w", &url.Error{Op: "Post", URL: "http://x", Err: context.Canceled}),
+		"wrapped deadline": fmt.Errorf("agent: chat: %w", context.DeadlineExceeded),
+	} {
+		if TransientUpstream(err) {
+			t.Errorf("%s: a caller's cancellation or deadline is not the server going away", name)
+		}
+	}
+}
+
+func TestTransientUpstream_StatusCodesMatchStructurallyNotAsBareNumbers(t *testing.T) {
+	for _, s := range []string{
+		"llm: status 400: 502 tokens too many",
+		"llm: status 400: prompt has 429 messages",
+		"llm: status 422: field 504 is invalid",
+	} {
+		if TransientUpstream(errors.New(s)) {
+			t.Errorf("a number inside a 4xx body is not a gateway status: %q", s)
+		}
+	}
+	for _, s := range []string{
+		"llm: status 502",
+		"llm: status 503: backend down",
+		"llm: status 504 (after 4 retries)",
+		"llm: retry budget 5m0s exhausted after 3s (last status 503)",
+		"llm: status 429: slow down",
+	} {
+		if !TransientUpstream(errors.New(s)) {
+			t.Errorf("real error string must stay transient: %q", s)
 		}
 	}
 }
