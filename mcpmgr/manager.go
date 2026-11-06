@@ -450,11 +450,14 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 
 	init, err := mc.initialize(handshakeCtx, clientName, clientVersion)
 	if err != nil {
+		// Settle BEFORE close: close shuts the stderr pipe, and a drain that
+		// has not yet read the dying server's complaint then gets "file
+		// already closed" and an empty tail.
+		tail.settle()
 		mc.close()
 		if secretDir != "" {
 			os.RemoveAll(secretDir)
 		}
-		tail.settle()
 		return nil, fmt.Errorf("mcp: initialize %s: %w%s", cfg.Name, err, tail.suffix())
 	}
 
