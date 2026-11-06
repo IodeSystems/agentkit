@@ -16,7 +16,9 @@ small interfaces. See `README.md` + `docs/` for the external story.
 ## Layout
 
 ```
-llm/      OpenAI-compatible streaming chat client. stdlib only.
+llm/      OpenAI-compatible streaming chat client; the Claude Messages API goes
+          through openai-claude-api-shim (ours, stdlib only). Multimodal user
+          parts: text, image, audio, video, file.
 mcpmgr/   MCP server manager (spawn/discover/call, thread scoping, secrets).
           Own JSON-RPC stdio client (jsonrpc.go + protocol.go). stdlib only.
 agent/    the tablestakes engine: Session.Turn loop + Shaper + primitives. imports llm + stdlib only.
@@ -30,10 +32,16 @@ taskgraph/  opt-in model-kept plan: DAG of nodes, the `plan` tool, and Diff/Appl
           its sub-agents through ONE host-provided Store (no impl shipped). Owner is
           opaque; permission, approval, delegation and delivery are host hooks.
           imports llm + stdlib only; agent does not import it. Ported from dun.
+mcpmgr/mcpauth/  OAuth discovery for MCP servers (RFC 9728 / 8414). Used by dun.
+agent/toolfmt/   token-lean re-encoding of tool results (EncodeTightC).
+cmd/toolfmt/     stdin→stdout CLI over agent/toolfmt (tightc's conformance test).
+ragnotify/       parses a retrieval MCP server's hits into []agent.DocHit (ParseHits).
+anthropicadmin/  an Anthropic org's real spend, by Admin key or `ant` login. Used by dun.
 examples/agentkit-demo/  runnable CLI, one subcommand per feature.
-plan/     living plan. Only plan.md exists today; it carries its own Icebox
-          section rather than the separate done.md / icebox.md the global
-          convention describes.
+plan/     living plan. plan.md = current state + active work + decisions;
+          done.md = archive of finished work; icebox.md = deferred, opt-in
+          steps (each with a resume condition); claude-api-plan.md = gaps
+          between the OpenAI shape and the Claude Messages API.
 ```
 
 ## Invariants — do not break
@@ -49,8 +57,8 @@ plan/     living plan. Only plan.md exists today; it carries its own Icebox
    the unused `yaml` secret format.)
 1. **`llm` and `mcpmgr` stay zero-internal-dep.** They must be usable
    standalone. Verify with `go list -deps ./llm ./mcpmgr` — no `agentkit/agent`.
-2. **The neutral seam.** `agent` imports ONLY `agentkit/llm`, `agentkit/mcpmgr`,
-   and stdlib. It must NEVER import a host's storage/event model. If a host type
+2. **The neutral seam.** `agent` imports ONLY `agentkit/llm` and stdlib.
+   It must NEVER import a host's storage/event model. If a host type
    feels necessary, add a field to `Entry` (round-tripped verbatim, like `Tag`
    and `Origin`) or a method to `Store` instead — never a concrete host import.
 3. **`agent` works on two shapes only:** `llm.Message` on the wire, `Entry` for

@@ -3,7 +3,7 @@
 > How this plan works: the gaps between the OpenAI shape agentkit speaks and the
 > Claude Messages API, with a proposal for each. Rules are in `plan/plan.md`.
 > Status marks: ◻ todo · ◐ in progress · ✅ done · ⏸ parked · ❓ blocked.
-> Move a finished slice to `plan/done.md` and delete it here.
+> Finished gaps and sections moved to `plan/done.md` ("Claude Messages API: finished gaps"); gaps 1, 7, 8 and 13 are there.
 
 ## State
 
@@ -46,7 +46,6 @@ The caller asks for something the Messages API does not take.
 
 | # | Status | Gap | Now | Proposal |
 |---|---|---|---|---|
-| 1 | ✅ | Forced `ToolChoice` (object or `required`) | `required` is `{type:any}`, a named function `{type:tool,name:X}` | Done. On Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1, which return a 400, it is `auto`; a named function is then the only tool sent, and `required` stays `auto` over every tool (`noForcedToolChoice`) |
 | 2 | ◻ | `ResponseFormat` | Ignored | Map to `output_config.format` |
 | 3 | ⏸ | `Grammar` | Ignored | None. It belongs to the heredoc transport, which this path does not use |
 | 4 | ⏸ | `Temperature`, `Seed`, penalties | Not sent | None. Current models reject them |
@@ -78,13 +77,10 @@ error.
 |---|---|---|---|---|---|
 | 5 | ◻ | Tool errors | Text, `is_error` false | Carry an error flag on the tool `Message`; dun's results start `ERROR:` | Small |
 | 6 | ◻ | Refusals | A stream error; the turn fails | `fallbacks: "default"` on the beta endpoint for Opus and Sonnet 5.5 | Small |
-| 7 | ✅ | Rate limits and cost | Response headers read as on any provider | Check Anthropic's header names reach `rateLimitsFrom` | Small |
-| 8 | ✅ | Retries | The client's own retries, `RetryBudget` and `OnRetry` | Done by the shim move | Done |
 | 9 | ◻ | Host notices | User messages | Mid-conversation system messages, which keep the cached prefix | Medium |
 | 10 | ◻ | Cache lifetime | 5 minutes; an idle session misses | Option for the 1-hour TTL | Small |
 | 11 | ◻ | Thinking blocks | Not replayed | See below | Large |
 | 12 | ◻ | Context measuring | `tokenize.go` routes do not know this API | `count_tokens` | Small |
-| 13 | ✅ | Spend | The shim estimates usage from Anthropic's list (`price.go`) and marks it; agentkit reports it as `CurrencyUSDEstimate`, never summed with a reported figure. A host overrides with `Client.ClaudePrices`, each from its own file | Keep `PricesAsOf` current | Done |
 
 **Thinking replay (11).** `Message` has no place for a signed block, so nothing is
 sent back, and no request has failed for it. That is 4 rounds on Opus 5.5, not a long
@@ -136,13 +132,6 @@ small optional package, not in the shim, which holds no credentials.
 **next:** nothing until a workload needs it. **risks:** a laptop has no identity token,
 so this fits CI and server runs, not interactive dun. **blocking decisions:** which
 workload (Carl). He is an admin of his personal org, not of the corp one.
-
-## Release
-
-◻ Tag agentkit, then dun bumps it. dun needs no code change.
-
-**blocking decisions:** the version (Carl). Slice 1 is in; slice 2 has no consumer
-and need not block it.
 
 ## Future: corrallm owns Claude
 
