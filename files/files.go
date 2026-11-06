@@ -279,24 +279,6 @@ func (t *Toolset) Dispatch(ctx context.Context, name, argsJSON string) string {
 	return out
 }
 
-// Run is Dispatch with decoded arguments, returning a model-facing refusal as
-// the error. bare is the tool's bare name.
-func (t *Toolset) Run(ctx context.Context, bare string, a map[string]any) (string, error) {
-	if !t.enabled[bare] {
-		return "", fmt.Errorf("tool %q is not enabled", bare)
-	}
-	b, err := json.Marshal(a)
-	if err != nil {
-		return "", err
-	}
-	var parsed args
-	if err := json.Unmarshal(b, &parsed); err != nil {
-		return "", err
-	}
-	parsed.keys = argKeys(b)
-	return t.run(ctx, bare, parsed)
-}
-
 func (t *Toolset) run(ctx context.Context, bare string, a args) (string, error) {
 	switch bare {
 	case Read:

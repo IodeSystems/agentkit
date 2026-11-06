@@ -122,7 +122,11 @@ func (t *Toolset) edit(a args) (string, error) {
 	}
 	t.markSeen(abs)
 	t.afterWrite(t.rel(abs))
-	out := fmt.Sprintf("edited %s: %s", display, diffSummary(lf(orig), lf(content)))
+	summary := diffSummary(lf(orig), lf(content))
+	if lf(orig) == lf(content) {
+		summary = "+0 -0 (line endings only)"
+	}
+	out := fmt.Sprintf("edited %s: %s", display, summary)
 	if len(notes) > 0 {
 		out += "\n(" + strings.Join(notes, "; ") + ")"
 	}

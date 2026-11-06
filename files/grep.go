@@ -92,8 +92,14 @@ func (t *Toolset) grep(ctx context.Context, a args) (string, error) {
 	}
 	out := newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly)
 	if t.rg != "" {
-		if err := t.grepRG(ctx, q, out); err == nil {
+		err := t.grepRG(ctx, q, out)
+		if err == nil {
 			return out.render(q, t), nil
+		}
+		// A cancelled ctx is what killed rg; the Go engine would find nothing
+		// and report "no matches", which is a wrong answer, not a failure.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
 		t.rgFailed.Add(1)
 		out = newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly) // rg failed: start over in Go
@@ -101,10 +107,15 @@ func (t *Toolset) grep(ctx context.Context, a args) (string, error) {
 	if err := t.grepGo(ctx, q, out); err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return out.render(q, t), nil
 }
 
-// ── output, shared by both engines so their results are identical ──
+// ── output, shared by both engines: given the same files they print the same
+// bytes. The file sets can differ: inside git the Go engine lists tracked
+// files, rg skips tracked files that .gitignore matches. ──
 
 type grepOut struct {
 	max, ctx, byteCap int

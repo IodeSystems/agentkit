@@ -110,5 +110,3 @@ func lines(n int, f func(i int) string) string {
 	}
 	return b.String()
 }
-
-func str(s string) *string { return &s }

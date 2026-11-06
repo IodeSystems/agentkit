@@ -31,8 +31,10 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 		// here rides every request.
 		td.Function.Description = fmt.Sprintf("Read a file or a range of its lines, list a directory, or with grep search a file or "+
 			"a directory tree. Search a large file or a log with grep before you read it. Lines come back as number, TAB, "+
-			"text; leave the number and tab out of edit anchors. With no offset/limit you get the first %s; a ranged "+
-			"read returns up to %s.", sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(t.cfg.ReadMax)))
+			"text; leave the number and tab out of edit anchors. With no offset/limit you get the first %s, or only the "+
+			"first %s of a file of %s or more; a ranged read returns up to %s.",
+			sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(min(t.cfg.UnrangedMax, largeHead))), sizeOf(largeFile),
+			sizeOf(int64(t.cfg.ReadMax)))
 		td.Function.Parameters = obj(map[string]any{
 			"path":    str("File or directory, relative to the working tree."),
 			"offset":  num("First line, from 1. Negative counts from the end: -50 is the last 50 lines."),

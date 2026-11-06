@@ -54,7 +54,9 @@ func (t *Toolset) walkGit(ctx context.Context, sub string, fn func(rel string) b
 	defer cancel()
 	argv := []string{"-C", t.root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"}
 	if sub != "" && sub != "." {
-		argv = append(argv, "--", sub)
+		// :(literal) because sub is a path, and [x] or * in a directory name
+		// would otherwise be a pattern that lists other directories.
+		argv = append(argv, "--", ":(literal)"+sub)
 	}
 	cmd := exec.CommandContext(ctx, "git", argv...)
 	out, err := cmd.StdoutPipe()

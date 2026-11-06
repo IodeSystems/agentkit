@@ -24,6 +24,9 @@ func diffSummary(a, b string) string {
 	hunks := hunksOf(ops, 2)
 	var s strings.Builder
 	fmt.Fprintf(&s, "+%d -%d", add, del)
+	if add == 0 && del == 0 && a != b {
+		s.WriteString(" (trailing newline only)")
+	}
 	if len(hunks) > 1 {
 		fmt.Fprintf(&s, " in %d hunks", len(hunks))
 	}

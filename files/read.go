@@ -291,9 +291,19 @@ func readLine(br *bufio.Reader, keep bool, limit int) ([]byte, int, error) {
 
 // safeCut trims s back to a rune boundary: a cut mid-rune is invalid UTF-8,
 // which can break the transport rather than merely read badly.
+//
+// Only a partial rune at the very end is cut: an invalid byte earlier in the
+// text is the file's own, and cutting there would drop the rest of it.
 func safeCut(s string) string {
-	for len(s) > 0 && !utf8.ValidString(s) {
-		s = s[:len(s)-1]
+	for i := 1; i <= utf8.UTFMax && i <= len(s); i++ {
+		start := len(s) - i
+		if !utf8.RuneStart(s[start]) {
+			continue
+		}
+		if r, size := utf8.DecodeRuneInString(s[start:]); r == utf8.RuneError && size <= 1 && !utf8.FullRuneInString(s[start:]) {
+			return s[:start]
+		}
+		break
 	}
 	return s
 }

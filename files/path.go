@@ -165,7 +165,7 @@ func (t *Toolset) resolveLink(rel string) (abs, display string, err error) {
 // rel is abs relative to the root, slash-separated, "." for the root.
 func (t *Toolset) rel(abs string) string {
 	r, err := filepath.Rel(t.root, abs)
-	if err != nil || strings.HasPrefix(r, "..") {
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 		return abs
 	}
 	return filepath.ToSlash(r)
