@@ -16,9 +16,9 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 
 ## Active work
 
-### ⏸ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
-corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF rule as `1fc9519` (replaced the unpushed `5cd7b16`). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Not pushed, not deployed.
-- **resume condition:** `a18fe07` + the revised PDF commit are pushed and deployed. Waits on: Carl.
+### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
+corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF rule as `1fc9519` (replaced the unpushed `5cd7b16`). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Deployed 2026-11-06 as v0.1.0-97-g1fc9519 (pushed af31a95..1fc9519). Live checks by corrallm-12: Swift alias → text conversion OK; chandra → vision OK.
+- **remaining:** a live PDF to Claude, not verified. The anthropic daily budget was spent and the claude sub-* path needs a caller login. Covered by integration tests only. Waits on: budget reset (23:59 UTC) or a sub login.
 - **next:** fold corrallm's translator use of the shim into `claude-api-plan.md` "Future: corrallm owns Claude".
 - **risks:** conversion runs once, before the lane walk, using the lane's first member's strategy, so in lane [claude-sub-*, Swift] the Swift fallback gets the default text, not its own `pdf: vision` (behavior that already existed). No live check yet that Claude receives a `document` block. Shim errors (incl. `ErrUnsupportedContent`) surface as 400 `invalid_request_error`.
 - **decided (Carl, 2026-11-06, revised):** native first, else convert. A model that reads PDFs natively (Claude) gets the part unchanged. Otherwise the configured `pdf:` strategy is used, else the built-in `text` default. This replaces corrallm `5cd7b16` (strategy-only, which cost the fireworks models PDF reading). Implemented in `1fc9519`: the native signal is the backend's `api: anthropic`. A native backend ignores an explicit strategy; no Claude model sets one today. One test per branch, `go test ./...` green by corrallm-12's report. Push and deploy are held until Carl confirms in corrallm-12.
