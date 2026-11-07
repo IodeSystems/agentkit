@@ -106,6 +106,11 @@ type Session struct {
 	// (chars/4). Set to the same estimator the Shaper uses for consistency.
 	Estimate TokenEstimator
 
+	// shapeHint is what refused prompts have taught this Session about the
+	// endpoint's window and the estimator's undercount. It persists across
+	// Turns, so the next build already fits; see Turn's refusal handling.
+	shapeHint ShapeHint
+
 	// usageTotal accumulates cumulative billed tokens across this Session's
 	// Turn calls (persisted state, not set by the host).
 	usageTotal int
@@ -358,6 +363,17 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	// produced within the same Turn's loop.
 	s.slots = map[string]string{}
 
+	// A refused prompt (the endpoint says it does not fit) is rebuilt smaller
+	// and sent once more per Turn. refused/refusedAt hold that refusal until a
+	// round gets through, so a rebuild that did not shrink fails at once
+	// instead of resending the same bytes.
+	if s.shapeHint != (ShapeHint{}) {
+		ctx = WithShapeHint(ctx, s.shapeHint)
+	}
+	var refused *llm.InputTooLargeError
+	var refusedAt int
+	retriedRefusal := false
+
 	var sawForcedToolCall bool
 	// repTrips counts CONSECUTIVE rounds cut for degenerate repetition;
 	// repeatRounds counts how many times the CURRENT exchange appears in the
@@ -394,11 +410,31 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// Active window = the tokens actually sent this round (post compaction +
 		// LOD + tool-result truncation). The last build of the Turn wins.
 		result.Usage.Active = s.estimateTokens(messages)
+		if refused != nil && result.Usage.Active >= refusedAt {
+			endReason = TurnOverflow
+			return result, fmt.Errorf("agent: chat: the context did not shrink after the endpoint refused it (~%d estimated tokens): %w",
+				result.Usage.Active, refused)
+		}
 
 		resp, reasoning, toolCalls, usage, rep, cut, e := s.streamChat(ctx, messages)
 		if e != nil {
+			var tooLarge *llm.InputTooLargeError
+			if errors.As(e, &tooLarge) {
+				if !retriedRefusal {
+					// The Shaper's estimate said this fit and the endpoint says
+					// it does not. Learn by how much, rebuild under the
+					// narrowed limits (LOD, then a fold), and send once more.
+					retriedRefusal = true
+					s.learnRefusal(tooLarge, result.Usage.Active)
+					ctx = WithShapeHint(ctx, s.shapeHint)
+					refused, refusedAt = tooLarge, result.Usage.Active
+					continue
+				}
+				endReason = TurnOverflow
+			}
 			return result, fmt.Errorf("agent: chat: %w", e)
 		}
+		refused = nil
 
 		if rep != nil {
 			// The transport cut a looping generation. Keep ONE copy of the
@@ -815,6 +851,24 @@ func callNames(calls []llm.ToolCall) string {
 
 // estimateTokens sizes a built message list with the session's estimator (nil →
 // Default). Used for the Active-window figure.
+// learnRefusal narrows shapeHint from a refused prompt of sent estimated
+// tokens. The endpoint's window caps the budget; its prompt count over our
+// estimate is the estimator's undercount. With neither, assume a 25% undercount
+// on top of what is known, so the rebuild is at least smaller.
+func (s *Session) learnRefusal(e *llm.InputTooLargeError, sent int) {
+	h := s.shapeHint
+	if e.ContextTokens > 0 && (h.Window == 0 || e.ContextTokens < h.Window) {
+		h.Window = e.ContextTokens
+	}
+	switch {
+	case e.PromptTokens > 0 && sent > 0:
+		h.Scale = max(h.Scale, float64(e.PromptTokens)/float64(sent))
+	case e.ContextTokens == 0:
+		h.Scale = max(h.Scale, 1) * 1.25
+	}
+	s.shapeHint = h
+}
+
 func (s *Session) estimateTokens(msgs []llm.Message) int {
 	est := s.Estimate
 	if est == nil {

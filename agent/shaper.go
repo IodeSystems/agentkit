@@ -149,6 +149,46 @@ func (p ShaperPolicy) shapeTarget() int {
 	return target
 }
 
+// ShapeHint is what a Session learned from a prompt the endpoint refused as
+// too large. It narrows the Shaper's limits for later builds; see limits.
+type ShapeHint struct {
+	// Window is the endpoint's own context size, or 0 when it did not say.
+	Window int
+	// Scale is real tokens per estimated token, from the refused prompt, or 0
+	// when unknown. Above 1 the estimator undercounts and limits shrink by it.
+	Scale float64
+}
+
+type shapeHintKey struct{}
+
+// WithShapeHint carries h to the Shaper through ctx, like the compaction sinks:
+// the ContextBuilder signature stays as it is.
+func WithShapeHint(ctx context.Context, h ShapeHint) context.Context {
+	return context.WithValue(ctx, shapeHintKey{}, h)
+}
+
+// limits is the budget and shape target for this build, in estimator units:
+// the policy's, narrowed by a ShapeHint in ctx. A window the endpoint reported
+// caps the budget (and gives an unbudgeted Shaper one: the endpoint has now
+// said how big the window is), and a Scale above 1 shrinks both by the
+// estimator's measured undercount.
+func (sh *Shaper) limits(ctx context.Context) (budget, target int) {
+	p := sh.Policy
+	h, _ := ctx.Value(shapeHintKey{}).(ShapeHint)
+	if h.Window > 0 {
+		if wb := Budget(h.Window, DefaultOutputReservePct); p.BudgetTokens <= 0 || wb < p.BudgetTokens {
+			p.BudgetTokens = wb
+		}
+	}
+	if h.Scale > 1 && p.BudgetTokens > 0 {
+		p.BudgetTokens = int(float64(p.BudgetTokens) / h.Scale)
+	}
+	if p.BudgetTokens <= 0 {
+		return 0, 0
+	}
+	return p.BudgetTokens, p.shapeTarget()
+}
+
 // Shaper builds the LLM message list with a three-step algorithm:
 //
 //  0. pristine tail: the last N text messages + M tool-call exchanges are
@@ -277,7 +317,8 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 	// Unbudgeted: render and return. Every phase below compares against a token
 	// ceiling, and with no ceiling there is nothing to compare — treating 0 as
 	// the ceiling makes every build "over budget" and compacts on every turn.
-	if sh.Policy.BudgetTokens <= 0 {
+	budget, target := sh.limits(ctx)
+	if budget <= 0 {
 		entries, err := sh.Store.Context(ctx, sessionID)
 		if err != nil {
 			return nil, err
@@ -296,11 +337,6 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		sortEntries(entries)
 
 		pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
-
-		// Shape to BudgetTokens-headroom, not the hard budget, so a restructure
-		// leaves runway and doesn't re-fire (and re-invalidate the KV cache)
-		// next turn.
-		target := sh.Policy.shapeTarget()
 
 		// Phase 0: pristine tail, normally rendered WITHOUT LOD. If we're under
 		// target, DON'T touch the prefix — appending to the tail keeps the cached
@@ -347,7 +383,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
 		// entries into a summary marker. If nothing summarizable remains, return
 		// what we have.
-		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target, sh.taskOr(system))
+		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target, budget, sh.taskOr(system))
 		if err != nil {
 			return nil, err
 		}
@@ -384,7 +420,10 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 // it. CompactionStart and CompactionInfo both carry it. Zero from a caller that
 // has no measurement (the public Compact) means it is measured here, without
 // the system prompt.
-func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target int, task string) (CompactionInfo, bool, error) {
+//
+// window is the budget the fold call itself must fit, in estimator units; 0
+// leaves the fold input unbounded (an unbudgeted Shaper).
+func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target, window int, task string) (CompactionInfo, bool, error) {
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
 	}
@@ -447,7 +486,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		At:           startedAt,
 	})
 
-	summary, err := sh.summarize(ctx, foldable, task, budget)
+	summary, err := sh.summarize(ctx, foldable, task, budget, window)
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -505,7 +544,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
 	// No measured trigger: this fold was asked for, not forced by a budget, so
 	// there is no "tokens before" that caused it and no target it is aiming at.
-	return sh.compactOldest(ctx, sessionID, 0, 0, sh.taskOr(""))
+	return sh.compactOldest(ctx, sessionID, 0, 0, sh.Policy.BudgetTokens, sh.taskOr(""))
 }
 
 // taskOr is the task a fold is judged against: the host's, else the system
@@ -789,8 +828,22 @@ func DefaultSummaryPrompt(task string, budget int) string {
 	return b.String()
 }
 
-func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget int) (string, error) {
-	var b strings.Builder
+// summarize folds entries into one summary. The fold call has to fit the
+// window like any other request, and the entries it folds are the RAW history
+// (no LOD), which is much larger than the shaped context that fit. Sent whole,
+// a long backlog made one fold request larger than the model's window, the
+// endpoint refused it, and the turn died on its own bookkeeping (aw4,
+// 2026-11-06: 89,653 tokens against 86,016).
+//
+// So the events go in STAGES that each fit the window: the first stage
+// summarizes the oldest events that fit, and each later stage summarizes the
+// summary so far plus the next events. When everything fits — the common case
+// — there is one stage and the request is the same as before. Only the
+// summarizer's reading is staged; the entries the fold subsumes are unchanged.
+//
+// If the endpoint still refuses a stage (the estimator undercounted), the cap
+// shrinks by the endpoint's own counts and the stage is sent again, once.
+func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget, window int) (string, error) {
 	prompt, system := sh.SummaryPrompt, sh.SummarySystem
 	if prompt == nil {
 		prompt = DefaultSummaryPrompt
@@ -798,8 +851,12 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 	if system == "" {
 		system = DefaultSummarySystem
 	}
-	b.WriteString(prompt(task, budget))
-	b.WriteString(eventLines(entries))
+	header := prompt(task, budget)
+	fixed := sh.Estimate.Estimate(system) + sh.Estimate.Estimate(header) + SummaryCap(budget)
+	limit := 0 // max event tokens per stage; 0 → unbounded
+	if window > 0 && window-fixed > 0 {
+		limit = window - fixed
+	}
 
 	// Stop the turn's budget clock for the fold: compaction is bookkeeping, not
 	// model work, so it must not burn the turn's time budget. See Pause.
@@ -808,6 +865,97 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		resume = sh.Pause()
 	}
 	defer resume()
+
+	lines := make([]string, len(entries))
+	for i, e := range entries {
+		label := string(e.Kind)
+		if e.Tag != "" {
+			label = e.Tag
+		}
+		lines[i] = fmt.Sprintf("%d. [%s] %s\n", i+1, label, e.Content)
+	}
+
+	var summary string
+	shrunk := false
+	for next := 0; next < len(lines); {
+		var b strings.Builder
+		b.WriteString(header)
+		room := limit
+		if summary != "" {
+			carried := "0. [summary of the earlier events] " + summary + "\n"
+			b.WriteString(carried)
+			room -= sh.Estimate.Estimate(carried)
+		}
+		end := next
+		for end < len(lines) {
+			line := lines[end]
+			if limit > 0 {
+				n := sh.Estimate.Estimate(line)
+				if n > room {
+					if end > next {
+						break // the next stage takes it
+					}
+					// One event larger than a whole stage: send its head and
+					// tail rather than fail the fold on it.
+					line = clipToTokens(sh.Estimate, line, max(room, SummaryMinTokens))
+					n = room
+				}
+				room -= n
+			}
+			b.WriteString(line)
+			end++
+		}
+
+		out, err := sh.summaryCall(ctx, system, b.String(), budget)
+		var tooLarge *llm.InputTooLargeError
+		if errors.As(err, &tooLarge) && !shrunk {
+			// The estimate said this stage fit and the endpoint says it does not.
+			// Scale the cap by the endpoint's own ratio, with a margin, and send
+			// this stage again. Once: a second refusal is returned as is.
+			shrunk = true
+			limit = shrinkLimit(sh.Estimate.Estimate(b.String()), fixed, tooLarge)
+			continue
+		}
+		if err != nil {
+			return "", summarizeErr(ctx, err)
+		}
+		summary = out
+		next = end
+	}
+	if summary == "" {
+		return "", fmt.Errorf("agent/shaper: model returned empty summary")
+	}
+	return summary, nil
+}
+
+// shrinkLimit is the per-stage event cap after the endpoint refused a stage of
+// sent estimated tokens. With the endpoint's counts, the estimate is scaled to
+// what the window really holds, less the fixed part and a 10% margin; without
+// them, it halves.
+func shrinkLimit(sent, fixed int, e *llm.InputTooLargeError) int {
+	n := sent / 2
+	if e.PromptTokens > 0 && e.ContextTokens > 0 {
+		n = int(float64(sent) * float64(e.ContextTokens) / float64(e.PromptTokens) * 0.9)
+	}
+	return max(n-fixed, SummaryMinTokens)
+}
+
+// clipToTokens keeps the head and tail of s within about n estimated tokens.
+func clipToTokens(est TokenEstimator, s string, n int) string {
+	have := est.Estimate(s)
+	if have <= n || have == 0 {
+		return s
+	}
+	keep := len(s) * n / have
+	head := keep * 2 / 3
+	tail := keep - head
+	return strings.ToValidUTF8(s[:head], "") +
+		fmt.Sprintf("\n[… %d characters elided for the summarizer …]\n", len(s)-keep) +
+		strings.ToValidUTF8(s[len(s)-tail:], "")
+}
+
+// summaryCall sends one fold request and returns the trimmed summary.
+func (sh *Shaper) summaryCall(ctx context.Context, system, user string, budget int) (string, error) {
 	var opts llm.ChatOpts
 	if sh.SummaryOpts != nil {
 		opts = *sh.SummaryOpts
@@ -815,15 +963,15 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 	opts.MaxTokens = SummaryCap(budget)
 	ch, err := sh.Runner.ChatStream(ctx, []llm.Message{
 		{Role: "system", Content: system},
-		{Role: "user", Content: b.String()},
+		{Role: "user", Content: user},
 	}, nil, &opts)
 	if err != nil {
-		return "", summarizeErr(ctx, err)
+		return "", err
 	}
 	var summary strings.Builder
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return "", summarizeErr(ctx, fmt.Errorf("%s", chunk.Error))
+			return "", fmt.Errorf("%s", chunk.Error)
 		}
 		summary.WriteString(chunk.Content)
 		if chunk.Done {
