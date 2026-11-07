@@ -304,3 +304,17 @@ func TestProbeCapabilitiesIsNotTranslatedByTheRecord(t *testing.T) {
 		t.Errorf("host pin replaced: %+v", got)
 	}
 }
+
+// The verbatim Fireworks GLM-5.3 refusal of "none" marks the model
+// thinking-only in the probe too, not only in traffic learning.
+func TestProbeCapabilitiesFireworksThinkingOnlyBody(t *testing.T) {
+	p := &probeServer{refuse: map[string]int{"none": 400},
+		refuseBody: `{"error":{"message":"GLM-5.3 is a thinking-only model; disabling thinking (reasoning_effort='none') is not supported.","type":"invalid_request_error","code":400}}`}
+	caps, err := ProbeCapabilities(context.Background(), p.client(t), ProbeOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := factValue(caps, CapReasoningThinkingOnly); got != "true" {
+		t.Errorf("thinking_only = %q, want true", got)
+	}
+}

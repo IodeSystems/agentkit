@@ -499,13 +499,8 @@ var refusalPatterns = []refusalPattern{
 		}
 		return nil
 	}},
-	// A thinking-only model refusing off. Fireworks GLM-5.3 answers 400 to
-	// reasoning_effort "none" (dun-bb, 2026-11-07); its exact sentence was not
-	// kept, so these are the wordings of that refusal seen across providers
-	// ("Thinking cannot be disabled for this model", "thinking is required",
-	// "does not support disabling thinking"). UNVERIFIED against a captured
-	// Fireworks body: replace with it when one is recorded.
-	{regexp.MustCompile(`(?i)(?:thinking|reasoning)[\w\s]{0,40}?(?:cannot|can ?not|can't) be (?:disabled|turned off)|(?:thinking|reasoning) (?:is|must be) (?:required|enabled)|(?:cannot|can ?not|can't|does not support|doesn't support) (?:disabl(?:e|ing)|turn(?:ing)? off) (?:thinking|reasoning)`),
+	// A thinking-only model refusing off. See thinkingOnlyRe.
+	{thinkingOnlyRe,
 		func(m []string, r refusalCtx) []factUpdate {
 			out := []factUpdate{{Key: CapReasoningThinkingOnly, Value: "true", Evidence: r.evidence("thinking off", m[0])}}
 			if r.effort == "none" {
@@ -621,3 +616,15 @@ func clip(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// thinkingOnlyRe matches a refusal saying thinking cannot be switched off.
+// The first alternative is VERIFIED, verbatim from Fireworks GLM-5.3 through
+// corrallm (dun-bb, 2026-11-07):
+//
+//	{"error":{"message":"GLM-5.3 is a thinking-only model; disabling thinking
+//	(reasoning_effort='none') is not supported.","type":"invalid_request_error","code":400}}
+//
+// The rest are wordings of the same refusal reported for other providers and
+// not captured here. Shared by traffic learning and ProbeCapabilities, so the
+// two never disagree about the same body.
+var thinkingOnlyRe = regexp.MustCompile(`(?i)thinking[- ]only|disabling (?:thinking|reasoning)[^.]{0,60}?not supported|(?:thinking|reasoning)[\w\s]{0,40}?(?:cannot|can ?not|can't) be (?:disabled|turned off|switched off)|(?:thinking|reasoning) (?:is|must be) (?:required|enabled|always on)|(?:cannot|can ?not|can't|does not support|doesn't support) (?:disabl(?:e|ing)|turn(?:ing)? off) (?:thinking|reasoning)`)

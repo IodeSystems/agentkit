@@ -53,7 +53,11 @@ const okReply = `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}
 
 // glmRefusal is the shape of GLM-5.3's 400 on reasoning_effort "none". The
 // exact Fireworks sentence was not captured (see refusalPatterns).
-const glmRefusal = `{"error":{"object":"error","type":"invalid_request_error","message":"Thinking cannot be disabled for this model"}}`
+// glmRefusal is verbatim from Fireworks GLM-5.3 through corrallm (2026-11-07).
+const glmRefusal = `{"error":{"message":"GLM-5.3 is a thinking-only model; disabling thinking (reasoning_effort='none') is not supported.","type":"invalid_request_error","code":400}}`
+
+// glmBudgetRefusal is verbatim from the same endpoint for thinking.budget_tokens 64.
+const glmBudgetRefusal = `{"error":{"message":"thinking.budget_tokens must be >= 1024","type":"invalid_request_error","code":400}}`
 
 func openaiClient(url string) *Client {
 	c := NewClient(url, "k", "glm-5.3")
@@ -112,8 +116,13 @@ func TestRefusalPatternsTeachOnlyWhatTheBodyNames(t *testing.T) {
 		{"jsonschema enum other value", 400,
 			`{"error":{"message":"'auto' is not one of ['low', 'medium', 'high']"}}`,
 			none, map[string]string{}},
-		{"thinking cannot be disabled", 400, glmRefusal,
+		{"fireworks glm thinking-only (verbatim)", 400, glmRefusal,
 			none, map[string]string{CapReasoningThinkingOnly: "true", CapReasoningEffortsRefused: "none"}},
+		{"thinking cannot be disabled", 400,
+			`{"error":{"message":"Thinking cannot be disabled for this model"}}`,
+			none, map[string]string{CapReasoningThinkingOnly: "true", CapReasoningEffortsRefused: "none"}},
+		{"fireworks glm budget floor (verbatim)", 400, glmBudgetRefusal,
+			none, map[string]string{CapReasoningBudgetMin: "1024", CapReasoningBudgetField: "thinking.budget_tokens"}},
 		{"thinking is required, effort low", 400,
 			`{"error":{"message":"thinking is required for this model"}}`,
 			map[string]any{"reasoning_effort": "low"}, map[string]string{CapReasoningThinkingOnly: "true"}},

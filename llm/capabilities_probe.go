@@ -166,26 +166,6 @@ func refusalStatus(err error) (int, bool) {
 	return n, n >= 400 && n < 500
 }
 
-// thinkingOnlyHints mark a refusal of effort "none" that says thinking cannot
-// be switched off, as opposed to "none is not a value I know".
-var thinkingOnlyHints = []string{
-	"cannot be disabled", "can't be disabled", "cannot be turned off",
-	"cannot disable", "can't disable", "cannot be switched off", "always enabled", "always on",
-}
-
-func bodyMeansThinkingOnly(msg string) bool {
-	s := strings.ToLower(msg)
-	if !strings.Contains(s, "thinking") && !strings.Contains(s, "reasoning") {
-		return false
-	}
-	for _, h := range thinkingOnlyHints {
-		if strings.Contains(s, h) {
-			return true
-		}
-	}
-	return false
-}
-
 // effortSample is what one effort's reply showed about thinking.
 type effortSample struct {
 	effort string
@@ -274,7 +254,7 @@ func probeEfforts(ctx context.Context, c *Client) error {
 			break
 		}
 		refused = append(refused, eff)
-		if eff == "none" && bodyMeansThinkingOnly(err.Error()) {
+		if eff == "none" && thinkingOnlyRe.MatchString(err.Error()) {
 			thinkingOnlyEv = fmt.Sprintf(`reasoning_effort "none" answered %d and the body says thinking cannot be disabled: %s`,
 				status, trimForLog(err.Error()))
 		}
