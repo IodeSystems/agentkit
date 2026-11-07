@@ -21,6 +21,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -90,7 +91,7 @@ func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
 		}
 	}
 	if lim, ok := caps.OutputLimit(); ok {
-		want, _ := body["max_tokens"].(int)
+		want := bodyInt(body["max_tokens"])
 		if want == 0 || want > lim {
 			body["max_tokens"] = lim
 			w := ""
@@ -628,3 +629,22 @@ func clip(s string, n int) string {
 // not captured here. Shared by traffic learning and ProbeCapabilities, so the
 // two never disagree about the same body.
 var thinkingOnlyRe = regexp.MustCompile(`(?i)thinking[- ]only|disabling (?:thinking|reasoning)[^.]{0,60}?not supported|(?:thinking|reasoning)[\w\s]{0,40}?(?:cannot|can ?not|can't) be (?:disabled|turned off|switched off)|(?:thinking|reasoning) (?:is|must be) (?:required|enabled|always on)|(?:cannot|can ?not|can't|does not support|doesn't support) (?:disabl(?:e|ing)|turn(?:ing)? off) (?:thinking|reasoning)`)
+
+// bodyInt reads a numeric body field whether chatBody put it there (int) or it
+// was decoded from a caller's JSON (float64, or json.Number with UseNumber).
+// Reading only int made a decoded max_tokens of 512 look like "unset", and the
+// output cap then RAISED it to the model's limit.
+func bodyInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
