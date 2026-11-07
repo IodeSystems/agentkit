@@ -34,10 +34,11 @@ Requested by dun-bb, owner direction (aw4 issue i_1m6v7hgpwcwrk5pbswp0w6, projec
 Scope: reasoning (off, efforts, budget field and its minimum), real context and output limits, tool calls (parallel, tool_choice forcing, argument fidelity), streaming (usage in the stream, reasoning field shape), sampling (logit_bias, banned strings, DRY), constrained decoding (GBNF, response_format json_schema, vLLM guided_*, strict tools), modalities. corrallm should use these helpers and not build its own.
 - Evidence (dun-bb, Fireworks GLM-5.3, 2026-11-07): `reasoning_effort: "none"` → 400 (thinking-only); unset → 300 max_tokens all thinking, empty content; "low", "minimal" and an integer (64) accepted; `thinking.budget_tokens` must be ≥ 1024. Median reasoning: 791 tokens at the default, 103 at low.
 - Decided (Carl, 2026-11-07, "use the most open standard"): the openai dialect sends the OpenAI Chat Completions values as given (none, minimal, low, medium, high, xhigh); off is "none". This replaces dun-bb's stopgap `bbead4f` (off → "low"). GLM-5.3's 400 on "none" is a per-model gap for the record, not a global mapping; until the record exists, dun sets "minimal" for that provider.
-- **next:** a design note (record shape, the report callback and seed, where the translation hooks into `applyReasoning` and `chatBody`) for Carl before code.
+- Design: `plan/capabilities-design.md` (2026-11-07). Slices: 1 core, 2 learn (+ reasoning translation), 3 declared (corrallm/OpenRouter `/models`), 4 probe, 5 hosts.
+- **next:** slice 1 (core) by subagent; then 2–4 in parallel.
 - **risks:** a 400-then-resend is a second retry rung beside the overflow resend; both must stay bounded to one. A record learned from one bad response pins wrong behavior (the same trap as `ShapeHint.Scale`), and now persists in the host's store too: the report must carry its evidence (what was sent, what came back) so a host can expire or override it.
 - Decided (Carl, 2026-11-07): agentkit does not store the record. What it learns is reported to the holder (a callback on the Client), and corrallm and dun each store it themselves; the host seeds the Client from its store at start. agentkit keeps only the in-memory copy for the Client's life.
-- **blocking decisions (Carl):** whether a refusal-driven resend is wanted at all in `llm`, a path every host shares.
+- **blocking decisions (Carl):** whether a refusal-driven resend is wanted at all in `llm`, a path every host shares. Until then it ships as `Client.ResendOnRefusal`, default false.
 - **optional extensions:** expose the record in `/v1/models`-style form for corrallm's dashboard.
 
 ### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
