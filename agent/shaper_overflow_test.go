@@ -244,3 +244,56 @@ func TestTurn_RefusalOnLastRoundStillRetries(t *testing.T) {
 		t.Fatalf("want the refused send and one resend, got %d sends", len(r.sizes))
 	}
 }
+
+// The aw4 case at its real scale (2026-11-06 16:59): a fold of ~90k estimated
+// tokens of raw history against an 86,016-token endpoint whose real count is
+// 1.15× or 1.5× the estimate and which refuses anything over its window, with
+// llama.cpp's counts. One event alone is larger than the window. The fold
+// must get through, refused at most once.
+func TestFold_AW4ScaleBacklogGetsThrough(t *testing.T) {
+	for _, pct := range []int{115, 150} {
+		t.Run(fmt.Sprintf("undercount%d", pct), func(t *testing.T) { aw4ScaleFold(t, pct) })
+	}
+}
+
+func aw4ScaleFold(t *testing.T, pct int) {
+	const window = 86016
+	st := &memStore{}
+	for i := 0; i < 36; i++ {
+		st.entries = append(st.entries, Entry{ID: fmt.Sprintf("e%d", i), Kind: KindToolResult,
+			Content: fmt.Sprintf("result %d %s", i, strings.Repeat("y", 9000)), CreatedAt: int64(i + 1)})
+	}
+	st.entries = append(st.entries, Entry{ID: "huge", Kind: KindToolResult,
+		Content: "huge " + strings.Repeat("z", 400000), CreatedAt: 50})
+	st.entries = append(st.entries, Entry{ID: "tail", Kind: KindAssistant, Content: "last", CreatedAt: 100})
+
+	refusals := 0
+	r := &foldRunner{}
+	r.fail = func(call int) error {
+		real := r.sizes[call] * pct / 100
+		if real > window {
+			refusals++
+			return &llm.InputTooLargeError{Status: 400, PromptTokens: real, ContextTokens: window,
+				Body: fmt.Sprintf("request (%d tokens) exceeds the available context size (%d tokens)", real, window)}
+		}
+		return nil
+	}
+	sh := &Shaper{Store: st, Runner: r, Policy: ShaperPolicy{BudgetTokens: Budget(window, DefaultOutputReservePct), PreserveLastMessages: 1}}
+	info, did, err := sh.Compact(context.Background(), "s")
+	if err != nil || !did {
+		t.Fatalf("fold: did=%v err=%v (refusals %d, sizes %v)", did, err, refusals, r.sizes)
+	}
+	if refusals > 1 {
+		t.Errorf("refused %d times, want at most 1", refusals)
+	}
+	accepted := 0
+	for _, n := range r.sizes {
+		if real := n * pct / 100; real <= window {
+			accepted++
+		}
+	}
+	if info.SubsumedCount != 37 {
+		t.Errorf("subsumed %d, want 37", info.SubsumedCount)
+	}
+	t.Logf("fold: %d call(s), %d accepted stage(s), %d refusal(s), estimated sizes %v", len(r.sizes), accepted, refusals, r.sizes)
+}
