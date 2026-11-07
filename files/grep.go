@@ -13,8 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"unicode/utf8"
 	"strings"
+	"unicode/utf8"
 )
 
 // grepLineMax clips each output line: one minified line must not fill the
