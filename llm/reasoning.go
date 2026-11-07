@@ -88,6 +88,13 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 		switch opts.ReasoningEffort {
 		case "low", "medium", "high":
 			body["reasoning_effort"] = opts.ReasoningEffort
+		case "none":
+			// Off has no standard form here, and sending nothing leaves the
+			// model's default, which for a thinking model is MORE thinking, not
+			// none: GLM-5.3 on Fireworks refuses "none" (400, thinking-only),
+			// and unset spent a fold's whole max_tokens thinking and returned
+			// an empty summary. Low is the least this dialect can ask for.
+			body["reasoning_effort"] = "low"
 		}
 		return
 	}

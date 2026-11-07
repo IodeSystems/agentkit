@@ -268,3 +268,17 @@ func TestReasoningDialect_Named(t *testing.T) {
 		t.Errorf("openrouter: %v", body)
 	}
 }
+
+// Off in the openai dialect asks for the least thinking it can express, low.
+// Sending nothing left a thinking-only model at its default, the most thinking
+// (GLM-5.3 on Fireworks: a fold's max_tokens all spent thinking, empty summary).
+func TestReasoningDialect_OpenAIOffIsLow(t *testing.T) {
+	off := false
+	c := NewClient("https://litellm.corp.example/v1", "", "glm")
+	c.SetReasoningDialect(DialectOpenAI)
+	body := map[string]any{}
+	c.applyReasoning(body, &ChatOpts{EnableThinking: &off, ReasoningEffort: "none"})
+	if body["reasoning_effort"] != "low" || len(body) != 1 {
+		t.Errorf("openai off: %v", body)
+	}
+}
