@@ -339,7 +339,9 @@ const (
 	// counts ROUNDS inside one Turn, not turns in a conversation.
 	TurnMaxTurns TurnEndReason = "max_turns"
 	// TurnOverflow — the provider cut generation for room MaxOverflowRetries
-	// rounds running, and shedding more context stopped helping.
+	// rounds running, and shedding more context stopped helping; OR the
+	// endpoint refused the prompt as too large (*llm.InputTooLargeError) and
+	// the one shrink-and-resend did not fit either.
 	TurnOverflow TurnEndReason = "overflow"
 	// TurnRepetition — the model's generation kept collapsing into repetition
 	// past MaxRepetitionRetries, so the loop stopped re-prompting it.

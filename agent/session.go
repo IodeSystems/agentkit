@@ -428,6 +428,11 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 					s.learnRefusal(tooLarge, result.Usage.Active)
 					ctx = WithShapeHint(ctx, s.shapeHint)
 					refused, refusedAt = tooLarge, result.Usage.Active
+					// The refused send was not a model round: do not let it
+					// spend MaxTurns, or a refusal on the last round surfaces
+					// as "max turns exceeded" and loses the typed error. Bounded
+					// by retriedRefusal, so this cannot loop.
+					i--
 					continue
 				}
 				endReason = TurnOverflow

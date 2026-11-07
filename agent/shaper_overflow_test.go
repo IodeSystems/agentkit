@@ -226,3 +226,21 @@ func TestTurn_RefusalWithoutShrinkDoesNotResend(t *testing.T) {
 		t.Errorf("an unshrunk context must not be resent: %d main calls", len(r.sizes))
 	}
 }
+
+func TestTurn_RefusalOnLastRoundStillRetries(t *testing.T) {
+	refuse := &llm.InputTooLargeError{Status: 400, PromptTokens: 20000, ContextTokens: 8000}
+	r := &mainRunner{main: func(call int) error {
+		if call == 0 {
+			return refuse
+		}
+		return nil
+	}}
+	s := refusalSession(r)
+	s.MaxTurns = 1
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatalf("a refused send must not spend the only round: %v", err)
+	}
+	if len(r.sizes) != 2 {
+		t.Fatalf("want the refused send and one resend, got %d sends", len(r.sizes))
+	}
+}
