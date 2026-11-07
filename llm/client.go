@@ -625,6 +625,20 @@ type Client struct {
 	// block for long and must not issue requests on the client.
 	OnLearn func(Learned)
 
+	// OnTranslate, when set, is called once per request field the capability
+	// record changed on the way out (see Translation), just before the request
+	// is sent, from the goroutine that sends it. A translation is never silent:
+	// the host can show "sent minimal for none". Same rules as OnLearn.
+	OnTranslate func(Translation)
+
+	// ResendOnRefusal, when true, sends a chat request once more after a 4xx
+	// that taught the record a fact which changes the translated request bytes.
+	// At most one resend per call; a refusal that teaches nothing new is
+	// returned as is. False by default: whether llm resends on its own, in a
+	// path every host shares, is an open decision (plan/capabilities-design.md
+	// "Learning from refusals").
+	ResendOnRefusal bool
+
 	caps capRecord
 }
 
@@ -1559,7 +1573,11 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 // chatBody is the request body both chat paths send, so a field one honors the
 // other cannot drop: tool_choice, grammar and response_format are as binding on
 // a non-streaming call as on a streaming one.
-func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) map[string]any {
+//
+// It returns what the capability record changed on the way out (translate);
+// the caller reports those when it sends, so a body built only to compare
+// against another reports nothing.
+func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) (map[string]any, []Translation) {
 	body := map[string]any{
 		"model":    c.wireModel(ctx),
 		"messages": messages,
@@ -1600,38 +1618,63 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 		body["response_format"] = opts.ResponseFormat
 	}
 	c.applySampling(body, opts)
-	return body
+	return body, c.translate(body, opts)
 }
 
 // ChatStream sends a chat completion request with streaming enabled.
 // It returns a channel that emits StreamChunks as they arrive.
 func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (<-chan StreamChunk, error) {
-	body := c.chatBody(ctx, messages, tools, opts, true)
-
-	payload, err := json.Marshal(body)
+	resp, sent, callStart, err := c.sendChat(ctx, messages, tools, opts, true)
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal: %w", err)
+		return nil, err
 	}
+	ch := make(chan StreamChunk, 64)
+	go c.readStream(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent)
+	return ch, nil
+}
 
+// sendChat builds the chat body, sends it, and returns the 200 response. A
+// refusal is learned from (capabilities_learn.go) and returned as the same
+// error as before; with ResendOnRefusal it may be sent once more, translated
+// by what it taught. callStart is taken BEFORE the first request so latency
+// includes retries, queueing, a cold model load and a resend — the parts that
+// make a call slow are exactly the parts a server-side number would omit.
+func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) (*http.Response, sentRequest, time.Time, error) {
 	var ident callIdent
 	if opts != nil {
 		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
 	}
-	// Measured from BEFORE the request so latency includes retries, queueing and
-	// a cold model load — the parts that make a call slow are exactly the parts
-	// a server-side number would omit.
 	callStart := time.Now()
-	resp, err := c.postChatWithRetry(ctx, payload, ident)
+	body, trs := c.chatBody(ctx, messages, tools, opts, stream)
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, sentRequest{}, callStart, fmt.Errorf("llm: marshal: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, statusError(resp)
+	for resent := false; ; resent = true {
+		c.reportTranslations(trs)
+		resp, err := c.postChatWithRetry(ctx, payload, ident)
+		if err != nil {
+			c.learnFromChatError(err)
+			return nil, sentRequest{}, callStart, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			sent := sentFrom(body)
+			c.observeAccepted(sent)
+			return resp, sent, callStart, nil
+		}
+		taught, err := c.chatRefusal(resp, body)
+		if !taught || !c.ResendOnRefusal || resent {
+			return nil, sentRequest{}, callStart, err
+		}
+		nbody, ntrs := c.chatBody(ctx, messages, tools, opts, stream)
+		npayload, merr := json.Marshal(nbody)
+		if merr != nil || bytes.Equal(npayload, payload) {
+			// The fact is real but does not change what is sent: the same
+			// bytes would fail the same way.
+			return nil, sentRequest{}, callStart, err
+		}
+		body, trs, payload = nbody, ntrs, npayload
 	}
-
-	ch := make(chan StreamChunk, 64)
-	go c.readStream(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header))
-	return ch, nil
 }
 
 // statusError formats a non-2xx response into an error that INCLUDES a snippet
@@ -1640,22 +1683,32 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 // an integration, and dropping it turns every failure into an opaque "status
 // 400". Closes the body.
 func statusError(resp *http.Response) error {
+	return statusErrorBody(resp.StatusCode, readErrorBody(resp))
+}
+
+// readErrorBody reads and closes a non-2xx body, trimmed, capped at 4 KiB.
+func readErrorBody(resp *http.Response) string {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	resp.Body.Close()
-	msg := strings.TrimSpace(string(body))
+	return strings.TrimSpace(string(body))
+}
+
+// statusErrorBody is statusError for a body already read: the chat path reads
+// it once and both learns from it and returns it.
+func statusErrorBody(status int, msg string) error {
 	// A 4xx that says the request does not fit is the one refusal a caller can
 	// act on without a human: send less. llama.cpp answers an over-window prompt
 	// with 400 exceed_context_size_error, OpenAI with 400 context_length_exceeded.
 	// Typed so the caller can shrink; still never retried as-is (postWithRetry
 	// hands 4xx back), because the same bytes fail the same way.
-	if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
+	if (status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge) &&
 		bodyIsInputTooLarge(msg) {
-		return newInputTooLarge(resp.StatusCode, msg)
+		return newInputTooLarge(status, msg)
 	}
 	if msg == "" {
-		return fmt.Errorf("llm: status %d", resp.StatusCode)
+		return fmt.Errorf("llm: status %d", status)
 	}
-	return fmt.Errorf("llm: status %d: %s", resp.StatusCode, msg)
+	return fmt.Errorf("llm: status %d: %s", status, msg)
 }
 
 // Chat sends a non-streaming chat completion request.
@@ -1665,24 +1718,9 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
-	body := c.chatBody(ctx, messages, tools, opts, false)
-
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return "", nil, fmt.Errorf("llm: marshal: %w", err)
-	}
-
-	var ident callIdent
-	if opts != nil {
-		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
-	}
-	callStart := time.Now()
-	resp, err := c.postChatWithRetry(ctx, payload, ident)
+	resp, sent, callStart, err := c.sendChat(ctx, messages, tools, opts, false)
 	if err != nil {
 		return "", nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", nil, statusError(resp)
 	}
 	defer resp.Body.Close()
 
@@ -1692,6 +1730,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 				Content   string     `json:"content"`
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *Usage `json:"usage"`
 	}
@@ -1722,6 +1761,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 	if len(result.Choices) == 0 {
 		return "", nil, nil
 	}
+	c.observeToolChoice(sent, result.Choices[0].FinishReason, len(result.Choices[0].Message.ToolCalls))
 	return result.Choices[0].Message.Content, result.Choices[0].Message.ToolCalls, nil
 }
 
@@ -1738,7 +1778,10 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // `stream_options.include_usage=true`); forward as soon as seen.
 // readStream parses the SSE body. callStart is when the request was issued, so
 // usage chunks can carry the round-trip latency no provider reports.
-func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta) {
+//
+// sent is what the request asked for that the stream can confirm or deny
+// (capabilities_learn.go); the zero value asks nothing.
+func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest) {
 	defer body.Close()
 	defer close(ch)
 
@@ -1758,6 +1801,12 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			c.OnUsage(u)
 		}
 	}()
+	// obs is what this stream showed about the endpoint. Learned in a defer
+	// registered after the others so it runs BEFORE close(ch): a consumer that
+	// sees the channel close also sees the facts.
+	var obs streamObservation
+	defer func() { c.observeStream(sent, obs) }()
+
 	// stampUsage is the one place a usage chunk gets what the client measured
 	// and what the headers said.
 	stampUsage := func(u *Usage, timings *Timings, data string) {
@@ -1765,6 +1814,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		u.Timings = timings
 		meta.stamp(u, usageCost([]byte(data)))
 		lastUsage = u
+		obs.usage = true
 	}
 
 	// A Reader, not a Scanner: one SSE event is one line and a provider may
@@ -1795,6 +1845,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	// (deferred above), which disconnects — and the disconnect is what makes the
 	// server abandon the generation instead of running it to the context limit.
 	cutLoop := func(info *RepetitionInfo) {
+		obs.failed = true
 		log.Printf(
 			"llm: CUT A LOOPING GENERATION after %d events (%d content chars) — the model %s. "+
 				"The stream was closed client-side; output up to the cut is kept. This is a MODEL "+
@@ -1842,6 +1893,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 					tc.Function.Name, len(tc.Function.Arguments), why)
 			}
 			ch <- StreamChunk{ToolCall: tc}
+			obs.toolCalls++
 		}
 		toolBuf = map[int]*ToolCall{}
 		toolOrder = nil
@@ -1872,6 +1924,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		events++
 		if data == "[DONE]" {
 			sawDone = true
+			obs.done = true
 			_ = flushTools("")
 			ch <- StreamChunk{Done: true}
 			return
@@ -1919,6 +1972,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// Hand back whatever arguments had accumulated. The buffer holds the
 			// partial write at exactly this moment; returning without it drops
 			// work the caller could otherwise resume from.
+			obs.failed = true
 			ch <- StreamChunk{Error: event.Error.Message, PartialToolCalls: partialTools(toolBuf, toolOrder)}
 			return
 		}
@@ -1936,6 +1990,12 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// Reasoning is forwarded as it arrives, like content, and kept apart
 		// from it: it is not part of the reply and must not be replayed as one.
 		if r := choice.Delta.ReasoningContent + choice.Delta.Reasoning; r != "" {
+			if obs.reasoningField == "" {
+				obs.reasoningField = reasoningFieldReasoning
+				if choice.Delta.ReasoningContent != "" {
+					obs.reasoningField = reasoningFieldContent
+				}
+			}
 			ch <- StreamChunk{Reasoning: r}
 			if watch != nil {
 				if info := watch.Watch(ChannelReasoning, r); info != nil {
@@ -2010,6 +2070,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			// cut of our own, and open tool calls are dropped for the same reason
 			// as there. A bare content_filter is some provider's own refusal.
 			if choice.FinishReason == "content_filter" && event.Loop != nil {
+				obs.failed = true
 				ch <- StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: event.Loop}
 				return
 			}
@@ -2023,6 +2084,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 				}
 			}
 			truncated := flushTools(choice.FinishReason)
+			obs.finish = choice.FinishReason
 			done := StreamChunk{Done: true}
 			// "length" is the provider saying it ran out of room. Reported on
 			// the Done chunk rather than swallowed, because the caller is the

@@ -86,8 +86,9 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 		// (Carl, 2026-11-07: use the most open standard), so off is "none".
 		// A model that refuses a value the standard defines (GLM-5.3 on
 		// Fireworks answers 400 to "none") is a capability gap to record per
-		// model, not something to paper over for every model here; see
-		// plan.md "capability record". Anything else is dropped: a llama.cpp
+		// model, not something to paper over for every model here: the
+		// record's translation (translate, capabilities_learn.go) rewrites
+		// the value after this, in chatBody. Anything else is dropped: a llama.cpp
 		// template refuses an effort it does not know (measured: Qwen3.8
 		// answered 500 to "high"), which is why this dialect is named, never
 		// detected.
