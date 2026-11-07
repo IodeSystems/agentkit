@@ -615,6 +615,17 @@ type Client struct {
 	// its channel closes), so it must not block for long and must not re-enter
 	// the client.
 	OnUsage func(Usage)
+
+	// OnLearn, when set, is called once per capability fact that was added or
+	// whose value or source changed (see Capabilities). The host stores what it
+	// hears and passes it back through SetCapabilities on the next run.
+	//
+	// Called from the goroutine that made the request, synchronously, after the
+	// record's lock is released, so it may call c.Capabilities(). It must not
+	// block for long and must not issue requests on the client.
+	OnLearn func(Learned)
+
+	caps capRecord
 }
 
 // retry5xxAttempts is the effective 5xx attempt cap.
