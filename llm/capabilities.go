@@ -53,6 +53,7 @@ const (
 	CapReasoningEffortsAccepted = "reasoning.efforts.accepted" // comma list
 	CapReasoningEffortsRefused  = "reasoning.efforts.refused"  // comma list
 	CapReasoningThinkingOnly    = "reasoning.thinking_only"    // bool
+	CapReasoningSupported       = "reasoning.supported"        // bool: the endpoint declares a reasoning control (OpenRouter supported_parameters)
 	CapReasoningBudgetField     = "reasoning.budget_field"     // field name
 	CapReasoningBudgetMin       = "reasoning.budget_min"       // int tokens
 	CapLimitsContext            = "limits.context"             // int tokens
@@ -67,6 +68,7 @@ const (
 	CapDecodeJSONSchema         = "decode.json_schema"         // bool
 	CapDecodeGuided             = "decode.guided"              // bool
 	CapDecodeStrictTools        = "decode.strict_tools"        // bool
+	CapDecodeResponseFormat     = "decode.response_format"     // bool: response_format accepted (declared)
 	CapSamplingPrefix           = "sampling."                  // + param; accepted, refused
 	CapModalityPrefix           = "modality."                  // + image, audio, video, file; bool
 )

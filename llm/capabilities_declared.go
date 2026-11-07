@@ -198,11 +198,11 @@ func (c *Client) learnDeclared(e *declaredEntry) {
 		ev := "supported_parameters has " + p
 		switch {
 		case p == "reasoning" || p == "include_reasoning":
-			decl("reasoning.supported", "true", ev)
+			decl(CapReasoningSupported, "true", ev)
 		case p == "structured_outputs":
 			decl(CapDecodeJSONSchema, "true", ev)
 		case p == "response_format":
-			decl("decode.response_format", "true", ev)
+			decl(CapDecodeResponseFormat, "true", ev)
 		case samplingParams[p]:
 			decl(CapSamplingPrefix+p, "accepted", ev)
 		}

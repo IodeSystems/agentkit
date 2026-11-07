@@ -119,7 +119,7 @@ func TestLoadDeclaredOpenRouterShape(t *testing.T) {
 	wantFact(t, caps, CapLimitsOutput, "32768")
 	wantFact(t, caps, CapModalityPrefix+"image", "true")
 	wantFact(t, caps, CapDecodeJSONSchema, "true")
-	wantFact(t, caps, "reasoning.supported", "true")
+	wantFact(t, caps, CapReasoningSupported, "true")
 	wantFact(t, caps, CapSamplingPrefix+"top_k", "accepted")
 	wantFact(t, caps, CapSamplingPrefix+"logit_bias", "accepted")
 	wantFact(t, caps, CapSamplingPrefix+"temperature", "accepted")
