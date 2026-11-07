@@ -304,6 +304,7 @@ type args struct {
 	Path       string     `json:"path"`
 	Offset     flexInt    `json:"offset"`
 	Limit      flexInt    `json:"limit"`
+	At         flexInt    `json:"at"` // read: a byte offset, for a page of a file with no usable lines
 	Old        *string    `json:"old"`
 	New        *string    `json:"new"`
 	Edits      []editPair `json:"edits"`

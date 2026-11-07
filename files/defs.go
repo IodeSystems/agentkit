@@ -39,6 +39,7 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 			"path":    str("File or directory, relative to the working tree."),
 			"offset":  num("First line, from 1. Negative counts from the end: -50 is the last 50 lines."),
 			"limit":   num("How many lines. Omit for the rest of the file (still capped)."),
+			"at":      num("Byte offset: a page of the file from there, for text with no usable lines (minified, one long line). Each page names the next at. Not with offset/limit."),
 			"grep":    str("Regular expression (RE2). Returns only the matching lines, as path:line:text."),
 			"context": num("With grep: lines before and after each match (max 10)."),
 			"glob":    str("On a directory: only files matching this glob (*.go at any depth; with a /, the path: internal/**/*_test.go)."),

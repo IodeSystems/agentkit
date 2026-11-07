@@ -79,6 +79,10 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 		return t.list(ctx, a)
 	}
 	offset, limit := int(a.Offset), int(a.Limit)
+	paged := slicesContains(a.keys, "at")
+	if paged && (offset != 0 || limit != 0) {
+		return "", errors.New("at is a byte offset and pages the file by bytes; offset/limit count lines. Give one or the other")
+	}
 	if limit < 0 {
 		return "", fmt.Errorf("limit counts lines and cannot be negative (got %d). To read the END of a file, "+
 			"give a negative offset: offset=-50 is its last 50 lines", limit)
@@ -99,6 +103,13 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 	if st.Size() == 0 {
 		t.markSeen(abs)
 		return display + ": empty (0 bytes)", nil
+	}
+	if paged {
+		out, err := t.page(f, display, int64(a.At), st.Size())
+		if err == nil {
+			t.markSeen(abs)
+		}
+		return out, err
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
@@ -175,6 +186,53 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 	return out, nil
 }
 
+// page returns the bytes of f from at, up to ReadMax, and where the next page
+// starts. Line-based reading (offset/limit, grep) cannot reach into text with
+// no lines (a minified bundle or document, one generated line): each of them
+// hands back the one line that is the problem. Bytes, not characters, so an
+// offset is exact; both ends move to a rune boundary.
+func (t *Toolset) page(f *os.File, display string, at, size int64) (string, error) {
+	if at < 0 {
+		at = max(0, size+at)
+	}
+	if at >= size {
+		return "", fmt.Errorf("at %d is past the end of %s, which is %d bytes", at, display, size)
+	}
+	if _, err := f.Seek(at, io.SeekStart); err != nil {
+		return "", err
+	}
+	buf := make([]byte, t.cfg.ReadMax+utf8.UTFMax)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", err
+	}
+	buf = buf[:n]
+	lead := 0
+	for lead < len(buf) && lead < utf8.UTFMax && !utf8.RuneStart(buf[lead]) {
+		lead++
+	}
+	body := buf[lead:min(len(buf), lead+t.cfg.ReadMax)]
+	text := safeCut(string(body))
+	from, to := at+int64(lead), at+int64(lead)+int64(len(text))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: bytes %d-%d of %d", display, from, to, size)
+	if to < size {
+		fmt.Fprintf(&b, ", next page at=%d", to)
+	}
+	b.WriteString("\n")
+	b.WriteString(text)
+	return b.String(), nil
+}
+
+func slicesContains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // countLines counts lines the way numbered numbers them: a final line without
 // a newline still counts, a trailing newline does not add an empty one.
 func countLines(r io.Reader) (int, error) {
@@ -210,8 +268,11 @@ func numbered(r io.Reader, start, end, capBytes int) (string, int, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var b strings.Builder
 	used, line, last := 0, 0, start-1
+	pos := 0 // byte offset of the line being read: the at that continues a cut one
 	for line < end {
+		lineAt := pos
 		text, full, err := readLine(br, line+1 >= start, capBytes-used+1)
+		pos += full + 1
 		if err != nil && err != io.EOF {
 			return "", last, err
 		}
@@ -225,8 +286,10 @@ func numbered(r io.Reader, start, end, capBytes int) (string, int, error) {
 				if last >= start {
 					break // stop on a whole line
 				}
-				// One line longer than the cap: show its head.
-				s = safeCut(s[:max(0, capBytes-used)]) + fmt.Sprintf("…[line is %s; cut]", sizeOf(int64(full)))
+				// One line longer than the cap: show its head, and the byte
+				// offset that reads on (at), since no line range can.
+				s = safeCut(s[:max(0, capBytes-used)])
+				s += fmt.Sprintf("…[line is %s; cut. Read on with at=%d]", sizeOf(int64(full)), lineAt+len(s))
 			}
 			used += len(s)
 			b.WriteString(strconv.Itoa(line))

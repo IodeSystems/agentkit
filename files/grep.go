@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"unicode/utf8"
 	"strings"
 )
 
@@ -90,7 +91,7 @@ func (t *Toolset) grep(ctx context.Context, a args) (string, error) {
 	if a.Max > 0 {
 		limit = min(int(a.Max), 1000)
 	}
-	out := newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly)
+	out := newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly, q.re)
 	if t.rg != "" {
 		err := t.grepRG(ctx, q, out)
 		if err == nil {
@@ -102,7 +103,7 @@ func (t *Toolset) grep(ctx context.Context, a args) (string, error) {
 			return "", ctx.Err()
 		}
 		t.rgFailed.Add(1)
-		out = newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly) // rg failed: start over in Go
+		out = newGrepOut(limit, q.ctx, t.cfg.ReadMax, q.filesOnly, q.re) // rg failed: start over in Go
 	}
 	if err := t.grepGo(ctx, q, out); err != nil {
 		return "", err
@@ -120,6 +121,7 @@ func (t *Toolset) grep(ctx context.Context, a args) (string, error) {
 type grepOut struct {
 	max, ctx, byteCap int
 	filesOnly         bool
+	re                *regexp.Regexp // for a window around the match in a long line
 
 	b                     strings.Builder
 	matches, files, shown int
@@ -131,8 +133,8 @@ type grepOut struct {
 	showing               bool
 }
 
-func newGrepOut(max, ctx, byteCap int, filesOnly bool) *grepOut {
-	return &grepOut{max: max, ctx: ctx, byteCap: byteCap, filesOnly: filesOnly, showing: true}
+func newGrepOut(max, ctx, byteCap int, filesOnly bool, re *regexp.Regexp) *grepOut {
+	return &grepOut{max: max, ctx: ctx, byteCap: byteCap, filesOnly: filesOnly, re: re, showing: true}
 }
 
 // done reports whether the engine can stop: everything shown, and counting
@@ -156,14 +158,17 @@ func (o *grepOut) file(path string) {
 	}
 }
 
-func (o *grepOut) match(path string, line int, text string) {
+// match records a matching line. lineAt is the line's byte offset in the
+// file, -1 when unknown: with it, a long line's window names the at that
+// reads on from the match.
+func (o *grepOut) match(path string, line int, text string, lineAt int64) {
 	o.file(path)
 	o.matches++
 	if o.showing && (o.shown >= o.max || o.b.Len() >= o.byteCap) {
 		o.showing = false
 	}
 	if o.showing {
-		o.emit(path, line, ':', text)
+		o.emit(path, line, ':', o.window(text, lineAt))
 		o.shown++
 		o.lastShownLine = line
 	}
@@ -182,14 +187,45 @@ func (o *grepOut) context(path string, line int, text string) {
 	if path == o.lastPath && line <= o.lastLine {
 		return
 	}
-	o.emit(path, line, '-', text)
+	o.emit(path, line, '-', clipLine(strings.TrimRight(text, "\r\n"), grepLineMax))
+}
+
+// window is a long match line cut to the span around its first match, not to
+// its head: in a minified file the match is rarely in the first 300 bytes,
+// and a head without it answers nothing. It says the line's length and, when
+// the line's offset is known, the at that reads on (read with at).
+func (o *grepOut) window(text string, lineAt int64) string {
+	text = strings.TrimRight(text, "\r\n")
+	if len(text) <= grepLineMax || o.re == nil {
+		return text
+	}
+	loc := o.re.FindStringIndex(text)
+	if loc == nil || loc[1] <= grepLineMax {
+		return clipLine(text, grepLineMax) // the match is in the head
+	}
+	// grepLineMax-100 of text: with its note the line stays as long as a
+	// clipped one.
+	from := max(0, loc[0]-grepLineMax/4)
+	for from > 0 && !utf8.RuneStart(text[from]) {
+		from--
+	}
+	to := min(len(text), from+grepLineMax-100)
+	w := "…" + safeCut(text[from:to])
+	if to < len(text) {
+		w += "…"
+	}
+	note := fmt.Sprintf("[line is %s; match at byte %d of it", sizeOf(int64(len(text))), loc[0])
+	if lineAt >= 0 {
+		note += fmt.Sprintf("; read on with at=%d", lineAt+int64(from))
+	}
+	return w + note + "]"
 }
 
 func (o *grepOut) emit(path string, line int, sep byte, text string) {
 	if o.ctx > 0 && o.lastPath != "" && (path != o.lastPath || line > o.lastLine+1) {
 		o.b.WriteString("--\n")
 	}
-	fmt.Fprintf(&o.b, "%s%c%d%c%s\n", path, sep, line, sep, clipLine(strings.TrimRight(text, "\r\n"), grepLineMax))
+	fmt.Fprintf(&o.b, "%s%c%d%c%s\n", path, sep, line, sep, text)
 	o.lastPath, o.lastLine = path, line
 }
 
@@ -348,6 +384,7 @@ func rgEvent(line []byte, o *grepOut) {
 			Path       rgText `json:"path"`
 			Lines      rgText `json:"lines"`
 			LineNumber int    `json:"line_number"`
+			AbsOffset  *int64 `json:"absolute_offset"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(line, &ev) != nil {
@@ -356,7 +393,11 @@ func rgEvent(line []byte, o *grepOut) {
 	p := cleanRGPath(ev.Data.Path.String())
 	switch ev.Type {
 	case "match":
-		o.match(p, ev.Data.LineNumber, ev.Data.Lines.String())
+		at := int64(-1)
+		if ev.Data.AbsOffset != nil {
+			at = *ev.Data.AbsOffset
+		}
+		o.match(p, ev.Data.LineNumber, ev.Data.Lines.String(), at)
 	case "context":
 		o.context(p, ev.Data.LineNumber, ev.Data.Lines.String())
 	}
@@ -411,8 +452,11 @@ func (t *Toolset) grepFile(q grepQuery, rel string, o *grepOut) {
 	}
 	var before []held
 	after := 0
+	var pos int64 // byte offset of the line being read
 	for n := 1; ; n++ {
-		raw, _, err := readLine(br, true, 1<<20)
+		lineAt := pos
+		raw, full, err := readLine(br, true, 1<<20)
+		pos += int64(full) + 1
 		if raw == nil && err != nil {
 			return
 		}
@@ -426,7 +470,7 @@ func (t *Toolset) grepFile(q grepQuery, rel string, o *grepOut) {
 				o.context(rel, h.n, h.text)
 			}
 			before = before[:0]
-			o.match(rel, n, text)
+			o.match(rel, n, text, lineAt)
 			if o.done() {
 				return
 			}

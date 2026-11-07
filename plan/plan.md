@@ -11,10 +11,18 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 ## Current state (verified 2026-11-06)
 
 - Release: agentkit v0.24.0, shim v0.5.0. v0.17.0 is retracted (carried the Anthropic SDK).
-- Consumers, by their `go.mod`: corrallm working tree at v0.24.0 / shim v0.5.0 (uncommitted); dun v0.23.0 / shim v0.4.0; autowork3 v0.6.0; aw4 uses `replace => ../agentkit`.
+- Consumers, by their `go.mod`: corrallm at v0.24.0 / shim v0.5.0; dun v0.24.0 (checked 2026-11-06); autowork3 v0.6.0; aw4 uses `replace => ../agentkit`.
 - Guardrail: `go build ./... && go vet ./... && go test ./...`.
 
 ## Active work
+
+### ◐ `files` read: byte-offset paging, grep windows in long lines (2026-11-06)
+For dun retiring its `read_saved` tool (dun aw4 issue i_1m6t8yrva6w1app5mjdwv5): saved output becomes a file under /tmp that `read` must handle as well as `read_saved` did. Owner's rule from dun (docs/decisions.md): line-based readers are useless on text with no lines. `read` takes `at` (byte offset; pages up to ReadMax, rune-safe both ends, header names the next `at`; negative counts from the end; not with offset/limit). A line cut for exceeding the cap names the `at` that continues it. `grep` shows a match past a long line's first 300 bytes as a window around it (was: the head, without the match), with the `at` of the window (rg: `absolute_offset`; Go engine: counted).
+- Tests: `files/page_test.go`; both engines verified with rg 14.1.0 (rg is not on PATH on the dev box; the rg test variant skips without it).
+- **next:** tag a release; dun bumps and retires `read_saved`.
+- **risks:** grep output changes for every host (aw4 builds from source via replace): a long match line now starts with `…`. `at` adds ~170 chars to the read schema on every request. A multi-match line shows only the window of its first match.
+- **blocking decisions:** none.
+- **optional extensions:** a window per match on a line with several.
 
 ### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
 corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF rule as `1fc9519` (replaced the unpushed `5cd7b16`). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Deployed 2026-11-06 as v0.1.0-97-g1fc9519 (pushed af31a95..1fc9519). Live checks by corrallm-12: Swift alias → text conversion OK; chandra → vision OK.

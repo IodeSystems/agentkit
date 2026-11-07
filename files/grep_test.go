@@ -176,7 +176,9 @@ func TestGrepExtraIgnoreAndLongLines(t *testing.T) {
 			}
 			ts := mount(t, Config{Root: root, ExtraIgnore: []string{"gen/*", "!gen/keep.go"}, NoRipgrep: noRG})
 			out := mustOK(t, call(t, ts, Grep, map[string]any{"pattern": "needle"}))
-			contains(t, out, "a.go:1:", "gen/keep.go:1:", "long.txt:1:xxx")
+			// A match past the line's head comes back as a window around it,
+			// with the at that reads on (not the head, which lacked it).
+			contains(t, out, "a.go:1:", "gen/keep.go:1:", "long.txt:1:…xxx", "needle[line is 1006 bytes; match at byte 1000", "at=925]")
 			lacks(t, out, "gen/b.go")
 			for _, l := range strings.Split(out, "\n") {
 				if len(l) > grepLineMax+40 {
