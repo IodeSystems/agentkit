@@ -24,6 +24,21 @@ For dun retiring its `read_saved` tool (dun aw4 issue i_1m6t8yrva6w1app5mjdwv5):
 - **blocking decisions:** none.
 - **optional extensions:** a window per match on a line with several.
 
+### ◻ Per-(endpoint, model) capability record (2026-11-07)
+Requested by dun-bb, owner direction (aw4 issue i_1m6v7hgpwcwrk5pbswp0w6, project agentkit, 4 attachments). agentkit keeps a capability record per (endpoint, model) and translates requests by it, so dun works on any OpenAI-compatible API plus Anthropic. Learning is client-side and costs no extra requests:
+- from normal traffic: the reasoning tokens reported for the control that was sent;
+- from refusals: a 400 that names a field updates the record and the request is sent again, once;
+- from declared metadata when the endpoint has it (corrallm `thinking_*`, OpenRouter `supported_parameters`);
+- an explicit probe only on dun's `/model probe`. Extend `llm.ProbeToolSurface`; do not start a second prober.
+
+Scope: reasoning (off, efforts, budget field and its minimum), real context and output limits, tool calls (parallel, tool_choice forcing, argument fidelity), streaming (usage in the stream, reasoning field shape), sampling (logit_bias, banned strings, DRY), constrained decoding (GBNF, response_format json_schema, vLLM guided_*, strict tools), modalities. corrallm should use these helpers and not build its own.
+- Evidence (dun-bb, Fireworks GLM-5.3, 2026-11-07): `reasoning_effort: "none"` → 400 (thinking-only); unset → 300 max_tokens all thinking, empty content; "low", "minimal" and an integer (64) accepted; `thinking.budget_tokens` must be ≥ 1024. Median reasoning: 791 tokens at the default, 103 at low.
+- Stopgap in the tree: `bbead4f` (dun-bb, not pushed): the openai dialect sends "low" for off. Only hosts that set `DialectOpenAI` are affected (dun, per provider config). A model that accepts "none" or "minimal" (OpenAI gpt-5.x) now thinks more than asked.
+- **next:** a design note (record shape, storage, lifetime, where the translation hooks into `applyReasoning` and `chatBody`) for Carl before code.
+- **risks:** a 400-then-resend is a second retry rung beside the overflow resend; both must stay bounded to one. A record learned from one bad response pins wrong behavior (the same trap as `ShapeHint.Scale`). Persisting the record is a host concern (agentkit has no storage).
+- **blocking decisions (Carl):** (1) the stopgap: keep "low", use "minimal" (accepted by GLM-5.3 and OpenAI; less thinking than low), or revert. (2) whether the record persists across processes (host-provided store) or lives per Client. (3) that a refusal-driven resend is wanted at all in `llm`, a path every host shares.
+- **optional extensions:** expose the record in `/v1/models`-style form for corrallm's dashboard.
+
 ### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
 corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF rule as `1fc9519` (replaced the unpushed `5cd7b16`). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Deployed 2026-11-06 as v0.1.0-97-g1fc9519 (pushed af31a95..1fc9519). Live checks by corrallm-12: Swift alias → text conversion OK; chandra → vision OK.
 - **remaining:** a live PDF to Claude, not verified. The anthropic daily budget was spent and the claude sub-* path needs a caller login. Covered by integration tests only. Waits on: budget reset (23:59 UTC) or a sub login.
