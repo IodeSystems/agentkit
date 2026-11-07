@@ -21,6 +21,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1208,7 +1209,7 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
 					Body: strings.TrimSpace(firstLineOfBody(string(bodyBytes))), Elapsed: time.Since(start), Budget: budget,
 					Reason: "not retried: the request is too large for this endpoint, so every retry fails identically"})
-				return nil, &InputTooLargeError{Status: status, Body: string(bodyBytes)}
+				return nil, newInputTooLarge(status, string(bodyBytes))
 			}
 			if fiveXXAttempts >= c.retry5xxAttempts() {
 				c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
@@ -1631,6 +1632,15 @@ func statusError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	resp.Body.Close()
 	msg := strings.TrimSpace(string(body))
+	// A 4xx that says the request does not fit is the one refusal a caller can
+	// act on without a human: send less. llama.cpp answers an over-window prompt
+	// with 400 exceed_context_size_error, OpenAI with 400 context_length_exceeded.
+	// Typed so the caller can shrink; still never retried as-is (postWithRetry
+	// hands 4xx back), because the same bytes fail the same way.
+	if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
+		bodyIsInputTooLarge(msg) {
+		return newInputTooLarge(resp.StatusCode, msg)
+	}
 	if msg == "" {
 		return fmt.Errorf("llm: status %d", resp.StatusCode)
 	}
@@ -2180,6 +2190,60 @@ func (e *BudgetSpentError) Error() string {
 type InputTooLargeError struct {
 	Status int
 	Body   string
+	// PromptTokens and ContextTokens are the endpoint's own counts — the prompt
+	// it measured and the window it holds — or 0 when the body did not say.
+	// They are what a caller shrinks by: its estimate said the prompt fit, and
+	// the ratio between the two is how far off that estimate was.
+	PromptTokens  int
+	ContextTokens int
+}
+
+// newInputTooLarge builds the error and reads the endpoint's token counts out
+// of the body, from llama.cpp's n_prompt_tokens/n_ctx fields or from the
+// sentence the OpenAI-shaped servers write.
+func newInputTooLarge(status int, body string) *InputTooLargeError {
+	e := &InputTooLargeError{Status: status, Body: body}
+	e.PromptTokens, e.ContextTokens = overflowCounts(body)
+	return e
+}
+
+var (
+	// llama.cpp: "request (89653 tokens) exceeds the available context size (86016 tokens)"
+	reLlamaOverflow = regexp.MustCompile(`request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)`)
+	// OpenAI and vLLM: "maximum context length is 128000 tokens"
+	reMaxContext = regexp.MustCompile(`maximum context length is (\d+) tokens`)
+	// OpenAI: "your messages resulted in 130000 tokens"; vLLM: "(4000 in the messages"
+	rePromptTokens = regexp.MustCompile(`resulted in (\d+) tokens|\((\d+) in the messages`)
+	// Anthropic: "prompt is too long: 208310 tokens > 200000 maximum"
+	reAnthropicOverflow = regexp.MustCompile(`(\d+) tokens > (\d+) maximum`)
+)
+
+// overflowCounts extracts (prompt, context) token counts from an overflow body.
+// Either is 0 when absent.
+func overflowCounts(body string) (prompt, window int) {
+	var j struct {
+		Error struct {
+			NPrompt int `json:"n_prompt_tokens"`
+			NCtx    int `json:"n_ctx"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &j) == nil && j.Error.NPrompt > 0 {
+		return j.Error.NPrompt, j.Error.NCtx
+	}
+	atoi := func(s string) int { n, _ := strconv.Atoi(s); return n }
+	if m := reLlamaOverflow.FindStringSubmatch(body); m != nil {
+		return atoi(m[1]), atoi(m[2])
+	}
+	if m := reAnthropicOverflow.FindStringSubmatch(body); m != nil {
+		return atoi(m[1]), atoi(m[2])
+	}
+	if m := reMaxContext.FindStringSubmatch(body); m != nil {
+		window = atoi(m[1])
+	}
+	if m := rePromptTokens.FindStringSubmatch(body); m != nil {
+		prompt = atoi(m[1] + m[2])
+	}
+	return prompt, window
 }
 
 func (e *InputTooLargeError) Error() string {
@@ -2201,6 +2265,9 @@ func bodyIsInputTooLarge(body string) bool {
 	return strings.Contains(b, "too large to process") ||
 		strings.Contains(b, "physical batch size") ||
 		strings.Contains(b, "exceeds the available context") ||
+		strings.Contains(b, "context_length_exceeded") ||
+		strings.Contains(b, "maximum context length") ||
+		strings.Contains(b, "prompt is too long") ||
 		strings.Contains(b, "exceed_context_size")
 }
 
