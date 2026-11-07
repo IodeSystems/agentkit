@@ -97,6 +97,14 @@ type Session struct {
 	// for.
 	OnOverflow func(context.Context, Overflow) OverflowDecision
 
+	// OnIdle, if set, is asked when the model ends a round with no tool calls
+	// and nothing is pending: the point where the Turn would end. A non-empty
+	// note is appended as a notification and the Turn runs another round, so
+	// the host can make the model check its work before it stops. rounds is
+	// how many rounds this Turn has run; asks counts earlier non-empty answers
+	// in this Turn, so the host bounds itself (return "" to let the Turn end).
+	OnIdle func(ctx context.Context, rounds, asks int) string
+
 	// MaxOverflowRetries bounds consecutive length-cut rounds in one Turn before
 	// the Turn fails with the evidence. 0 → 2. Negative → unbounded, which is
 	// only sane if OnOverflow sheds context on every pass.
@@ -381,6 +389,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	var repTrips, repeatRounds int
 	var recentExchanges []uint64
 	notifiedLoop := map[uint64]bool{}
+	idleAsks := 0
 	for i := 0; i < maxTurns; i++ {
 		rounds = i + 1
 		// Claim any pending inbox arrivals (marks them shown). They're
@@ -609,6 +618,18 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			pending, e := s.Store.ClaimPending(ctx, s.SessionID, now())
 			if e != nil {
 				return result, fmt.Errorf("agent: re-check pending: %w", e)
+			}
+			if pending == 0 && s.OnIdle != nil {
+				if note := s.OnIdle(ctx, rounds, idleAsks); note != "" {
+					idleAsks++
+					if e := s.Store.Append(ctx, s.SessionID, Entry{
+						ID: NewID(), Kind: KindNotification, Tag: "idle_check",
+						Content: note, CreatedAt: now(),
+					}); e != nil {
+						return result, fmt.Errorf("agent: persist idle check: %w", e)
+					}
+					continue
+				}
 			}
 			if pending == 0 {
 				endReason = TurnReply
