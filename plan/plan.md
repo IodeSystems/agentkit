@@ -10,7 +10,7 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 
 ## Current state (verified 2026-11-06)
 
-- Release: agentkit v0.24.0, shim v0.5.0. v0.17.0 is retracted (carried the Anthropic SDK).
+- Release: agentkit v0.25.0 (overflow fold/retry, files byte-offset paging), shim v0.5.0. v0.17.0 is retracted (carried the Anthropic SDK).
 - Consumers, by their `go.mod`: corrallm at v0.24.0 / shim v0.5.0; dun v0.24.0 (checked 2026-11-06); autowork3 v0.6.0; aw4 uses `replace => ../agentkit`.
 - Guardrail: `go build ./... && go vet ./... && go test ./...`.
 
@@ -19,7 +19,7 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 ### ◐ `files` read: byte-offset paging, grep windows in long lines (2026-11-06)
 For dun retiring its `read_saved` tool (dun aw4 issue i_1m6t8yrva6w1app5mjdwv5): saved output becomes a file under /tmp that `read` must handle as well as `read_saved` did. Owner's rule from dun (docs/decisions.md): line-based readers are useless on text with no lines. `read` takes `at` (byte offset; pages up to ReadMax, rune-safe both ends, header names the next `at`; negative counts from the end; not with offset/limit). A line cut for exceeding the cap names the `at` that continues it. `grep` shows a match past a long line's first 300 bytes as a window around it (was: the head, without the match), with the `at` of the window (rg: `absolute_offset`; Go engine: counted).
 - Tests: `files/page_test.go`; both engines verified with rg 14.1.0 (rg is not on PATH on the dev box; the rg test variant skips without it).
-- **next:** tag a release; dun bumps and retires `read_saved`.
+- **next:** released in v0.25.0; dun bumps and retires `read_saved`.
 - **risks:** grep output changes for every host (aw4 builds from source via replace): a long match line now starts with `…`. `at` adds ~170 chars to the read schema on every request. A multi-match line shows only the window of its first match.
 - **blocking decisions:** none.
 - **optional extensions:** a window per match on a line with several.
@@ -34,7 +34,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 
 ### ◐ Context overflow: bounded fold + one shrink-retry (2026-11-06)
 Cause: aw4's 400s at 16:59. `Shaper.summarize` sent every foldable entry raw in one request: 89,653 tokens against an 86,016 window. A 4xx overflow was untyped, so nothing recovered. Written by corrallm-12 on Carl's ask; reviewed here. `68c81e8` types a 400/413 overflow (llama.cpp, OpenAI, vLLM, Anthropic bodies) as `*llm.InputTooLargeError` with `PromptTokens`/`ContextTokens`; still not retried by `postWithRetry`. `4a8dd0c` (SHARED PATH: dun, aw4): fold in stages that fit the budget, one shrink-retry per fold; `Session.Turn` learns a `ShapeHint` (window + estimator scale) from a refusal, rebuilds, resends once, else `TurnOverflow` + typed error. Review fix: a refused send no longer spends a `MaxTurns` round (it lost the typed error on the last round).
-- **next:** tag a release; aw4 and dun bump; confirm against the session that failed at 16:59.
+- **next:** released in v0.25.0; dun bumps, aw4 rebuilds (replace); confirm against the session that failed at 16:59.
 - **risks:** `ShapeHint.Scale` only grows and lives for the Session: one refusal with a bad estimate (e.g. image-heavy) shrinks every later build. A tight window with a large carried summary makes one fold call per entry (bounded by entry count, not by a cap). Only a Shaper honours the hint; another ContextBuilder ends in `TurnOverflow` at once. `ShapeHint.Window` uses `DefaultOutputReservePct`, not the host's reserve. The per-entry fold line format is a copy of `eventLines`. Not run against a live endpoint.
 - **blocking decisions:** none.
 - **optional extensions:** decay or reset `Scale` after a successful round; a cap on fold stages.
