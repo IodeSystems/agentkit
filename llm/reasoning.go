@@ -30,7 +30,7 @@ const (
 	DialectLlamaCpp   = "llamacpp"   // chat_template_kwargs.enable_thinking, reasoning_budget_tokens
 	DialectAnthropic  = "anthropic"  // thinking: {type, budget_tokens}
 	DialectOpenRouter = "openrouter" // reasoning: {effort | max_tokens | enabled}
-	DialectOpenAI     = "openai"     // reasoning_effort: low|medium|high (what LiteLLM maps per provider)
+	DialectOpenAI     = "openai"     // reasoning_effort: none|minimal|low|medium|high|xhigh (OpenAI Chat Completions)
 )
 
 // SetReasoningDialect names this endpoint's dialect; "" detects it. Not
@@ -81,20 +81,19 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 		applyOpenRouterReasoning(body, opts)
 		return
 	case DialectOpenAI:
-		// Only an effort: there is no standard off or budget. A llama.cpp
+		// The OpenAI Chat Completions values, sent as given: none, minimal,
+		// low, medium, high, xhigh. This is the most widely implemented form
+		// (Carl, 2026-11-07: use the most open standard), so off is "none".
+		// A model that refuses a value the standard defines (GLM-5.3 on
+		// Fireworks answers 400 to "none") is a capability gap to record per
+		// model, not something to paper over for every model here; see
+		// plan.md "capability record". Anything else is dropped: a llama.cpp
 		// template refuses an effort it does not know (measured: Qwen3.8
-		// answered 500 to "high"), which is why this dialect is named,
-		// never detected.
+		// answered 500 to "high"), which is why this dialect is named, never
+		// detected.
 		switch opts.ReasoningEffort {
-		case "low", "medium", "high":
+		case "none", "minimal", "low", "medium", "high", "xhigh":
 			body["reasoning_effort"] = opts.ReasoningEffort
-		case "none":
-			// Off has no standard form here, and sending nothing leaves the
-			// model's default, which for a thinking model is MORE thinking, not
-			// none: GLM-5.3 on Fireworks refuses "none" (400, thinking-only),
-			// and unset spent a fold's whole max_tokens thinking and returned
-			// an empty summary. Low is the least this dialect can ask for.
-			body["reasoning_effort"] = "low"
 		}
 		return
 	}

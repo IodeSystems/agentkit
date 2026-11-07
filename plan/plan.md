@@ -33,10 +33,10 @@ Requested by dun-bb, owner direction (aw4 issue i_1m6v7hgpwcwrk5pbswp0w6, projec
 
 Scope: reasoning (off, efforts, budget field and its minimum), real context and output limits, tool calls (parallel, tool_choice forcing, argument fidelity), streaming (usage in the stream, reasoning field shape), sampling (logit_bias, banned strings, DRY), constrained decoding (GBNF, response_format json_schema, vLLM guided_*, strict tools), modalities. corrallm should use these helpers and not build its own.
 - Evidence (dun-bb, Fireworks GLM-5.3, 2026-11-07): `reasoning_effort: "none"` → 400 (thinking-only); unset → 300 max_tokens all thinking, empty content; "low", "minimal" and an integer (64) accepted; `thinking.budget_tokens` must be ≥ 1024. Median reasoning: 791 tokens at the default, 103 at low.
-- Stopgap in the tree: `bbead4f` (dun-bb, not pushed): the openai dialect sends "low" for off. Only hosts that set `DialectOpenAI` are affected (dun, per provider config). A model that accepts "none" or "minimal" (OpenAI gpt-5.x) now thinks more than asked.
+- Decided (Carl, 2026-11-07, "use the most open standard"): the openai dialect sends the OpenAI Chat Completions values as given (none, minimal, low, medium, high, xhigh); off is "none". This replaces dun-bb's stopgap `bbead4f` (off → "low"). GLM-5.3's 400 on "none" is a per-model gap for the record, not a global mapping; until the record exists, dun sets "minimal" for that provider.
 - **next:** a design note (record shape, storage, lifetime, where the translation hooks into `applyReasoning` and `chatBody`) for Carl before code.
 - **risks:** a 400-then-resend is a second retry rung beside the overflow resend; both must stay bounded to one. A record learned from one bad response pins wrong behavior (the same trap as `ShapeHint.Scale`). Persisting the record is a host concern (agentkit has no storage).
-- **blocking decisions (Carl):** (1) the stopgap: keep "low", use "minimal" (accepted by GLM-5.3 and OpenAI; less thinking than low), or revert. (2) whether the record persists across processes (host-provided store) or lives per Client. (3) that a refusal-driven resend is wanted at all in `llm`, a path every host shares.
+- **blocking decisions (Carl):** (1) whether the record persists across processes (host-provided store) or lives per Client. (2) that a refusal-driven resend is wanted at all in `llm`, a path every host shares.
 - **optional extensions:** expose the record in `/v1/models`-style form for corrallm's dashboard.
 
 ### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
