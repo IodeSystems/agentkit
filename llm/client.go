@@ -1618,6 +1618,9 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 		body["response_format"] = opts.ResponseFormat
 	}
 	c.applySampling(body, opts)
+	if isRawProbe(ctx) {
+		return body, nil
+	}
 	return body, c.translate(body, opts)
 }
 
@@ -1653,14 +1656,21 @@ func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolD
 	for resent := false; ; resent = true {
 		c.reportTranslations(trs)
 		resp, err := c.postChatWithRetry(ctx, payload, ident)
+		raw := isRawProbe(ctx)
 		if err != nil {
-			c.learnFromChatError(err)
+			if !raw {
+				c.learnFromChatError(err)
+			}
 			return nil, sentRequest{}, callStart, err
 		}
 		if resp.StatusCode == http.StatusOK {
 			sent := sentFrom(body)
+			sent.raw = raw
 			c.observeAccepted(sent)
 			return resp, sent, callStart, nil
+		}
+		if raw {
+			return nil, sentRequest{}, callStart, statusErrorBody(resp.StatusCode, readErrorBody(resp))
 		}
 		taught, err := c.chatRefusal(resp, body)
 		if !taught || !c.ResendOnRefusal || resent {

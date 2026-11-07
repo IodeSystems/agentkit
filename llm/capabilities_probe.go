@@ -23,11 +23,6 @@ type ProbeOpts struct {
 	Context bool
 }
 
-// effortLadder is the standard reasoning_effort ladder, lowest first. The order
-// is the order the facts are written in and decides which accepted effort is
-// "off": the lowest one the endpoint serves.
-var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-
 // ProbeCapabilities measures one (endpoint, model) and records each result as a
 // probed fact (so OnLearn reports it, and a stored refused/observed fact is
 // replaced by what the probe saw). It returns the whole record.
@@ -48,6 +43,7 @@ var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
 // the facts learned so far still in the record. A partial record that is wrong
 // would be worse than a short one.
 func ProbeCapabilities(ctx context.Context, c *Client, opts ProbeOpts) (Capabilities, error) {
+	ctx = withRawProbe(ctx)
 	rep, err := ProbeToolSurface(ctx, c)
 	if err != nil {
 		return c.Capabilities(), err

@@ -236,6 +236,8 @@ func TestProbeCapabilitiesTransportErrorAbortsKeepingEarlierFacts(t *testing.T) 
 	if _, ok := caps.Facts[CapReasoningOff]; ok {
 		t.Errorf("off recorded from an aborted ladder with nothing accepted")
 	}
+	p.mu.Lock() // the handler of the dropped request may still be running
+	defer p.mu.Unlock()
 	if len(p.efforts) != 1 {
 		t.Errorf("probe went on after the failure: %v", p.efforts)
 	}
@@ -273,5 +275,32 @@ func TestProbeCapabilitiesSkipsEffortLadderOutsideEffortDialects(t *testing.T) {
 	}
 	if len(p.efforts) != 0 || factValue(caps, CapReasoningOff) != "" {
 		t.Errorf("ladder ran on a dialect that does not send reasoning_effort: %v", p.efforts)
+	}
+}
+
+// A probe sends exactly the effort it is probing. With a record that already
+// says "none" is refused, normal traffic would translate "none" to another
+// effort, and the probe would then record the answer to that effort as the
+// answer to "none" — and could never learn that "none" was fixed upstream.
+func TestProbeCapabilitiesIsNotTranslatedByTheRecord(t *testing.T) {
+	p := &probeServer{}
+	c := p.client(t)
+	c.SetCapabilities(Capabilities{Facts: map[string]Fact{
+		CapReasoningEffortsRefused: {Value: "none", Source: SourceRefused, Evidence: "seed"},
+		CapReasoningOff:            {Value: "low", Source: SourceHost, Evidence: "seed"},
+	}})
+	if _, err := ProbeCapabilities(context.Background(), c, ProbeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.efforts) == 0 || p.efforts[0] != "none" {
+		t.Fatalf("efforts sent %v, want the ladder starting at none", p.efforts)
+	}
+	if got := factValue(c.Capabilities(), CapReasoningEffortsRefused); got != "" {
+		t.Errorf("refused = %q after a probe that accepted none", got)
+	}
+	if got := c.Capabilities().Facts[CapReasoningOff]; got.Value != "low" || got.Source != SourceHost {
+		t.Errorf("host pin replaced: %+v", got)
 	}
 }

@@ -20,6 +20,7 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -274,6 +275,24 @@ func (c *Client) apply(u factUpdate, src Source) bool {
 type sentRequest struct {
 	effort string // reasoning_effort on the wire; "" when none was sent
 	forced string // tool_choice when it forces a call: "required" or "function:<name>"
+	raw    bool   // a probe request: observe nothing (see withRawProbe)
+}
+
+// rawProbeKey marks a request made by ProbeCapabilities. A probe must see the
+// endpoint's answer to exactly what it chose to send, so its requests skip
+// translation (probing "none" after "none" was refused would otherwise send
+// "minimal" and record that answer as the answer to "none"), and they teach
+// the record nothing as traffic: the probe records its own findings, as
+// probed, with evidence.
+type rawProbeKey struct{}
+
+func withRawProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, rawProbeKey{}, true)
+}
+
+func isRawProbe(ctx context.Context) bool {
+	v, _ := ctx.Value(rawProbeKey{}).(bool)
+	return v
 }
 
 func sentFrom(body map[string]any) sentRequest {
@@ -308,6 +327,9 @@ func sentFrom(body map[string]any) sentRequest {
 // count at "none" against the count at the endpoint's default, on the same
 // prompt, per model — a threshold set from that measurement, not guessed.
 func (c *Client) observeAccepted(s sentRequest) {
+	if s.raw {
+		return
+	}
 	if s.effort == "" {
 		return
 	}
@@ -321,6 +343,9 @@ func (c *Client) observeAccepted(s sentRequest) {
 // a reply that finished normally. A reply cut by length or a filter has no
 // verdict: the call may simply not have fit.
 func (c *Client) observeToolChoice(s sentRequest, finish string, calls int) {
+	if s.raw {
+		return
+	}
 	if s.forced == "" {
 		return
 	}
@@ -347,6 +372,9 @@ type streamObservation struct {
 }
 
 func (c *Client) observeStream(s sentRequest, o streamObservation) {
+	if s.raw {
+		return
+	}
 	switch {
 	case o.usage:
 		// A usage chunk on an errored stream is still a usage chunk.
