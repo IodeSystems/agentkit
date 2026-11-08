@@ -218,3 +218,37 @@ func TestLoadDeclaredHostOnlyBaseGetsV1AndHTMLIsNotAnError(t *testing.T) {
 		t.Errorf("learned %d facts from HTML", n)
 	}
 }
+
+// corrallm publishes its own record per model. Each fact is read as declared,
+// whatever source the proxy had, and it is read after the static metadata, so
+// the proxy's refusal-taught thinking_only beats its thinking_modes list.
+func TestLoadDeclaredReadsCorrallmPublishedRecordAsDeclared(t *testing.T) {
+	const body = `{"object":"list","data":[{"capabilities":{"reasoning.efforts.refused":{"value":"none","source":"refused","at":"2026-11-08T10:00:00Z"},"reasoning.thinking_only":{"value":"true","source":"refused","at":"2026-11-08T10:00:00Z"},"tools.parallel":{"value":"","source":"observed","at":"2026-11-08T10:00:00Z"}},"capability":"chat","id":"glm","kind":"model","modalities":{"text":{}},"object":"model","outputs":["text"],"owned_by":"corrallm","slots":1,"state":"proxy","remote":true,"type":"chat","thinking_modes":["off","on"]}]}`
+	srv := declaredServer(t, body, nil, nil)
+	defer srv.Close()
+	c := NewClient(srv.URL, "", "glm")
+	if err := c.LoadDeclared(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	caps := c.Capabilities()
+	f := wantFact(t, caps, CapReasoningEffortsRefused, "none")
+	if want := "GET /models: capabilities.reasoning.efforts.refused=none (the proxy's refused fact at 2026-11-08T10:00:00Z)"; f.Evidence != want {
+		t.Errorf("evidence = %q, want %q", f.Evidence, want)
+	}
+	wantFact(t, caps, CapReasoningThinkingOnly, "true")
+	if _, ok := caps.Facts["tools.parallel"]; ok {
+		t.Error("an empty published value was recorded")
+	}
+
+	// The Client's own evidence still wins over the proxy's.
+	c2 := NewClient(srv.URL, "", "glm")
+	c2.SetCapabilities(Capabilities{Facts: map[string]Fact{
+		CapReasoningThinkingOnly: {Value: "false", Source: SourceProbed, Evidence: "probe"},
+	}})
+	if err := c2.LoadDeclared(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c2.Capabilities().Facts[CapReasoningThinkingOnly]; got.Value != "false" || got.Source != SourceProbed {
+		t.Errorf("a published fact replaced the Client's probed one: %+v", got)
+	}
+}

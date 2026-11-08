@@ -53,6 +53,8 @@ type declaredEntry struct {
 	ThinkingDefault string   `json:"thinking_default"`
 	ThinkingModes   []string `json:"thinking_modes"`
 	ThinkingEffort  string   `json:"thinking_effort"`
+	// corrallm: its own capability record for this model, key → fact.
+	Capabilities map[string]publishedFact `json:"capabilities"`
 	// OpenRouter
 	TopProvider *struct {
 		MaxCompletionTokens int `json:"max_completion_tokens"`
@@ -129,6 +131,15 @@ func (c *Client) LoadDeclared(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// publishedFact is one fact of a proxy's own record as /models publishes it.
+// Value is Fact.Value, the canonical string. Source and At are the proxy's and
+// go into the evidence only.
+type publishedFact struct {
+	Value  string `json:"value"`
+	Source string `json:"source"`
+	At     string `json:"at"`
 }
 
 func (c *Client) learnDeclared(e *declaredEntry) {
@@ -208,5 +219,32 @@ func (c *Client) learnDeclared(e *declaredEntry) {
 		}
 		// "tools" teaches nothing yet. "tool_choice" is listed support, not
 		// proof a forced choice is honored, so tools.choice_forced stays unknown.
+	}
+
+	// corrallm's own record, last: what the proxy saw this model do is better
+	// informed than its static metadata above (a refusal that taught it
+	// thinking_only beats a thinking_modes list), and declared replaces
+	// declared. It is still DECLARED here, whatever source the proxy had: a
+	// proxy's evidence is not this Client's, so a refusal or observation of
+	// this Client's own still wins (Carl, 2026-11-08). An empty value says
+	// nothing and is skipped.
+	pkeys := make([]string, 0, len(e.Capabilities))
+	for k, f := range e.Capabilities {
+		if k != "" && f.Value != "" {
+			pkeys = append(pkeys, k)
+		}
+	}
+	sort.Strings(pkeys)
+	for _, k := range pkeys {
+		f := e.Capabilities[k]
+		ev := "capabilities." + k + "=" + f.Value + " (the proxy's"
+		if f.Source != "" {
+			ev += " " + f.Source
+		}
+		ev += " fact"
+		if f.At != "" {
+			ev += " at " + f.At
+		}
+		decl(k, f.Value, ev+")")
 	}
 }
