@@ -102,6 +102,24 @@ func (t *Toolset) edit(a args) (string, error) {
 				notes = append(notes, where+"the line-number prefixes copied from read were removed from the anchor")
 			}
 		}
+		if n == 0 {
+			// The anchor is the right lines with the wrong whitespace (the most
+			// common miss, see editMiss): apply it there when that is
+			// unambiguous at line grain, and say so.
+			if from, to, l1, l2, ok := wsLineMatch(content, p.Old, crlf); ok {
+				if conv(p.Old) == nw {
+					return "", fmt.Errorf("%sold and new are the same text", where)
+				}
+				content = content[:from] + nw + content[to:]
+				span := fmt.Sprintf("line %d", l1)
+				if l2 > l1 {
+					span = fmt.Sprintf("lines %d-%d", l1, l2)
+				}
+				notes = append(notes, where+"the anchor matched "+span+" only when whitespace was ignored; applied there. "+
+					"Check the indentation and formatting of the result (the new text was used as written)")
+				continue
+			}
+		}
 		if n != 1 {
 			msg := editMiss(display, p.Old, lf(content), n)
 			if len(pairs) > 1 {
@@ -194,6 +212,81 @@ func writeAtomic(abs string, data []byte, mode fs.FileMode) error {
 }
 
 // ── miss reporting ──────────────────────────────────────────────────
+
+// wsLineMatch finds the one place an anchor matches when whitespace inside
+// lines is ignored, and only at line grain: the anchor's lines (less one
+// trailing newline) equal, after normaliseLine, the whole file lines l1..l2,
+// and nowhere else. It returns the byte span of those lines in content: from
+// the start of l1 to the end of l2, plus l2's line ending when the anchor ended
+// with a newline. An anchor that starts or ends mid-line normalises to a
+// fragment, which equals no whole line, so it does not match here and keeps
+// editMiss's error; so does an anchor that lines up in two places, or one with
+// no visible text.
+//
+// The match is by lines on purpose: a partial span found by a normalised
+// substring would need its original offsets guessed back, and a wrong guess
+// edits the wrong bytes. The cost is that a mid-line anchor with the wrong
+// whitespace still fails, with the error that shows the right text.
+func wsLineMatch(content, old string, crlf bool) (from, to, l1, l2 int, ok bool) {
+	// Split the content itself unless every line is CRLF, so the offsets below
+	// are content's. normaliseLine drops a stray "\r" with the other spaces.
+	body := content
+	if crlf {
+		body = lf(content)
+	}
+	if at := lineNumbers(normalise(body), normalise(lf(old)), 2); len(at) != 1 {
+		return 0, 0, 0, 0, false
+	}
+	anchor := lf(old)
+	nl := strings.HasSuffix(anchor, "\n")
+	ol := strings.Split(strings.TrimSuffix(anchor, "\n"), "\n")
+	want := make([]string, len(ol))
+	visibleText := false
+	for i, l := range ol {
+		want[i] = normaliseLine(l)
+		visibleText = visibleText || want[i] != ""
+	}
+	if !visibleText {
+		return 0, 0, 0, 0, false
+	}
+	fl := strings.Split(body, "\n")
+	hit := -1
+	for i := 0; i+len(want) <= len(fl); i++ {
+		j := 0
+		for j < len(want) && normaliseLine(fl[i+j]) == want[j] {
+			j++
+		}
+		if j == len(want) {
+			if hit >= 0 {
+				return 0, 0, 0, 0, false
+			}
+			hit = i
+		}
+	}
+	if hit < 0 {
+		return 0, 0, 0, 0, false
+	}
+	// Byte offsets in content, whose lines end in "\r\n" when crlf.
+	sep := 1
+	if crlf {
+		sep = 2
+	}
+	for _, l := range fl[:hit] {
+		from += len(l) + sep
+	}
+	to = from
+	last := hit + len(want) - 1
+	for i := hit; i <= last; i++ {
+		to += len(fl[i])
+		if i < last {
+			to += sep
+		}
+	}
+	if nl && last < len(fl)-1 {
+		to += sep
+	}
+	return from, to, hit + 1, last + 1, true
+}
 
 // editMiss says why an anchor did not match exactly once, and what would.
 //

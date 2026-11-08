@@ -61,9 +61,49 @@ func TestEdit(t *testing.T) {
 			err:  []string{"appears 2 times", "lines 6, 7", "more of the surrounding lines"},
 		},
 		{
-			name: "whitespace miss shows the region",
-			args: map[string]any{"old": "func helper() int {\n    return 1\n}", "new": "x"},
+			name: "whitespace miss mid-line shows the region",
+			args: map[string]any{"old": "helper() int {\n    return 1\n}", "new": "x"},
 			err:  []string{"different whitespace", "at line 10", "10\tfunc helper() int {", "11\t\treturn 1", `anchor: \s\s\s\sreturn 1`, `file:   \treturn 1`},
+		},
+		{
+			name: "whitespace only: tabs vs spaces on one line is applied, new as written",
+			args: map[string]any{"old": "    return 1", "new": "        return 2"},
+			want: strings.Replace(goSrc, "\treturn 1", "        return 2", 1),
+			out:  []string{"+1 -1", "the anchor matched line 11 only when whitespace was ignored; applied there", "new text was used as written"},
+		},
+		{
+			name: "whitespace only: indentation across three lines is applied",
+			args: map[string]any{"old": "  func helper() int {\n    return 1\n  }", "new": "func helper() int {\n\treturn 2\n}"},
+			want: strings.Replace(goSrc, "return 1", "return 2", 1),
+			out:  []string{"lines 10-12 only when whitespace was ignored"},
+		},
+		{
+			name: "whitespace only: trailing spaces, anchor ending in a newline",
+			args: map[string]any{"old": "\tfmt.Println(\"world\")   \n", "new": "\tfmt.Println(\"earth\")\n"},
+			want: strings.Replace(goSrc, `"world"`, `"earth"`, 1),
+			out:  []string{"line 7 only when whitespace was ignored"},
+		},
+		{
+			name: "whitespace only: same text after normalising is still refused",
+			args: map[string]any{"old": "    return 1", "new": "    return 1"},
+			err:  []string{"the same text"},
+		},
+		{
+			name: "whitespace only in a multi-edit: a later miss still aborts all",
+			args: map[string]any{"edits": []map[string]any{
+				{"old": "    return 1", "new": "\treturn 2"},
+				{"old": "not in the file", "new": "x"},
+			}},
+			err: []string{"edit 2 of 2", "No edits were applied"},
+		},
+		{
+			name: "whitespace only in a multi-edit: the note names the edit",
+			args: map[string]any{"edits": []map[string]any{
+				{"old": `"hello"`, "new": `"hi"`},
+				{"old": "    return 1", "new": "\treturn 2"},
+			}},
+			want: strings.Replace(strings.Replace(goSrc, `"hello"`, `"hi"`, 1), "return 1", "return 2", 1),
+			out:  []string{"edit 2 of 2: the anchor matched line 11 only when whitespace was ignored"},
 		},
 		{
 			name: "near miss shows the closest window",
@@ -290,3 +330,23 @@ func TestDiffSummary(t *testing.T) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// The whitespace fallback applies only where the anchor lines up with whole
+// lines in exactly one place; two places, or a CRLF file, must not edit the
+// wrong bytes.
+func TestEditWhitespaceFallbackBounds(t *testing.T) {
+	const twice = "a {\n\tx := 1\n}\nb {\n\tx := 1\n}\n"
+	root := tree(t, map[string]string{"two.go": twice, "win.txt": "alpha\r\n\tbeta\r\ngamma\r\n"})
+	ts := mount(t, Config{Root: root})
+
+	mustErr(t, call(t, ts, Edit, map[string]any{"path": "two.go", "old": "    x := 1", "new": "\tx := 2"}))
+	if got := readFile(t, filepath.Join(root, "two.go")); got != twice {
+		t.Fatalf("an anchor that lines up twice changed the file:\n%s", got)
+	}
+
+	out := mustOK(t, call(t, ts, Edit, map[string]any{"path": "win.txt", "old": "  beta\ngamma", "new": "\tBETA\ngamma"}))
+	contains(t, out, "lines 2-3 only when whitespace was ignored")
+	if got := readFile(t, filepath.Join(root, "win.txt")); got != "alpha\r\n\tBETA\r\ngamma\r\n" {
+		t.Fatalf("CRLF file after a whitespace match: %q", got)
+	}
+}
