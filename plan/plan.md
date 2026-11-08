@@ -50,6 +50,13 @@ Scope: reasoning (off, efforts, budget field and its minimum), real context and 
 - **next (agentkit):** `LoadDeclared` reads corrallm's `capabilities` field (after corrallm ships it; fixture from the live body).
 - **blocking decisions:** none open.
 
+### ◻ Effort selector rooted in agentkit (2026-11-08)
+Carl (2026-11-08): "capabilities and effort selector are things that should be rooted in agentkit and integrated by dun." Today dun's `effort.go` owns the levels (default/off/low/medium/high), their descriptions and Level → ChatOpts. agentkit owns the record and the per-dialect translation.
+- **next:** dun-bb sends effort.go's semantics (levels, defaults, what "default" means per dialect); design note before code. After v0.26.0, so it does not hold up the release.
+- **sketch:** agentkit owns the levels, their descriptions, and Level → ChatOpts through the record (off → `reasoning.off`, refused → nearest accepted). dun keeps `/effort`, its config line, and the UI.
+- **risks:** "default" differs per dialect (send nothing vs. the server's own default); moving it changes dun's wire output unless the mapping is ported exactly.
+- **blocking decisions:** none yet.
+
 ### ◐ corrallm upgrade to agentkit v0.24.0 + shim v0.5.0 (2026-11-06)
 corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), then the PDF rule as `1fc9519` (replaced the unpushed `5cd7b16`). By its own report, build, vet and `go test ./...` pass with GOWORK=off. Deployed 2026-11-06 as v0.1.0-97-g1fc9519 (pushed af31a95..1fc9519). Live checks by corrallm-12: Swift alias → text conversion OK; chandra → vision OK.
 - **remaining:** a live PDF to Claude, not verified. The anthropic daily budget was spent and the claude sub-* path needs a caller login. Covered by integration tests only. Waits on: budget reset (23:59 UTC) or a sub login.
