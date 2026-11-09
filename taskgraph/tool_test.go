@@ -222,3 +222,21 @@ func TestShowListsDoneWhenAndOnlyShowIDGivesDetails(t *testing.T) {
 		t.Errorf("show <id> lacks details:\n%s", one)
 	}
 }
+
+// A model that sends a removed or made-up field must be told, with nothing
+// written: a silent drop loses its text and nothing tells it to fix the call.
+func TestToolRefusesUnknownFieldsAndNamesTheReplacement(t *testing.T) {
+	st := newMemStore(Graph{}, nil)
+	out := call(st, "", map[string]any{"action": "add", "title": "parse", "done_when": "tests pass", "goal": "g", "thought": "x"})
+	for _, want := range []string{"nothing was changed", `"goal": use details`, `"thought"`, "details, done_when"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %s", want, out)
+		}
+	}
+	if g := view(t, st); len(g.Nodes) != 0 {
+		t.Errorf("a refused call wrote %d nodes", len(g.Nodes))
+	}
+	if out = call(st, "", map[string]any{"action": "add", "title": "parse", "done_when": "tests pass", "details": "d"}); !strings.Contains(out, "1 [todo] parse") {
+		t.Errorf("known fields only: %s", out)
+	}
+}

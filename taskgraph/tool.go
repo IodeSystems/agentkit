@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/iodesystems/agentkit/llm"
@@ -97,6 +98,46 @@ type args struct {
 	Reason   string    `json:"reason"`
 }
 
+// removed names the fields a node no longer has, so a model that sends an
+// old shape (from training, or from earlier in the conversation) is told
+// where the text goes instead of losing it.
+var removed = map[string]string{"goal": "use details", "notes": "use details", "files": "not kept: put paths in details"}
+
+// unknownFields refuses a call with a field the schema does not have, and
+// writes nothing. json.Unmarshal drops such a field without a word, so the
+// model's text is lost and nothing tells it to fix the call; an error it can
+// read is what cheap models recover from (Carl, 2026-11-09). The schema is
+// the list of known fields, so the two cannot drift apart.
+func unknownFields(raw string) string {
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return ""
+	}
+	props := def("").Function.Parameters.(map[string]any)["properties"].(map[string]any)
+	var bad []string
+	for k := range m {
+		if _, ok := props[k]; ok {
+			continue
+		}
+		if hint, ok := removed[k]; ok {
+			bad = append(bad, fmt.Sprintf("%q: %s", k, hint))
+		} else {
+			bad = append(bad, fmt.Sprintf("%q", k))
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	slices.Sort(bad)
+	known := make([]string, 0, len(props))
+	for k := range props {
+		known = append(known, k)
+	}
+	slices.Sort(known)
+	return "plan: nothing was changed. Unknown field " + strings.Join(bad, ", ") +
+		". The fields are: " + strings.Join(known, ", ")
+}
+
 func str(p *string) string {
 	if p == nil {
 		return ""
@@ -113,6 +154,9 @@ func handle(ctx context.Context, st Store, actor, raw string, o options) string 
 	var a args
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return "plan: arguments are not valid JSON: " + err.Error()
+	}
+	if msg := unknownFields(raw); msg != "" {
+		return msg
 	}
 	a.ID = strings.TrimSpace(a.ID)
 	switch a.Action {
