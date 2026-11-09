@@ -79,7 +79,8 @@ Ported from dun's `internal/taskgraph` (dun `098c15b`), on Carl's go. Graph, vie
 - Decided: boundary text narrowed in CLAUDE.md / README / concepts.md. Moved before dun's delegation shipped and with one consumer, Carl's call.
 - Evidence 2026-11-06: dun already imports `agentkit/taskgraph` (`plan.go`; commits `b555223` v0.22.0, `da7d351` owner on a node). dun's `plan.go` has uncommitted edits.
 - **next:** dun finishes and commits its `plan.go` work and bumps past v0.23.0; confirm `Tell` against a real delegation.
-- **risks:** `Tell` rules untested against real delegation; the delegator is NOT told (host adds it, the graph has no delegator record). `List()` ends with `ReadyLine("")`, the main agent's ready set, even for a sub-agent's `show`. `Node.Files` is carried but unenforced.
+- **risks:** `Tell` rules untested against real delegation; the delegator is NOT told (host adds it, the graph has no delegator record). `List()` ends with `ReadyLine("")`, the main agent's ready set, even for a sub-agent's `show`.
+- Decided 2026-11-09 (Carl): node shape is title, details, done_when, needs. goal and notes fold into details; files is removed. `show` lists title, status and done_when; `show <id>` gives details. dun converts its stored rows on load; agentkit has no reader for the old fields. Ships in v0.27.0.
 - **blocking decisions:** none open.
 - **optional extensions:** a per-owner view (subtree + what it waits on, read-only) for a sub-agent's `show`; a `delegate` action.
 

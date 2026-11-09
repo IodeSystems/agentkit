@@ -74,13 +74,11 @@ func (g *Graph) Detail(n *Node) string {
 			b.WriteString("\n  " + k + ": " + v)
 		}
 	}
-	add("goal", n.Goal)
+	add("details", n.Details)
 	add("done when", n.DoneWhen)
 	if len(n.Needs) > 0 {
 		add("needs", strings.Join(n.Needs, ", "))
 	}
-	add("files", strings.Join(n.Files, ", "))
-	add("notes", n.Notes)
 	if n.Status == Blocked || n.Status == Dropped {
 		add("why", n.Why)
 	}
@@ -114,7 +112,10 @@ func listNodes(ns []*Node, max int) string {
 	return strings.Join(parts, "; ")
 }
 
-// List is the whole graph as the tree, one line a row, for the model.
+// List is the whole graph as the tree for the model: per node its Line and,
+// under it, what done means. Details stay out (Detail has them): the model
+// re-reads the whole plan often, and done_when is what it needs to pick the
+// next node, while details are for the one node it is working.
 func (g *Graph) List() string {
 	if len(g.Nodes) == 0 {
 		return "plan: empty"
@@ -136,6 +137,9 @@ func (g *Graph) List() string {
 			if w := g.Waiting(r.Node.ID); len(w) > 0 && !r.Repeat {
 				b.WriteString(" — " + w[0])
 			}
+		}
+		if !r.Repeat {
+			b.WriteString("\n" + strings.Repeat("  ", r.Depth) + "  done when: " + Clip(r.Node.DoneWhen, 100))
 		}
 	}
 	b.WriteString("\n" + g.ReadyLine("", 5))

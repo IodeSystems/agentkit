@@ -130,14 +130,14 @@ func copyNode(n *Node) *Node {
 		return nil
 	}
 	c := *n
-	c.Needs, c.Files = slices.Clone(n.Needs), slices.Clone(n.Files)
+	c.Needs = slices.Clone(n.Needs)
 	return &c
 }
 
 func sameNode(a, b *Node) bool {
-	return a.Title == b.Title && a.Goal == b.Goal && a.Status == b.Status && a.Owner == b.Owner &&
-		a.DoneWhen == b.DoneWhen && a.Notes == b.Notes && a.Replaces == b.Replaces && a.Why == b.Why &&
-		a.Account == b.Account && slices.Equal(a.Needs, b.Needs) && slices.Equal(a.Files, b.Files)
+	return a.Title == b.Title && a.Details == b.Details && a.Status == b.Status && a.Owner == b.Owner &&
+		a.DoneWhen == b.DoneWhen && a.Replaces == b.Replaces && a.Why == b.Why &&
+		a.Account == b.Account && slices.Equal(a.Needs, b.Needs)
 }
 
 // others is owners without actor and without repeats, sorted.

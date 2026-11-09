@@ -31,7 +31,7 @@ func WithOnChange(f func(ctx context.Context, actor string, changes []Change)) O
 }
 
 // WithNote appends host sentences to the tool's description: what the plan
-// means here (a mode, files a node lists) is the host's to say.
+// means here (a mode, what a node's details hold) is the host's to say.
 func WithNote(s string) Option { return func(o *options) { o.note = s } }
 
 // WithMayChange sets who may change a node: no hook, anyone. An actor that
@@ -56,12 +56,12 @@ func def(note string) llm.ToolDef {
 	td.Type = "function"
 	td.Function.Name = ToolName
 	td.Function.Description = "Keep the plan: a graph of tasks the user can read. Make nodes for work with " +
-		"several steps; a one-step task needs none. Each node has a title, a goal, done_when (what has to be true for " +
+		"several steps; a one-step task needs none. Each node has a title, details, done_when (what has to be true for " +
 		"it to be done) and needs (ids it waits on; a node is ready when everything it needs is done). Work the ready " +
 		"nodes: update status doing when you begin one, then done with an account of how done_when was met. A dropped " +
 		"node keeps its dependents waiting: add a node with replaces, then update the dependents' needs. block means " +
 		"you are stuck, with a reason; waiting on other nodes is not blocked, it shows by itself. Actions: add, " +
-		"update, show (one node by id, else the whole plan), ready, done, block, drop. The user may edit the plan."
+		"update, show (no id lists each node's title, status and done_when; show <id> gives the full node with its details), ready, done, block, drop. The user may edit the plan."
 	if note != "" {
 		td.Function.Description += " " + note
 	}
@@ -71,11 +71,9 @@ func def(note string) llm.ToolDef {
 			"action":    map[string]any{"type": "string", "enum": []string{"add", "update", "show", "ready", "done", "block", "drop"}},
 			"id":        map[string]any{"type": "string", "description": "update/show/done/block/drop: the node"},
 			"title":     map[string]any{"type": "string", "description": "add/update: a short name"},
-			"goal":      map[string]any{"type": "string", "description": "add/update: what the node is for"},
+			"details":   map[string]any{"type": "string", "description": "add/update: what the node is for and anything the next reader needs; shown only by show <id>"},
 			"done_when": map[string]any{"type": "string", "description": "add (required)/update: what has to be true for it to be done"},
 			"needs":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "add/update: ids this node waits on; an update replaces the list (the way to re-point an edge)"},
-			"notes":     map[string]any{"type": "string", "description": "add/update: anything the next reader needs"},
-			"files":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "add/update: paths the node expects to change"},
 			"replaces":  map[string]any{"type": "string", "description": "add: the id of a dropped node this one stands in for"},
 			"status":    map[string]any{"type": "string", "enum": []string{"todo", "doing"}, "description": "update: doing when you begin; todo to take a block back"},
 			"account":   map[string]any{"type": "string", "description": "done: how done_when was met"},
@@ -90,11 +88,9 @@ type args struct {
 	Action   string    `json:"action"`
 	ID       string    `json:"id"`
 	Title    *string   `json:"title"`
-	Goal     *string   `json:"goal"`
+	Details  *string   `json:"details"`
 	DoneWhen *string   `json:"done_when"`
 	Needs    *[]string `json:"needs"`
-	Notes    *string   `json:"notes"`
-	Files    *[]string `json:"files"`
 	Replaces string    `json:"replaces"`
 	Status   *Status   `json:"status"`
 	Account  string    `json:"account"`
@@ -159,12 +155,9 @@ func handle(ctx context.Context, st Store, actor, raw string, o options) string 
 		}
 		switch a.Action {
 		case "add":
-			nn := Node{Title: str(a.Title), Goal: str(a.Goal), DoneWhen: str(a.DoneWhen), Notes: str(a.Notes), Replaces: a.Replaces, Owner: actor}
+			nn := Node{Title: str(a.Title), Details: str(a.Details), DoneWhen: str(a.DoneWhen), Replaces: a.Replaces, Owner: actor}
 			if a.Needs != nil {
 				nn.Needs = *a.Needs
-			}
-			if a.Files != nil {
-				nn.Files = *a.Files
 			}
 			// An actor adds under its own part only: what it needs must be its to change.
 			for _, d := range nn.Needs {
@@ -177,8 +170,8 @@ func handle(ctx context.Context, st Store, actor, raw string, o options) string 
 				return err
 			}
 		case "update":
-			if err := g.Update(a.ID, Patch{Title: a.Title, Goal: a.Goal, DoneWhen: a.DoneWhen, Notes: a.Notes,
-				Needs: a.Needs, Files: a.Files, Status: a.Status}); err != nil {
+			if err := g.Update(a.ID, Patch{Title: a.Title, Details: a.Details, DoneWhen: a.DoneWhen,
+				Needs: a.Needs, Status: a.Status}); err != nil {
 				return err
 			}
 			n = g.Get(a.ID)

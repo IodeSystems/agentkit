@@ -247,11 +247,11 @@ func TestUpdate(t *testing.T) {
 	a := add(t, g, "a")
 	b := add(t, g, "b", a)
 	s := func(v string) *string { return &v }
-	if err := g.Update(b, Patch{Title: s("  new   title "), Goal: s("g"), Notes: s("n"), DoneWhen: s("dw"), Files: &[]string{"x.go", "x.go", " "}}); err != nil {
+	if err := g.Update(b, Patch{Title: s("  new   title "), Details: s("  d\n  more "), DoneWhen: s("dw")}); err != nil {
 		t.Fatal(err)
 	}
 	n := g.Get(b)
-	if n.Title != "new title" || n.Goal != "g" || n.DoneWhen != "dw" || n.Notes != "n" || len(n.Files) != 1 {
+	if n.Title != "new title" || n.Details != "d\n  more" || n.DoneWhen != "dw" {
 		t.Errorf("%+v", n)
 	}
 	for name, p := range map[string]Patch{

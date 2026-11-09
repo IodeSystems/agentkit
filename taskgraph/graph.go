@@ -51,7 +51,10 @@ var transitions = map[Status][]Status{
 type Node struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
-	Goal  string `json:"goal,omitempty"`
+	// Details is free text: what the node is for and anything the next reader
+	// needs. Only Detail shows it; the whole-plan List leaves it out, so a long
+	// plan stays cheap to re-read.
+	Details string `json:"details,omitempty"`
 	// Status is never "waiting": see Status.
 	Status Status `json:"status"`
 	// Needs are the ids this node waits on, until each is done.
@@ -61,10 +64,6 @@ type Node struct {
 	Owner string `json:"owner,omitempty"`
 	// DoneWhen is what done means, set when the node is made.
 	DoneWhen string `json:"done_when"`
-	Notes    string `json:"notes,omitempty"`
-	// Files are the paths the node expects to change. Nothing enforces it yet;
-	// parallel runs will need it, to keep siblings off one file.
-	Files []string `json:"files,omitempty"`
 	// Replaces is a dropped node this one stands in for. It does not move the
 	// dropped node's dependents: an update of their needs does.
 	Replaces string `json:"replaces,omitempty"`
@@ -88,7 +87,6 @@ func (g *Graph) Clone() Graph {
 	for i, n := range g.Nodes {
 		cn := *n
 		cn.Needs = slices.Clone(n.Needs)
-		cn.Files = slices.Clone(n.Files)
 		c.Nodes[i] = &cn
 	}
 	return c
@@ -116,17 +114,17 @@ func cleanList(in []string) []string {
 	return out
 }
 
-// Add makes a node from n's Title, Goal, Needs, Owner, DoneWhen, Notes, Files
+// Add makes a node from n's Title, Details, Needs, Owner, DoneWhen
 // and Replaces. It starts as todo.
 func (g *Graph) Add(n Node) (*Node, error) {
-	n.Title, n.Goal, n.DoneWhen, n.Notes = clean(n.Title), clean(n.Goal), clean(n.DoneWhen), strings.TrimSpace(n.Notes)
+	n.Title, n.DoneWhen, n.Details = clean(n.Title), clean(n.DoneWhen), strings.TrimSpace(n.Details)
 	if n.Title == "" {
 		return nil, fmt.Errorf("a node needs a title")
 	}
 	if n.DoneWhen == "" {
 		return nil, fmt.Errorf("a node needs done_when: what has to be true for it to be done")
 	}
-	n.Needs, n.Files = cleanList(n.Needs), cleanList(n.Files)
+	n.Needs = cleanList(n.Needs)
 	if err := g.checkNeeds("", n.Needs); err != nil {
 		return nil, err
 	}
@@ -197,9 +195,9 @@ func (g *Graph) path(from, to string) []string {
 // Status is todo or doing only: done, blocked and dropped carry what they need
 // (an account, a reason) through SetStatus.
 type Patch struct {
-	Title, Goal, DoneWhen, Notes *string
-	Needs, Files                 *[]string
-	Status                       *Status
+	Title, Details, DoneWhen *string
+	Needs                    *[]string
+	Status                   *Status
 }
 
 // Update applies p to node id. A change of Needs is the re-pointing of an edge.
@@ -214,19 +212,13 @@ func (g *Graph) Update(id string, p Patch) error {
 			return fmt.Errorf("a node needs a title")
 		}
 	}
-	if p.Goal != nil {
-		c.Goal = clean(*p.Goal)
+	if p.Details != nil {
+		c.Details = strings.TrimSpace(*p.Details)
 	}
 	if p.DoneWhen != nil {
 		if c.DoneWhen = clean(*p.DoneWhen); c.DoneWhen == "" {
 			return fmt.Errorf("a node needs done_when")
 		}
-	}
-	if p.Notes != nil {
-		c.Notes = strings.TrimSpace(*p.Notes)
-	}
-	if p.Files != nil {
-		c.Files = cleanList(*p.Files)
 	}
 	if p.Needs != nil {
 		c.Needs = cleanList(*p.Needs)

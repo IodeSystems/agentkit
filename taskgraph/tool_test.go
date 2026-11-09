@@ -32,7 +32,7 @@ func TestToolWorkflow(t *testing.T) {
 	if !strings.Contains(out, "1 [todo] parse") || !strings.Contains(out, "ready: 1 parse") {
 		t.Errorf("add: %s", out)
 	}
-	out = call(st, "", map[string]any{"action": "add", "title": "emit", "done_when": "x", "needs": []string{"1"}, "files": []string{"emit.go"}})
+	out = call(st, "", map[string]any{"action": "add", "title": "emit", "done_when": "x", "needs": []string{"1"}, "details": "writes the AST out"})
 	if !strings.Contains(out, "2 [todo] emit") || !strings.Contains(out, "ready: 1 parse") {
 		t.Errorf("add 2: %s", out)
 	}
@@ -186,7 +186,7 @@ func TestDef(t *testing.T) {
 		t.Errorf("%+v", d)
 	}
 	props := d.Function.Parameters.(map[string]any)["properties"].(map[string]any)
-	for _, k := range []string{"action", "id", "title", "goal", "done_when", "needs", "notes", "files", "replaces", "status", "account", "reason"} {
+	for _, k := range []string{"action", "id", "title", "details", "done_when", "needs", "replaces", "status", "account", "reason"} {
 		if _, ok := props[k]; !ok {
 			t.Errorf("no %s parameter", k)
 		}
@@ -204,5 +204,21 @@ func TestToolWithoutAHookAnyoneMayChange(t *testing.T) {
 	_, h = Tool(st, "q", WithMayChange(func(string, *Node) bool { return false }))
 	if out := h(context.Background(), `{"action":"update","id":"1","title":"c"}`); !strings.Contains(out, "not yours") {
 		t.Errorf("%s", out)
+	}
+}
+
+func TestShowListsDoneWhenAndOnlyShowIDGivesDetails(t *testing.T) {
+	st := newMemStore(Graph{}, nil)
+	call(st, "", map[string]any{"action": "add", "title": "parse", "done_when": "tests pass", "details": "SECRET-DETAILS for the next reader"})
+	all := call(st, "", map[string]any{"action": "show"})
+	if strings.Contains(all, "SECRET-DETAILS") {
+		t.Errorf("whole-plan show carries details; a long plan is re-read often:\n%s", all)
+	}
+	if !strings.Contains(all, "1 [todo] parse") || !strings.Contains(all, "done when: tests pass") {
+		t.Errorf("whole-plan show lacks the status line or done_when:\n%s", all)
+	}
+	one := call(st, "", map[string]any{"action": "show", "id": "1"})
+	if !strings.Contains(one, "details: SECRET-DETAILS for the next reader") {
+		t.Errorf("show <id> lacks details:\n%s", one)
 	}
 }
