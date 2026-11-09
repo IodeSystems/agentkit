@@ -125,3 +125,17 @@ the contract being wrong. Known so far: func-type seams took wrappers cleanly
   `ToolDispatcher` or `Session` (the reread would shape it).
 - **Waits on:** an agent run (read-only review of `../dun`).
 - **Evidence:** dun is on agentkit v0.23.0 (read 2026-11-06); no reread has been done.
+
+### Passthrough stream observation for a proxy's capability record
+`LearnResponse` learns from a 2xx only `reasoning.efforts.accepted`, and only when the
+sent body has `reasoning_effort` (`llm/capabilities_passthrough.go:48`). Usage chunk,
+reasoning delta field and forced tool_choice are learned only by agentkit's own
+`readStream`, so corrallm cannot learn them from the streams it relays. A passthrough
+form would be a watcher the proxy feeds the relayed SSE chunks to, ending in
+`observeStream`.
+- **Resume condition:** corrallm's `capability` table stays empty or thin after real
+  Fireworks/GLM traffic, and Carl wants those facts learned in the proxy.
+- **Waits on:** a decision (Carl).
+- **Evidence 2026-11-09 (corrallm-2c):** after the v0.2.1 deploy, 5,995 remote
+  requests (aw4, anthropic-claude-sonnet-5-5, chat completions, 5,975 × 200, no
+  reasoning_effort) recorded no fact; /v1/models has no `capabilities` yet.
