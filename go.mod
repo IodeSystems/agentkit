@@ -2,7 +2,7 @@ module github.com/iodesystems/agentkit
 
 go 1.26.2
 
-require github.com/iodesystems/openai-claude-api-shim v0.5.0
+require github.com/iodesystems/openai-claude-api-shim v0.6.0
 
 // Carries the Anthropic SDK and its 72 modules, which broke invariant 0.
 retract v0.17.0
