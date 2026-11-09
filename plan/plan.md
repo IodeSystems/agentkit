@@ -79,7 +79,8 @@ Cause: aw4's 400s at 16:59. `Shaper.summarize` sent every foldable entry raw in 
 Ported from dun's `internal/taskgraph` (dun `098c15b`), on Carl's go. Graph, views and `plan` tool as dun had them, plus: `Store` is interface-only (the integration provides it; dun's `MemStore` stays in dun), `Diff`/`Apply` compute per-write `[]Change` with `Tell` = owners to notify (node owner before/after; dependents' owners on a status move; never the actor), `WithOnChange` hands the tool's kept changes to the host. Owner label in views is `(owner X)`, was `(agent X)`.
 - Decided: boundary text narrowed in CLAUDE.md / README / concepts.md. Moved before dun's delegation shipped and with one consumer, Carl's call.
 - Evidence 2026-11-06: dun already imports `agentkit/taskgraph` (`plan.go`; commits `b555223` v0.22.0, `da7d351` owner on a node). dun's `plan.go` has uncommitted edits.
-- **next:** dun finishes and commits its `plan.go` work and bumps past v0.23.0; confirm `Tell` against a real delegation.
+- Evidence 2026-11-09 (dun-bb): dun v0.4.1 (d343e44) pins v0.27.0 and uses the new node shape; dun migrates old plan files itself.
+- **next:** confirm `Tell` against a real delegation.
 - **risks:** `Tell` rules untested against real delegation; the delegator is NOT told (host adds it, the graph has no delegator record). `List()` ends with `ReadyLine("")`, the main agent's ready set, even for a sub-agent's `show`.
 - Decided 2026-11-09 (Carl): node shape is title, details, done_when, needs. goal and notes fold into details; files is removed. `show` lists title, status and done_when; `show <id>` gives details. dun converts its stored rows on load; agentkit has no reader for the old fields. Ships in v0.27.0.
 - **blocking decisions:** none open.
