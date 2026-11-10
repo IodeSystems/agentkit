@@ -574,13 +574,17 @@ func pydanticFacts(body string, r refusalCtx) []factUpdate {
 	return out
 }
 
-// refusalFacts reads a 4xx chat body that names a request field and returns
-// the facts it teaches. sent is the request body as sent. A 429 is not a
-// refusal of a field, and a 5xx is not a statement about the request (a
-// llama.cpp template's 500 on "high" is real, but so is every crash). An
-// unknown body returns nil.
+// refusalFacts reads a 400 or 422 chat body that names a request field and
+// returns the facts it teaches. sent is the request body as sent. Only those
+// two statuses say "this request is wrong": a 401, 402, 403 or 429 is about the
+// caller or its account, and its text can still quote the model's own
+// message. A proxy's 402 that carried a GLM "thinking-only" line taught
+// thinking_only=true (corrallm, 2026-11-09), so the status gates the match
+// (Carl, 2026-11-10). A 5xx is not a statement about the request (a llama.cpp
+// template's 500 on "high" is real, but so is every crash). An unknown body
+// returns nil.
 func refusalFacts(status int, body string, sent map[string]any) []factUpdate {
-	if status < 400 || status >= 500 || status == 429 || body == "" {
+	if (status != 400 && status != 422) || body == "" {
 		return nil
 	}
 	r := refusalCtx{status: status, sent: sent}

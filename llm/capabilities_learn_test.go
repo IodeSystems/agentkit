@@ -144,6 +144,9 @@ func TestRefusalPatternsTeachOnlyWhatTheBodyNames(t *testing.T) {
 		{"unknown body", 400, `{"error":{"message":"something else went wrong"}}`, none, map[string]string{}},
 		{"5xx teaches nothing", 500, glmRefusal, none, map[string]string{}},
 		{"429 teaches nothing", 429, glmRefusal, none, map[string]string{}},
+		{"402 teaches nothing", 402, glmRefusal, none, map[string]string{}},
+		{"403 teaches nothing", 403, glmRefusal, none, map[string]string{}},
+		{"404 teaches nothing", 404, glmRefusal, none, map[string]string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
