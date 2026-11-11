@@ -378,6 +378,12 @@ type Usage struct {
 	// working and the proxy waiting. This is what separates them.
 	Server ServerTiming `json:"server_timing,omitzero"`
 
+	// ServedModel and RequestID are what the proxy said about who answered
+	// this round-trip and under which id it logged it (HeaderServed,
+	// HeaderRequestID). Empty against an endpoint that sends neither.
+	ServedModel string `json:"served_model,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+
 	// Timings is what the MODEL SERVER said it spent computing this round, when
 	// it says so: llama.cpp's non-standard top-level "timings" object, a sibling
 	// of "usage" on the final stream event (corrallm relays it verbatim). Nil

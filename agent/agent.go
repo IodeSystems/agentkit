@@ -274,9 +274,14 @@ type TokenUsage struct {
 // magnitude, and a lone total is dominated by the cheapest of the three.
 type EntryUsage struct {
 	LatencyMS int64 `json:"latency_ms,omitempty"`
-	Cached    int   `json:"cached,omitempty"`
-	Processed int   `json:"processed,omitempty"`
-	Generated int   `json:"generated,omitempty"`
+	// ServedModel and RequestID are the proxy's attribution for this round
+	// (llm.Usage.ServedModel, RequestID): which model answered after
+	// failover, and the id the proxy logged it under. Empty when not sent.
+	ServedModel string `json:"served_model,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	Cached      int    `json:"cached,omitempty"`
+	Processed   int    `json:"processed,omitempty"`
+	Generated   int    `json:"generated,omitempty"`
 	// Reasoning is the part of Generated spent reasoning, and ReasoningSource
 	// says where the number came from. An empty source means the provider
 	// neither counted reasoning nor streamed it: UNKNOWN, not zero.

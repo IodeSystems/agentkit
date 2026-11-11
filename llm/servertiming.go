@@ -30,6 +30,20 @@ const (
 	HeaderUpstreamTTFBMS = "X-Corrallm-Upstream-Ttfb-Ms"
 )
 
+// Attribution headers corrallm stamps on every inference reply (corrallm
+// d11b92d, 2026-11-11). A lane fails over between models, so the model a
+// caller asked for is not always the model that answered; an A/B across
+// backends (Q6 vs NVFP4) is unreadable without knowing which one served each
+// call. The request id is corrallm's activity ticket, the key to its own log.
+const (
+	// HeaderServed is the model that answered, after lane failover. Absent
+	// when no failover target was chosen.
+	HeaderServed = "X-Corrallm-Served"
+	// HeaderRequestID is the caller's X-Corrallm-Request-Id or X-Request-Id
+	// when it sent one, else an id corrallm minted.
+	HeaderRequestID = "X-Corrallm-Request-Id"
+)
+
 // ServerTiming is what the proxy said about its own overhead on one round-trip.
 //
 // Reported distinguishes "the proxy said zero" from "nothing told us", which are

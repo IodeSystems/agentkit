@@ -1058,6 +1058,7 @@ func (s *Session) entryUsage(u *llm.Usage, reasoning string) *EntryUsage {
 	eu := &EntryUsage{}
 	if u != nil {
 		eu.LatencyMS = u.LatencyMS
+		eu.ServedModel, eu.RequestID = u.ServedModel, u.RequestID
 		eu.Cached = u.CachedPromptTokens()
 		eu.Processed = u.NewPromptTokens()
 		eu.Generated = u.CompletionTokens
@@ -1082,7 +1083,8 @@ func (s *Session) entryUsage(u *llm.Usage, reasoning string) *EntryUsage {
 		}
 		eu.Reasoning, eu.ReasoningSource = n, ReasoningEstimated
 	}
-	if eu.LatencyMS == 0 && eu.Cached == 0 && eu.Processed == 0 && eu.Generated == 0 && eu.ReasoningSource == "" {
+	if eu.LatencyMS == 0 && eu.Cached == 0 && eu.Processed == 0 && eu.Generated == 0 && eu.ReasoningSource == "" &&
+		eu.ServedModel == "" && eu.RequestID == "" {
 		return nil
 	}
 	return eu

@@ -3,8 +3,10 @@ package llm
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +90,51 @@ func TestPlainEndpointReportsNoTiming(t *testing.T) {
 	}
 	if usage.WorkMS() != usage.LatencyMS {
 		t.Errorf("WorkMS = %d, want the full LatencyMS %d", usage.WorkMS(), usage.LatencyMS)
+	}
+}
+
+// A lane that failed over answers with a model the caller did not ask for;
+// without the served model and the proxy's request id on Usage, an A/B across
+// backends cannot say which backend produced which reply.
+func TestServedModelAndRequestIDReachUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(HeaderServed, "swift-nvfp4")
+		w.Header().Set(HeaderRequestID, "tkt-42")
+		b, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(b), `"stream":true`) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],"+
+			"\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "", "swift")
+	ch, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "x"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	var usage *Usage
+	for chunk := range ch {
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+	}
+	if usage == nil || usage.ServedModel != "swift-nvfp4" || usage.RequestID != "tkt-42" {
+		t.Errorf("stream usage = %+v, want served swift-nvfp4, request id tkt-42", usage)
+	}
+
+	c = NewClient(srv.URL, "", "swift")
+	var got *Usage
+	c.OnUsage = func(u Usage) { got = &u }
+	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if got == nil || got.ServedModel != "swift-nvfp4" || got.RequestID != "tkt-42" {
+		t.Errorf("non-stream usage = %+v", got)
 	}
 }

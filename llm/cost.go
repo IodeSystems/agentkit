@@ -284,9 +284,11 @@ func keyBudgetFromHeader(h http.Header) KeyBudget {
 // arrive and stamped on every Usage the body produces.
 type responseMeta struct {
 	timing ServerTiming
-	cost   Cost
-	limits RateLimits
-	budget KeyBudget
+	// served and requestID are the proxy's attribution headers.
+	served, requestID string
+	cost              Cost
+	limits            RateLimits
+	budget            KeyBudget
 	// bodyCurrency is the currency a usage.cost in the body is in, when the
 	// response or the endpoint says which.
 	bodyCurrency string
@@ -294,10 +296,12 @@ type responseMeta struct {
 
 func (c *Client) metaFrom(h http.Header) responseMeta {
 	m := responseMeta{
-		timing: serverTimingFrom(h),
-		cost:   costFromHeader(h),
-		limits: rateLimitsFrom(h, time.Now()),
-		budget: keyBudgetFromHeader(h),
+		timing:    serverTimingFrom(h),
+		served:    strings.TrimSpace(h.Get(HeaderServed)),
+		requestID: strings.TrimSpace(h.Get(HeaderRequestID)),
+		cost:      costFromHeader(h),
+		limits:    rateLimitsFrom(h, time.Now()),
+		budget:    keyBudgetFromHeader(h),
 	}
 	switch {
 	case isLiteLLM(h):
@@ -313,6 +317,7 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 // stream only the body knows it, and where both exist they are one number.
 func (m responseMeta) stamp(u *Usage, body *bodyCost) {
 	u.Server = m.timing
+	u.ServedModel, u.RequestID = m.served, m.requestID
 	u.Cost = m.cost
 	if body != nil && body.amount >= 0 {
 		u.Cost = Cost{Amount: body.amount, Currency: m.bodyCurrency, Reported: true}
@@ -326,7 +331,8 @@ func (m responseMeta) stamp(u *Usage, body *bodyCost) {
 
 // reported is whether the headers said anything worth a Usage of their own.
 func (m responseMeta) reported() bool {
-	return m.cost.Reported || m.limits.Reported || m.budget.Reported || m.timing.Reported
+	return m.cost.Reported || m.limits.Reported || m.budget.Reported || m.timing.Reported ||
+		m.served != "" || m.requestID != ""
 }
 
 // usageCost pulls usage.cost out of a raw event or response. A second, narrow

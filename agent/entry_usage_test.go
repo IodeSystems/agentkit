@@ -87,3 +87,13 @@ func TestEntryUsageCarriesTheServersTimings(t *testing.T) {
 		t.Errorf("timings were claimed for an endpoint that sent none: %s", b)
 	}
 }
+
+// The proxy's attribution must survive into the persisted entry: a host
+// reading back an A/B run needs which model answered each round, even a
+// round that reported no tokens.
+func TestEntryUsageCarriesTheProxysAttribution(t *testing.T) {
+	eu := (&Session{}).entryUsage(&llm.Usage{ServedModel: "swift-nvfp4", RequestID: "tkt-42"}, "")
+	if eu == nil || eu.ServedModel != "swift-nvfp4" || eu.RequestID != "tkt-42" {
+		t.Errorf("entry usage = %+v", eu)
+	}
+}
