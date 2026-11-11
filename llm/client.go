@@ -378,9 +378,13 @@ type Usage struct {
 	// working and the proxy waiting. This is what separates them.
 	Server ServerTiming `json:"server_timing,omitzero"`
 
-	// ServedModel and RequestID are what the proxy said about who answered
-	// this round-trip and under which id it logged it (HeaderServed,
-	// HeaderRequestID). Empty against an endpoint that sends neither.
+	// ServedModel is the model that answered: the proxy's HeaderServed when
+	// present, else the reply body's top-level "model". The body value can be
+	// an echo of the requested name (vLLM and llama.cpp report what they were
+	// started with), so it is never wrong but does not prove a failover.
+	// RequestID is the first of X-Corrallm-Request-Id, X-Request-Id (OpenAI),
+	// Request-Id (Anthropic), X-Litellm-Call-Id. Each is empty when the
+	// endpoint sends nothing.
 	ServedModel string `json:"served_model,omitempty"`
 	RequestID   string `json:"request_id,omitempty"`
 
@@ -1748,6 +1752,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Model string `json:"model"`
 		Usage *Usage `json:"usage"`
 	}
 	raw, err := io.ReadAll(resp.Body)
@@ -1770,7 +1775,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 				u = *result.Usage
 			}
 			u.LatencyMS = time.Since(callStart).Milliseconds()
-			meta.stamp(&u, usageCost(raw))
+			meta.stamp(&u, usageCost(raw), result.Model)
 			c.OnUsage(u)
 		}
 	}
@@ -1805,6 +1810,9 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	// usage chunk, since a provider may send more than one and a host totalling
 	// cost would count it twice. Deferred after close(ch), so it runs first.
 	var lastUsage *Usage
+	// streamModel is the first non-empty "model" any chunk carried; stamped on
+	// the Usage because the usage chunk itself may omit it.
+	var streamModel string
 	defer func() {
 		if c.OnUsage == nil {
 			return
@@ -1813,7 +1821,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			c.OnUsage(*lastUsage)
 		} else if meta.reported() {
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
-			meta.stamp(&u, nil)
+			meta.stamp(&u, nil, streamModel)
 			c.OnUsage(u)
 		}
 	}()
@@ -1828,7 +1836,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 	stampUsage := func(u *Usage, timings *Timings, data string) {
 		u.LatencyMS = time.Since(callStart).Milliseconds()
 		u.Timings = timings
-		meta.stamp(u, usageCost([]byte(data)))
+		meta.stamp(u, usageCost([]byte(data)), streamModel)
 		lastUsage = u
 		obs.usage = true
 	}
@@ -1949,6 +1957,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 		// Streaming-delta shape. Note `Index` on each tool_call entry —
 		// OpenAI uses it to thread fragments of the same call together.
 		var event struct {
+			Model   string `json:"model"`
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
@@ -1991,6 +2000,9 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 			obs.failed = true
 			ch <- StreamChunk{Error: event.Error.Message, PartialToolCalls: partialTools(toolBuf, toolOrder)}
 			return
+		}
+		if streamModel == "" {
+			streamModel = event.Model
 		}
 		// Usage-only chunk (no choices) — providers using
 		// stream_options.include_usage send one of these after content.

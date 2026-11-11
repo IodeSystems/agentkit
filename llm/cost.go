@@ -284,7 +284,8 @@ func keyBudgetFromHeader(h http.Header) KeyBudget {
 // arrive and stamped on every Usage the body produces.
 type responseMeta struct {
 	timing ServerTiming
-	// served and requestID are the proxy's attribution headers.
+	// served and requestID are attribution read from headers. served is only
+	// the corrallm header here; the body's "model" is folded in by stamp.
 	served, requestID string
 	cost              Cost
 	limits            RateLimits
@@ -294,11 +295,32 @@ type responseMeta struct {
 	bodyCurrency string
 }
 
+// requestIDHeaders are the headers that name one request, in precedence order.
+// The proxy's own id comes first: when a corrallm sits in front of a vendor, its
+// id is the key to the log the caller can actually reach, while the vendor's id
+// (also forwarded) is only useful to the vendor's support.
+var requestIDHeaders = []string{
+	HeaderRequestID,     // corrallm
+	"X-Request-Id",      // OpenAI and most OpenAI-compatible servers
+	"Request-Id",        // Anthropic
+	"X-Litellm-Call-Id", // LiteLLM
+}
+
+// requestIDFrom is the first non-empty of requestIDHeaders.
+func requestIDFrom(h http.Header) string {
+	for _, k := range requestIDHeaders {
+		if v := strings.TrimSpace(h.Get(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (c *Client) metaFrom(h http.Header) responseMeta {
 	m := responseMeta{
 		timing:    serverTimingFrom(h),
 		served:    strings.TrimSpace(h.Get(HeaderServed)),
-		requestID: strings.TrimSpace(h.Get(HeaderRequestID)),
+		requestID: requestIDFrom(h),
 		cost:      costFromHeader(h),
 		limits:    rateLimitsFrom(h, time.Now()),
 		budget:    keyBudgetFromHeader(h),
@@ -315,9 +337,20 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 // stamp copies the response's header facts onto a Usage, and the body's
 // usage.cost when it had one. A cost in the body wins over the header: on a
 // stream only the body knows it, and where both exist they are one number.
-func (m responseMeta) stamp(u *Usage, body *bodyCost) {
+//
+// bodyModel is the reply's own top-level "model" (first one seen on a stream).
+// ServedModel precedence: the proxy's header, else bodyModel. A proxy's header
+// names the backend that answered after failover; the body's model may be the
+// upstream's own name for it, or the name the caller asked for. On vLLM and
+// llama.cpp the body echoes whatever the server was started with, so a body
+// model is never wrong but is not proof of failover: it says what the server
+// calls itself, not that anything was substituted.
+func (m responseMeta) stamp(u *Usage, body *bodyCost, bodyModel string) {
 	u.Server = m.timing
 	u.ServedModel, u.RequestID = m.served, m.requestID
+	if u.ServedModel == "" {
+		u.ServedModel = strings.TrimSpace(bodyModel)
+	}
 	u.Cost = m.cost
 	if body != nil && body.amount >= 0 {
 		u.Cost = Cost{Amount: body.amount, Currency: m.bodyCurrency, Reported: true}
