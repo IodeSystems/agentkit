@@ -139,3 +139,9 @@ form would be a watcher the proxy feeds the relayed SSE chunks to, ending in
 - **Evidence 2026-11-09 (corrallm-2c):** after the v0.2.1 deploy, 5,995 remote
   requests (aw4, anthropic-claude-sonnet-5-5, chat completions, 5,975 × 200, no
   reasoning_effort) recorded no fact; /v1/models has no `capabilities` yet.
+
+### Live PDF to Claude through corrallm
+corrallm (v0.24.0 upgrade, `1fc9519`) passes a PDF part to Claude natively and converts it for other backends. Covered by integration tests only; no live check that Claude receives a `document` block.
+- **Resume condition:** a caller with Anthropic budget or a claude sub-* login sends a PDF through corrallm.
+- **Waits on:** systems (budget or a login).
+- **Evidence 2026-11-06:** the anthropic daily budget was spent and the sub path needed a login; corrallm-12 checked Swift text conversion and chandra vision live, not Claude.
