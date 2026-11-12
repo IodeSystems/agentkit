@@ -1087,6 +1087,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-12: agentkit v0.29.0: taskgraph split into four tools, `ERROR: plan: ` refusals (ee3007a).
 - 2026-11-11: agentkit v0.28.0: Usage.ServedModel/RequestID and agent.EntryUsage per round (3a2a367, c11ed28).
 - 2026-11-11: agentkit v0.27.1: refusal facts learned only from a 400 or 422 (994d7b5).
 - 2026-11-09: agentkit v0.27.0: LoadDeclared reads corrallm's `capabilities` (c8ccbbf); taskgraph node shape (ad9e4b3) and unknown-field refusal (95fcc26).

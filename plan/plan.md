@@ -10,7 +10,7 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 
 ## Current state (2026-11-11)
 
-- Release: agentkit v0.28.0 (Usage.ServedModel/RequestID from corrallm, OpenAI, Anthropic, LiteLLM headers and the reply's model; not yet checked live, dun-bf asked 2026-11-11), shim v0.6.0. v0.17.0 is retracted (carried the Anthropic SDK). Release history: `done.md` "Releases".
+- Release: agentkit v0.29.0 (taskgraph split into plan_add/update/close/show, `ERROR: plan: ` refusals; breaks `taskgraph.Tool` callers). Before it, v0.28.0 (Usage.ServedModel/RequestID from corrallm, OpenAI, Anthropic, LiteLLM headers and the reply's model; not yet checked live, dun-bf asked 2026-11-11), shim v0.6.0. v0.17.0 is retracted (carried the Anthropic SDK). Release history: `done.md` "Releases".
 - Consumers, by their peers' reports: dun v0.4.1 on agentkit v0.27.0 / shim v0.6.0 (2026-11-09); corrallm v0.2.2 on v0.26.0 / shim v0.6.0, deployed on box1 (2026-11-10); autowork3 v0.6.0; aw4 uses `replace => ../agentkit`.
 - Guardrail: `go build ./... && go vet ./... && go test ./...`.
 
