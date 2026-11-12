@@ -41,10 +41,11 @@ Shipped in v0.25.0 (`68c81e8` typed overflow, `4a8dd0c` staged fold + one shrink
 ### ◐ `taskgraph` — a plan the model keeps, shared by sub-agents (2026-11-03)
 Ported from dun's `internal/taskgraph`. `Store` is interface-only (host provides it); `Diff`/`Apply` compute per-write `[]Change` with `Tell` = owners to notify (node owner before/after; dependents' owners on a status move; never the actor); `WithOnChange` hands kept changes to the host.
 - Decided 2026-11-09 (Carl): node shape is title, details, done_when, needs; `files` removed; `show` lists title, status, done_when, `show <id>` gives details; unknown fields are refused with a hint (v0.27.0). dun v0.4.1 uses it and migrates its own stored plans.
+- Decided 2026-11-12 (Carl): four tools with flat schemas and real `required` lists, not one tool with an `action` enum and not oneOf (uneven provider support): `plan_add` (title, done_when), `plan_update` (id), `plan_close` (id, outcome done|block|drop + account/reason), `plan_show` (optional id; folds in `ready`). API like `files/`: `New`, `Defs`, `Dispatch`, `Wrap`, `Has`. Every refusal starts with `ERROR: plan: ` and names the call to retry. Cause: a model (dun, 2026-11-12) sent add without done_when, got a bare refusal, reasoned, and ended the turn; raw traffic was not recorded, so the backend (llama.cpp via corrallm, or OpenRouter/LiteLLM) is not known.
 - **next:** confirm `Tell` against a real delegation (needs dun to delegate).
-- **risks:** the delegator is NOT told (host adds it; the graph has no delegator record). `List()` ends with `ReadyLine("")`, the main agent's ready set, even for a sub-agent's `show`.
+- **risks:** the delegator is NOT told (host adds it; the graph has no delegator record).
 - **blocking decisions:** none open.
-- **optional extensions:** a per-owner view for a sub-agent's `show`; a `delegate` action.
+- **optional extensions:** a per-owner subtree view for a sub-agent's `plan_show`; a `delegate` action.
 
 ### ◐ `loopdetector` — loops with no period (2026-10-31)
 Owner: centralize loop detection here, input is session + stream chunk (no cache), output is a loop count, the cut is a configurable tolerance. Package and `llm` seam done (`Client.Watch`, `StreamWatcher`, `ToolCallWatcher`); the default guard watches reasoning too; a proxy's `content_filter` + `loop` reads as StopReasonRepetition. Measured on 1,315 sessions of corrallm traffic: fires on 4, including a real 40-sentence reply cycle the exact guard missed.

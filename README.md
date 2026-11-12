@@ -39,7 +39,7 @@ Requires Go 1.26+.
 | `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | stdlib only |
 | `agent`  | the tablestakes: `Session.Turn` loop, `Shaper`, injection, lifting, validation, notification lifecycle | `llm` only |
 | `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move; read alone also lists a directory and, with grep, searches a file or a tree) rooted at one directory, with capped reads (paged by line, or by byte offset `at` for text with no usable lines), exact-once edits and .gitignore-aware search (`rg` when on PATH) | `llm` only |
-| `taskgraph` | a plan the model keeps: a DAG of tasks with `done_when`, the `plan` tool, and per-write changes naming which owners (sub-agents sharing the plan) to notify. Storage, permission and delivery are the host's | `llm` only |
+| `taskgraph` | a plan the model keeps: a DAG of tasks with `done_when`, the `plan_add`/`plan_update`/`plan_close`/`plan_show` tools, and per-write changes naming which owners (sub-agents sharing the plan) to notify. Storage, permission and delivery are the host's | `llm` only |
 
 **agentkit has no third-party dependencies.** `go.mod` declares a module
 path, a Go version and one `require`: `openai-claude-api-shim`, a first-party

@@ -27,7 +27,7 @@ files/    mountable file toolset (read/edit/write/grep/list, opt-in delete/move)
           shells out to rg/git when on PATH, works without either.
 loopdetector/  opt-in loop detection from session + stream: a count and a tolerance.
           imports llm + stdlib only. Hosts install it; agent does not import it.
-taskgraph/  opt-in model-kept plan: DAG of nodes, the `plan` tool, and Diff/Apply
+taskgraph/  opt-in model-kept plan: DAG of nodes, the four `plan_*` tools (`taskgraph.New`: Defs/Wrap/Dispatch), and Diff/Apply
           (what a write changed, which owners to tell). Shared by a main agent and
           its sub-agents through ONE host-provided Store (no impl shipped). Owner is
           opaque; permission, approval, delegation and delivery are host hooks.

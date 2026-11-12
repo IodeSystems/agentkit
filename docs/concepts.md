@@ -179,7 +179,7 @@ every host to adopt its orchestration model.
 
 A plan the *model* keeps is on the other side of the line: it decides none of
 who, when or why. The optional `taskgraph` package holds one — nodes with
-`done_when`, the edges they wait on, the `plan` tool — shared by a main agent
+`done_when`, the edges they wait on, the `plan_add`, `plan_update`, `plan_close`, `plan_show` tools — shared by a main agent
 and its sub-agents through one `taskgraph.Store` you provide. Each write returns
 `[]Change` naming the owners it touches (a node's owner; the owners of its
 dependents when its status moved); you deliver them, typically as
