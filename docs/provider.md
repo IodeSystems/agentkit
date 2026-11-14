@@ -35,6 +35,15 @@ demo.
 `ChatOpts.TraceID` is unrelated to priority: it sets an `X-Trace-Id` header for
 log correlation only (the demo/session use it to tie requests back to a thread).
 
+`ChatOpts.PromptCacheKey` is the conversation identity for KV-slot affinity: it
+is sent as the OpenAI `prompt_cache_key` field (OpenAI, Mistral, Together,
+Moonshot and xAI accept it; OpenRouter reads it; never sent on the Messages
+API). `agent.Session` fills it when empty with a 32-hex key derived from
+`SessionID` and the newest compaction marker, so it is stable across the turns
+of a conversation and new after a fold; a host-set value wins. An endpoint that
+answers 400/422 to the field is learned (`sampling.prompt_cache_key`) and the
+field is dropped on later requests. `Client.User` is the end-user id, not this key.
+
 ## 429 backpressure — a first-class path
 
 Because the backend is capacity-limited, 429 is routine, not exceptional. When

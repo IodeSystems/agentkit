@@ -607,6 +607,10 @@ type Client struct {
 	// gives each conversation its own Client sets it to the conversation's id,
 	// so a proxy can route that conversation's calls to the slot that already
 	// holds its prompt prefix. Empty means the field is omitted.
+	//
+	// "user" identifies the end user (abuse tracking) and is NOT the slot-routing
+	// key: for that, set ChatOpts.PromptCacheKey, which changes after a
+	// compaction where a user id does not.
 	User string
 
 	// Header holds extra HTTP headers sent on every request this client makes
@@ -1437,6 +1441,19 @@ func sleepOrCancel(ctx context.Context, sleep time.Duration) bool {
 type ChatOpts struct {
 	ToolChoice string
 	TraceID    string
+	// PromptCacheKey is sent as the OpenAI "prompt_cache_key" field: an opaque
+	// id (at most 256 characters) naming the conversation whose prompt prefix
+	// this request extends. OpenAI, Mistral, Together, Moonshot and xAI accept
+	// it, OpenRouter reads it, and a slot-affinity proxy (corrallm) uses it to
+	// send a conversation back to the KV slot that already holds its prefix.
+	//
+	// It must stay the same across the turns of one conversation and change
+	// after a compaction or fork, because the prefix it names is gone then.
+	// agent.Session derives one when this is empty. Never sent on the Messages
+	// API (Anthropic caches by cache_control, not by key). An endpoint that
+	// refuses the field with a 400/422 is learned (sampling.prompt_cache_key)
+	// and the field is dropped on later requests. Empty omits it.
+	PromptCacheKey string
 	// RequestID identifies this ATTEMPT to a fair-share proxy, and is what lets
 	// a retry keep the place in line the previous attempt earned.
 	//
@@ -1601,6 +1618,9 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 	}
 	if c.User != "" {
 		body["user"] = c.User
+	}
+	if opts != nil && opts.PromptCacheKey != "" && !c.usesMessagesAPI() {
+		body["prompt_cache_key"] = opts.PromptCacheKey
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools

@@ -211,6 +211,14 @@ type Session struct {
 
 	// Tracer optionally captures spans. Nil = no tracing.
 	Tracer Tracer
+
+	// The newest compaction marker's ID, for the prompt-cache key. Read from
+	// the store once per Session, then kept current by the compaction sink, so
+	// the key costs no store read per round. A fold the host runs outside this
+	// Session's Turn is not seen: the key goes stale until the host builds a new
+	// Session, which costs a cache miss, never a wrong answer.
+	cacheMarker      string
+	cacheMarkerKnown bool
 }
 
 func (s *Session) spanName(n string) string {
@@ -314,6 +322,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	}
 	ctx = withCompactionSink(ctx, func(ci CompactionInfo) {
 		result.Compactions = append(result.Compactions, ci)
+		s.cacheMarker, s.cacheMarkerKnown = ci.MarkerID, true
 		if s.OnCompactionComplete != nil {
 			s.OnCompactionComplete(ci)
 		}
@@ -940,6 +949,14 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		opts = *s.ChatOpts
 	}
 	opts.TraceID = s.ThreadID
+	// Conversation identity for prefix-cache affinity. A host-set key wins.
+	// Derived here, after the round's build (the caller), so a fold that
+	// happened inside build is already in the store. The Shaper's summarizer
+	// call does not pass through here and carries none: it shares no prefix
+	// with the conversation.
+	if opts.PromptCacheKey == "" {
+		opts.PromptCacheKey = promptCacheKey(s.SessionID, s.compactionMarker(ctx))
+	}
 
 	// HEREDOC transport: tool calls travel as ordinary content, parsed after the
 	// stream, instead of through the provider's tool_calls field.

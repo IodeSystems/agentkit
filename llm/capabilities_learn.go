@@ -36,7 +36,7 @@ import (
 // Translation is one request field the capability record changed on the way
 // out. Reported through Client.OnTranslate just before the request is sent.
 type Translation struct {
-	Key    string // the request field that changed: reasoning_effort, max_tokens
+	Key    string // the request field that changed: reasoning_effort, max_tokens, prompt_cache_key
 	Sent   string // what went on the wire; "" when the field was dropped
 	Wanted string // what the caller asked for; "" when it asked for nothing
 }
@@ -88,6 +88,14 @@ func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
 		} else if send := translateEffort(want, caps); send != want {
 			body["reasoning_effort"] = send
 			out = append(out, Translation{Key: "reasoning_effort", Sent: send, Wanted: want})
+		}
+	}
+	if want, ok := body["prompt_cache_key"].(string); ok {
+		if v, _ := caps.fact(CapSamplingPrefix + "prompt_cache_key"); v == "refused" {
+			// Same as a refused reasoning_effort: the endpoint rejects the field
+			// itself, so a repeat is a certain 400.
+			delete(body, "prompt_cache_key")
+			out = append(out, Translation{Key: "prompt_cache_key", Wanted: want})
 		}
 	}
 	if lim, ok := caps.OutputLimit(); ok {

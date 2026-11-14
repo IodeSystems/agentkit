@@ -69,7 +69,7 @@ Keys. The first slice implements the ones marked ★.
 | ★ `stream.reasoning_field` | `reasoning_content`, `reasoning`, `think_tags` | observed (which delta field carried it) |
 | ★ `tools.choice_forced` | bool | observed (`tool_choice` required/named, and the reply had no call → false), probe |
 | `tools.parallel`, `tools.arg_fidelity` | bool, `exact`/`lossy` | observed, probe (`ProbeToolSurface` echo) |
-| `sampling.<param>` | `accepted`/`refused` (logit_bias, banned strings, DRY, …) | refusal |
+| `sampling.<param>` | `accepted`/`refused` (logit_bias, banned strings, DRY, `prompt_cache_key`, …) | refusal |
 | `decode.grammar`, `decode.grammar_with_tools`, `decode.json_schema`, `decode.guided`, `decode.strict_tools` | bool | refusal, probe |
 | `modality.<image\|audio\|video\|file>` | bool | declared (`modalities`), refusal, `ErrUnsupportedContent` |
 

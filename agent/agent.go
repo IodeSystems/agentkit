@@ -158,6 +158,7 @@ var ErrSessionClosed = errors.New("agent: session closed by terminal tool")
 // persist the summary as a hidden field on the turn and show meta about what
 // was folded. Token counts are the active estimator's numbers.
 type CompactionInfo struct {
+	MarkerID      string // the KindCompaction Entry's ID; names the new prefix (prompt-cache key)
 	Summary       string // the tight summary that replaced the folded prefix
 	SubsumedCount int    // how many entries were folded into the summary
 	TokensBefore  int    // estimated active-window tokens before this compaction

@@ -539,3 +539,92 @@ func TestResendOnRefusal(t *testing.T) {
 		}
 	})
 }
+
+// OpenAI's wording for a field the endpoint does not take, as Azure-style and
+// strict-schema servers send it for prompt_cache_key.
+const cacheKeyRefusal = `{"error":{"message":"Unrecognized request argument supplied: prompt_cache_key","type":"invalid_request_error","param":null,"code":null}}`
+
+func TestPromptCacheKeyIsWrittenForOpenAIShape(t *testing.T) {
+	c := openaiClient("http://x/v1")
+	body, _ := c.chatBody(context.Background(), nil, nil, &ChatOpts{PromptCacheKey: "k1"}, false)
+	if body["prompt_cache_key"] != "k1" {
+		t.Fatalf("body %v", body)
+	}
+}
+
+func TestPromptCacheKeyAbsentWhenEmpty(t *testing.T) {
+	c := openaiClient("http://x/v1")
+	for _, o := range []*ChatOpts{nil, {}} {
+		body, _ := c.chatBody(context.Background(), nil, nil, o, false)
+		if _, ok := body["prompt_cache_key"]; ok {
+			t.Fatalf("body %v", body)
+		}
+	}
+}
+
+// Anthropic caches by cache_control, not by key; the shim would not know the
+// field.
+func TestPromptCacheKeyNeverSentOnMessagesAPI(t *testing.T) {
+	c := NewClient("https://api.anthropic.com", "k", "claude-x")
+	body, _ := c.chatBody(context.Background(), nil, nil, &ChatOpts{PromptCacheKey: "k1"}, false)
+	if _, ok := body["prompt_cache_key"]; ok {
+		t.Fatalf("body %v", body)
+	}
+}
+
+// An endpoint that 400s on the field would otherwise fail every request: the
+// refusal is learned once and the field dropped after.
+func TestRefusedPromptCacheKeyIsLearnedAndDropped(t *testing.T) {
+	srv := newCapServer(t, func(_ int, b map[string]any) (int, string) {
+		if _, ok := b["prompt_cache_key"]; ok {
+			return 400, cacheKeyRefusal
+		}
+		return 200, okReply
+	})
+	c := openaiClient(srv.URL)
+	learned := 0
+	c.OnLearn = func(Learned) { learned++ }
+	opts := &ChatOpts{PromptCacheKey: "k1"}
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err == nil {
+		t.Fatal("want the 400 returned without ResendOnRefusal")
+	}
+	if v, _ := c.Capabilities().fact("sampling.prompt_cache_key"); v != "refused" || learned != 1 {
+		t.Fatalf("fact %q, OnLearn %d", v, learned)
+	}
+	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err != nil {
+		t.Fatal(err)
+	}
+	if sent := srv.sent(); len(sent) != 2 || sent[1]["prompt_cache_key"] != nil {
+		t.Fatalf("requests %d, second %v", len(sent), sent[len(sent)-1])
+	}
+}
+
+func TestRefusedPromptCacheKeyIsResentOnceWithResendOnRefusal(t *testing.T) {
+	srv := newCapServer(t, func(_ int, b map[string]any) (int, string) {
+		if _, ok := b["prompt_cache_key"]; ok {
+			return 400, cacheKeyRefusal
+		}
+		return 200, okReply
+	})
+	c := openaiClient(srv.URL)
+	c.ResendOnRefusal = true
+	if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{PromptCacheKey: "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	if sent := srv.sent(); len(sent) != 2 || sent[1]["prompt_cache_key"] != nil {
+		t.Fatalf("requests %d", len(sent))
+	}
+}
+
+// 402/403 are about the account; their text can quote anything.
+func TestPromptCacheKeyRefusalOnAccountStatusTeachesNothing(t *testing.T) {
+	for _, st := range []int{402, 403} {
+		if us := refusalFacts(st, cacheKeyRefusal, map[string]any{"prompt_cache_key": "k1"}); len(us) != 0 {
+			t.Errorf("%d taught %v", st, factsOf(us))
+		}
+	}
+	if got := factsOf(refusalFacts(400, cacheKeyRefusal, map[string]any{"prompt_cache_key": "k1"})); got["sampling.prompt_cache_key"] != "refused" {
+		t.Errorf("400 taught %v", got)
+	}
+}

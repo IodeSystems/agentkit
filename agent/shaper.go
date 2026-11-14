@@ -524,6 +524,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	}
 
 	return CompactionInfo{
+		MarkerID:      marker.ID,
 		Summary:       summary,
 		SubsumedCount: len(fresh),
 		TokensBefore:  tokensBefore,
