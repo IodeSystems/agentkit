@@ -1103,6 +1103,7 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			bp, _ := backpressureFrom(resp.Header, bodyBytes)
+			bp = spentWait(bp, resp.Header, bodyBytes)
 			spent := &BudgetSpentError{Status: status, BP: bp, Body: string(bodyBytes)}
 			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
 				Body:    strings.TrimSpace(firstLineOfBody(string(bodyBytes))),

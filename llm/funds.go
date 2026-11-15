@@ -13,9 +13,11 @@ package llm
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -99,6 +101,43 @@ func fundsBackpressure(bp Backpressure, body []byte) Backpressure {
 		if d := time.Until(at); d > 0 {
 			bp.AskedWait = d
 		}
+	}
+	return bp
+}
+
+// spentWait fills BP.AskedWait on a 402 whose body gave no retry_after. A spend
+// window is days, and the hint arrives in three shapes besides retry_after:
+// corrallm's error.retry_at (RFC 3339), the provider's own "regain access on
+// <date>" line inside the message, and the Retry-After header, which the retry
+// loop reads but clamps to retryAfterCeiling. Left at zero, a host that marks
+// the model spent for AskedWait fell back to the CLAMPED 300 s and spent one
+// call on the dead model every five minutes (aw4, 2026-11-15). First present
+// and in the future wins, in that order; the header is read unclamped.
+func spentWait(bp Backpressure, h http.Header, body []byte) Backpressure {
+	if bp.AskedWait > 0 {
+		return bp
+	}
+	var parsed struct {
+		Error struct {
+			RetryAt string `json:"retry_at"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error.RetryAt != "" {
+		if at, err := time.Parse(time.RFC3339, parsed.Error.RetryAt); err == nil {
+			if d := time.Until(at); d > 0 {
+				bp.AskedWait = d
+				return bp
+			}
+		}
+	}
+	if at := regainAt(bp.Message + "\n" + string(body)); !at.IsZero() {
+		if d := time.Until(at); d > 0 {
+			bp.AskedWait = d
+			return bp
+		}
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After"))); err == nil && secs > 0 {
+		bp.AskedWait = time.Duration(secs) * time.Second
 	}
 	return bp
 }

@@ -174,3 +174,64 @@ func TestFundsRefusalMessagesAPI400(t *testing.T) {
 		t.Errorf("hits = %d; want 1", n)
 	}
 }
+
+// corrallm's 402 for Anthropic's workspace limit carries the regain time as
+// error.retry_at and Retry-After, never retry_after. AskedWait stayed zero, so
+// aw4 held Sonnet spent for the retry loop's clamped 300 s instead of until the
+// reset, and spent a call on it every five minutes.
+func TestSpent402TakesAskedWaitFromRetryAtNotTheClampedHeader(t *testing.T) {
+	at := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "259200")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"You have reached your specified workspace API usage limits. You will regain access on `+
+			at.Format("2006-01-02")+` at 00:00 UTC.","type":"upstream_funds_exhausted","provider":"anthropic","upstream_status":400,"retry_at":"`+
+			at.Format(time.RFC3339)+`"}}`)
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, "", "m").postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
+	var spent *BudgetSpentError
+	if !errors.As(err, &spent) {
+		t.Fatalf("err = %v; want *BudgetSpentError", err)
+	}
+	if d := spent.BP.AskedWait - time.Until(at); d < -2*time.Second || d > 2*time.Second {
+		t.Errorf("AskedWait = %s; want ~%s (retry_at)", spent.BP.AskedWait, time.Until(at))
+	}
+}
+
+// The same 402 with only the provider's message (an older corrallm, or another
+// proxy): the regain date inside the message is the wait.
+func TestSpent402TakesAskedWaitFromRegainDateInMessage(t *testing.T) {
+	day := time.Now().Add(96 * time.Hour).UTC()
+	at := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"You have reached your specified workspace API usage limits. You will regain access on `+
+			at.Format("2006-01-02")+` at 00:00 UTC.","type":"upstream_funds_exhausted"}}`)
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, "", "m").postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
+	var spent *BudgetSpentError
+	if !errors.As(err, &spent) {
+		t.Fatalf("err = %v; want *BudgetSpentError", err)
+	}
+	if d := spent.BP.AskedWait - time.Until(at); d < -2*time.Second || d > 2*time.Second {
+		t.Errorf("AskedWait = %s; want ~%s (regain date)", spent.BP.AskedWait, time.Until(at))
+	}
+}
+
+// Only a Retry-After header: read it unclamped. The retry loop's 300 s ceiling
+// is about sleeping, not about how long the budget is gone.
+func TestSpent402TakesAskedWaitFromUnclampedRetryAfterHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "86400")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"spent","type":"upstream_funds_exhausted"}}`)
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, "", "m").postChatWithRetry(context.Background(), []byte(`{}`), callIdent{})
+	var spent *BudgetSpentError
+	if !errors.As(err, &spent) || spent.BP.AskedWait != 24*time.Hour {
+		t.Fatalf("err = %v; want BudgetSpentError with AskedWait 24h", err)
+	}
+}
