@@ -20,7 +20,7 @@ JSON backpressure body like corrallm's:
 429 retries until a slot frees, bounded by `Client.RetryBudget` (default 5m) and
 your `ctx` deadline, whichever is shorter — on a contended endpoint another wait
 is another shot at a slot, but the budget stops it hanging forever. 5xx retries
-a bounded number of times then fails. A retry delay is always clamped to a
+a bounded number of times then fails. A billing refusal (corrallm's 402, or a provider's own 400/403/429 saying the credit balance, quota or workspace limit is spent) is never retried: it returns `*llm.BudgetSpentError`, typed `upstream_funds_exhausted`, so a host can fall back. A retry delay is always clamped to a
 safety ceiling.
 
 ```go

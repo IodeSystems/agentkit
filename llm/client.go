@@ -1075,6 +1075,21 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		}
 
 		status := resp.StatusCode
+		// A provider's billing refusal sent as 400/403/429 (see funds.go) is
+		// BudgetSpentError exactly like a 402: checked before the 429 retry and
+		// before any caller learns from, or classifies, the body.
+		if head, funds := peekFundsBody(resp); funds {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			bp, _ := backpressureFrom(resp.Header, head)
+			bp = fundsBackpressure(bp, head)
+			spent := &BudgetSpentError{Status: status, BP: bp, Body: string(head)}
+			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt + 1, Status: status,
+				Body:    strings.TrimSpace(firstLineOfBody(string(head))),
+				Elapsed: time.Since(start), Budget: budget, BP: &bp,
+				Reason: "not retried: " + spent.Error()})
+			return nil, spent
+		}
 		switch {
 		case status == http.StatusPaymentRequired:
 			// 402: a budget that refills at a RESET TIME (calendar day or month,
@@ -2268,8 +2283,11 @@ func (e *TruncatedToolCallError) Error() string {
 }
 
 // BudgetSpentError reports an HTTP 402: a spend budget that refills at a reset
-// time is gone. corrallm types it as budget_exhausted, allocation_exhausted or
-// allocation_spent (BP.Type); BP.AskedWait is the time to the reset (absent for
+// time is gone. It also reports a provider's own billing refusal sent as 400,
+// 403 or 429 (Anthropic's low credit balance and workspace limit, OpenAI's
+// insufficient_quota), recognised by marker text and typed
+// upstream_funds_exhausted; Status stays the real one. corrallm types it as
+// budget_exhausted, allocation_exhausted or allocation_spent (BP.Type); BP.AskedWait is the time to the reset (absent for
 // allocation_spent, a meaningless 1s for a total), and BP.Budgets names each
 // spent budget.
 //
