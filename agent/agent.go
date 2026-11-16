@@ -352,6 +352,11 @@ const (
 	// TurnRepetition — the model's generation kept collapsing into repetition
 	// past MaxRepetitionRetries, so the loop stopped re-prompting it.
 	TurnRepetition TurnEndReason = "repetition"
+	// TurnReasoningCut — a round produced reasoning and no answer and no tool
+	// call, and the one repair round did not recover it (or was already spent
+	// earlier in the Turn). Err is *ReasoningCutError. With
+	// Session.NoReasoningCutRepair such a round ends the Turn as TurnReply.
+	TurnReasoningCut TurnEndReason = "reasoning_cut"
 	// TurnToolLoop — the model made the same call(s) and got the same result(s)
 	// for 2*MaxRepeatedExchanges rounds, so the loop stopped paying for more.
 	TurnToolLoop TurnEndReason = "tool_loop"

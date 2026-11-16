@@ -41,13 +41,15 @@ Carl: "io listen events that have stt stream input audio that feeds a model", "C
 - **blocking decisions (Carl):** (a) where "io" lives (aw4 events, `/para io`, new), which names the first host; (b) the marker for a cut reply: a new `Entry` field (e.g. `Interrupted bool`, the model sees nothing) vs. a following `KindNotification` "user interrupted after: …" the model sees; (c) splitter location: new package `speech/` vs. `llm`; (d) `Heard` in bytes of text (proposed) vs. runes vs. a string prefix.
 - **optional extensions:** speculative turn; a reasoning-delta hook beside `OnAssistantToken`; stdlib WebSocket client in agentkit (icebox unless two hosts need it).
 
-### ◻ Reasoning-cut repair (2026-11-16)
-Proposed by corrallm-a3 as Carl's; Carl's own OK not yet given here. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 retries length-cut empties itself (aw4 007de172a).
+### ◐ Reasoning-cut repair (2026-11-16)
+Proposed by corrallm-a3; Carl approved 2026-11-16 (on by default, `NoReasoningCutRepair` off switch). Shipped on main, unreleased: `agent/reasoningcut.go`. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 retries length-cut empties itself (aw4 007de172a).
 - **found (2026-11-16, code trace):** an empty reply (no text, no tool call) persists nothing and drops its reasoning (`agent/session.go:508`, `:517`); ends `TurnReply`. finish `length` → `*Overflow` → `OnOverflow`, whose Retry is a plain resend. No prefill anywhere; the shim turns a trailing assistant message into a user "Continue." (shim.go:733). `Usage.CompletionTokensDetails.ReasoningTokens` already parsed.
 - **proposed:** detect no text + no tool call + reasoning present, any finish reason (this also covers the open stall re-prompt question). Repair once per turn: hidden notification with the reasoning tail (~2000 chars) + reasoning off for that round via the capability record. Same shape as the repetition re-prompt. `OnReasoningCut(ReasoningCut{Tokens, Finish, Repaired})`; a second empty ends `TurnReasoningCut` (failed).
 - **deferred:** prefill continuation (needs `llm.Message` reasoning, per-dialect prefill, a shim change); only after a live check that llama-server continues a prefilled assistant turn with reasoning under Swift's template.
 - **risks:** the tail repeats reasoning as visible context; where the record cannot turn reasoning off the repair round thinks again into the same wall.
-- **blocking decisions (Carl):** go; default on (proposed, with an off switch) vs opt-in.
+- **next:** live check on Swift via corrallm (llama.cpp: budget 0 + enable_thinking false on the repair round) once released; aw4 drops its own retry (007de172a).
+- **decided (implementation):** a second empty round later in the same Turn, after a successful repair, also ends `TurnReasoningCut`, never a silent `TurnReply`.
+- **blocking decisions:** none.
 - **corrallm side (live 2026-11-16, v0.3.0-106-g389f3ee):** `completion_tokens_details.reasoning_tokens` on /v1/chat/completions (stream + non-stream; /v1/messages unchanged). Answer-room guard only lowers corrallm's own injected budget (`reasoning-budget-clamped from=N to=M`); a client budget leaving < 2048 for the answer gets `reasoning-budget-short answer_room=N` (life-raglit: 800). No "budget forcing triggered" signal exists anywhere (OpenRouter, vLLM, LiteLLM; llama-server logs it at trace only), so detection is empty text + no tool call + reasoning present.
 
 ### ◻ Cancel during tool dispatch leaves orphan tool calls (2026-11-14)

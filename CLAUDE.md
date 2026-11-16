@@ -130,6 +130,13 @@ plan/     living plan. plan.md = current state + active work + decisions;
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
   tools; document both.
+- **A reasoning-only round is repaired once per Turn.** No text + no tool call +
+  reasoning (any finish) is checked BEFORE the overflow path (a length cut inside
+  a tool call is not empty and stays there). `reasoningcut.go`: a
+  `ReasoningCutTag` notification with the reasoning tail, one round with a COPY
+  of the opts set off (`reasoningOff`; `s.ChatOpts` is never mutated), no empty
+  assistant entry persisted. A second empty round ends `TurnReasoningCut` +
+  `*ReasoningCutError`. `NoReasoningCutRepair` turns it off.
 - **Loop guards are ON by default, at two levels.** `llm.RepetitionGuard`
   watches each stream (content AND tool-call arguments — the measured 30-minute
   loop was inside `arguments`) for a periodic suffix and CLOSES THE BODY; the

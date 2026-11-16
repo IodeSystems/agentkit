@@ -39,6 +39,20 @@ type Session struct {
 	// by protocol-bound roles to force tool_choice=required.
 	ChatOpts *llm.ChatOpts
 
+	// OnReasoningCut, if set, is told about a round that ended with reasoning
+	// and no text and no tool call (see reasoningcut.go). Called once when the
+	// cut is detected (Repaired false, a repair round is about to run) and once
+	// more with Repaired true when that round produced text or a tool call. If
+	// the repair fails there is no second call: the Turn ends with
+	// TurnReasoningCut and *ReasoningCutError.
+	OnReasoningCut func(ReasoningCut)
+	// NoReasoningCutRepair turns the repair off: an empty round ends the Turn
+	// as TurnReply, as before the repair existed.
+	NoReasoningCutRepair bool
+	// reasoningOffRound makes the next chat round send reasoning off, on a copy
+	// of ChatOpts. Set by Turn per round; never persisted.
+	reasoningOffRound bool
+
 	// OnAssistantToken, if set, receives streamed content chunks for
 	// SSE / live broadcast.
 	OnAssistantToken func(string)
@@ -337,6 +351,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		maxOverTrips = 2
 	}
 	overTrips := 0
+	// repairPending: the round about to run is the reasoning-cut repair.
+	// repairedOnce: the one repair of this Turn was spent.
+	var repairPending, repairedOnce bool
 	maxRepTrips := s.MaxRepetitionRetries
 	if maxRepTrips == 0 {
 		maxRepTrips = 2
@@ -434,7 +451,8 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				result.Usage.Active, refused)
 		}
 
-		resp, reasoning, toolCalls, usage, rep, cut, e := s.streamChat(ctx, messages)
+		s.reasoningOffRound = repairPending
+		resp, reasoning, toolCalls, usage, rep, cut, finish, e := s.streamChat(ctx, messages)
 		if e != nil {
 			var tooLarge *llm.InputTooLargeError
 			if errors.As(e, &tooLarge) {
@@ -570,6 +588,42 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// so a model that loops, recovers, and loops again much later is not
 		// killed for the sum.
 		repTrips = 0
+
+		// Reasoning-cut repair. BEFORE the overflow handling below: a length cut
+		// with empty content and reasoning is a reasoning cut, not a cut reply,
+		// and OnOverflow's prose retry would resend the same round. A length cut
+		// inside a tool call is not empty (cut.InToolCall) and stays there.
+		if !s.NoReasoningCutRepair {
+			empty := strings.TrimSpace(resp) == "" && len(toolCalls) == 0 && (cut == nil || !cut.InToolCall())
+			wasRepair := repairPending
+			repairPending = false
+			switch {
+			case wasRepair && !empty:
+				if s.OnReasoningCut != nil {
+					s.OnReasoningCut(ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish, Repaired: true})
+				}
+			case empty && (wasRepair || strings.TrimSpace(reasoning) != ""):
+				rc := ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish}
+				if !wasRepair && s.OnReasoningCut != nil {
+					s.OnReasoningCut(rc)
+				}
+				if wasRepair || repairedOnce {
+					endReason = TurnReasoningCut
+					return result, &ReasoningCutError{Tokens: rc.Tokens, Finish: rc.Finish}
+				}
+				repairedOnce, repairPending = true, true
+				if e := s.Store.Append(ctx, s.SessionID, Entry{
+					ID:        NewID(),
+					Kind:      KindNotification,
+					Tag:       ReasoningCutTag,
+					Content:   reasoningCutNotice(reasoning),
+					CreatedAt: now(),
+				}); e != nil {
+					return result, fmt.Errorf("agent: persist reasoning-cut notice: %w", e)
+				}
+				continue
+			}
+		}
 
 		// Host hook: transform the tool calls before they are persisted or
 		// dispatched. After the repetition cut, which discards the round: a hook
@@ -919,7 +973,7 @@ func (s *Session) estimateTokens(msgs []llm.Message) int {
 // streamChat consumes the streaming response, accumulates content, collects
 // tool calls, captures token usage (when reported), and emits per-token
 // notifications.
-func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, reasoning string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, cut *Overflow, err error) {
+func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, reasoning string, toolCalls []llm.ToolCall, usage *llm.Usage, rep *llm.RepetitionInfo, cut *Overflow, finish llm.StopReason, err error) {
 	sp, ctx := startSpan(s.Tracer, ctx, s.spanName("streamChat"))
 	sp.Set("thread_id", s.ThreadID).Set("session_id", s.SessionID).Set("n_messages", len(messages))
 	defer func() {
@@ -947,6 +1001,11 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 	opts := llm.ChatOpts{}
 	if s.ChatOpts != nil {
 		opts = *s.ChatOpts
+	}
+	if s.reasoningOffRound {
+		// The reasoning-cut repair round: a copy, so s.ChatOpts (shared across
+		// Turns) is never touched and the next round has the host's opts back.
+		opts = *reasoningOff(&opts)
 	}
 	opts.TraceID = s.ThreadID
 	// Conversation identity for prefix-cache affinity. A host-set key wins.
@@ -980,16 +1039,19 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 	}
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
-		return "", "", nil, nil, nil, nil, err
+		return "", "", nil, nil, nil, nil, "", err
 	}
 	var content, think strings.Builder
 	defer func() { reasoning = think.String() }()
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), "", toolCalls, usage, nil, nil, fmt.Errorf("%s", chunk.Error)
+			return content.String(), "", toolCalls, usage, nil, nil, finish, fmt.Errorf("%s", chunk.Error)
 		}
 		think.WriteString(chunk.Reasoning)
+		if chunk.StopReason != "" {
+			finish = chunk.StopReason
+		}
 		if chunk.StopReason == llm.StopReasonRepetition {
 			rep = chunk.Repetition
 		}
@@ -1029,10 +1091,10 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		// incomplete BY CONSTRUCTION — a heredoc block here would fail to parse
 		// and abort the Turn with a message about truncation, blaming the wrong
 		// cause. Hand back the prose and the finding; the caller answers it.
-		return content.String(), "", nil, usage, rep, cut, nil
+		return content.String(), "", nil, usage, rep, cut, finish, nil
 	}
 	if !heredoc {
-		return content.String(), "", toolCalls, usage, nil, cut, nil
+		return content.String(), "", toolCalls, usage, nil, cut, finish, nil
 	}
 	// The stop sequence consumes the terminator, so put it back before parsing.
 	// Deliberately explicit: the parser must keep REFUSING an unterminated block,
@@ -1052,13 +1114,13 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		// enough for InToolCall, which is all the distinction is used for.
 		if cut != nil {
 			cut.TruncatedToolCalls = []string{"unterminated heredoc block"}
-			return prose, "", nil, usage, nil, cut, nil
+			return prose, "", nil, usage, nil, cut, finish, nil
 		}
 		// A malformed or cut-off call is reported, not silently dropped. The
 		// caller answers it with a tool result so the model can retry.
-		return prose, "", nil, usage, nil, nil, perr
+		return prose, "", nil, usage, nil, nil, finish, perr
 	}
-	return prose, "", calls, usage, nil, cut, nil
+	return prose, "", calls, usage, nil, cut, finish, nil
 }
 
 // entryUsage projects a provider usage report, and the reasoning text the round
@@ -1205,4 +1267,13 @@ func rejectedArgsPlaceholder(raw, why string) string {
 		return `{"_error":"arguments were unusable; this call was NOT executed"}`
 	}
 	return string(b)
+}
+
+// reasoningTokens is the round's reasoning-token count, 0 when none is known.
+// Nil-safe: entryUsage returns nil when it has nothing to say.
+func (eu *EntryUsage) reasoningTokens() int {
+	if eu == nil {
+		return 0
+	}
+	return eu.Reasoning
 }

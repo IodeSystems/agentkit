@@ -107,6 +107,17 @@ rules, indentation, recurring boilerplate — never trips it. A cycle shorter th
 `MinPeriod` (24 bytes) is deliberately *not* reported at all; `ChatOpts.MaxTokens`
 is the backstop for those.
 
+**A reasoning-only round.** A reply with reasoning and no text and no tool call
+(a thinking budget ate the room, or the model stopped after a failed call) used
+to persist nothing and end the Turn as `TurnReply`. Now the loop appends a
+notification tagged `agent.ReasoningCutTag` holding the last ~2000 bytes of the
+reasoning, and runs one repair round with reasoning off (`ReasoningEffort`
+"none", `EnableThinking` false, a reasoning budget of 0; the capability record rewrites the
+effort per model). One repair per Turn. If that round is empty too, the Turn
+ends `TurnReasoningCut` with `*agent.ReasoningCutError`. `Session.OnReasoningCut`
+reports the cut (`Repaired` false) and the recovery (`Repaired` true);
+`Session.NoReasoningCutRepair` restores the old behaviour.
+
 **A turn-level loop:** the same call returning the same result, round after
 round. Every round is well-formed, so only the repetition across rounds shows
 it. `MaxRepeatedExchanges` (default 5) warns the model at 5 identical
