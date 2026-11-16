@@ -41,6 +41,15 @@ Carl: "io listen events that have stt stream input audio that feeds a model", "C
 - **blocking decisions (Carl):** (a) where "io" lives (aw4 events, `/para io`, new), which names the first host; (b) the marker for a cut reply: a new `Entry` field (e.g. `Interrupted bool`, the model sees nothing) vs. a following `KindNotification` "user interrupted after: …" the model sees; (c) splitter location: new package `speech/` vs. `llm`; (d) `Heard` in bytes of text (proposed) vs. runes vs. a string prefix.
 - **optional extensions:** speculative turn; a reasoning-delta hook beside `OnAssistantToken`; stdlib WebSocket client in agentkit (icebox unless two hosts need it).
 
+### ◻ Reasoning-cut repair (2026-11-16)
+Proposed by corrallm-a3 as Carl's; Carl's own OK not yet given here. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 retries length-cut empties itself (aw4 007de172a).
+- **found (2026-11-16, code trace):** an empty reply (no text, no tool call) persists nothing and drops its reasoning (`agent/session.go:508`, `:517`); ends `TurnReply`. finish `length` → `*Overflow` → `OnOverflow`, whose Retry is a plain resend. No prefill anywhere; the shim turns a trailing assistant message into a user "Continue." (shim.go:733). `Usage.CompletionTokensDetails.ReasoningTokens` already parsed.
+- **proposed:** detect no text + no tool call + reasoning present, any finish reason (this also covers the open stall re-prompt question). Repair once per turn: hidden notification with the reasoning tail (~2000 chars) + reasoning off for that round via the capability record. Same shape as the repetition re-prompt. `OnReasoningCut(ReasoningCut{Tokens, Finish, Repaired})`; a second empty ends `TurnReasoningCut` (failed).
+- **deferred:** prefill continuation (needs `llm.Message` reasoning, per-dialect prefill, a shim change); only after a live check that llama-server continues a prefilled assistant turn with reasoning under Swift's template.
+- **risks:** the tail repeats reasoning as visible context; where the record cannot turn reasoning off the repair round thinks again into the same wall.
+- **blocking decisions (Carl):** go; default on (proposed, with an off switch) vs opt-in.
+- **corrallm side (2026-11-16):** adds `completion_tokens_details.reasoning_tokens`; answer-room guard only lowers corrallm's own injected budget (logged `reasoning-budget-clamped`), never a client's max_tokens or budget.
+
 ### ◻ Cancel during tool dispatch leaves orphan tool calls (2026-11-14)
 Found in the voice trace. A round's `KindToolCall` entries are persisted first (`agent/session.go:674-686`); the dispatch loop (:690-745) never checks `ctx.Err()` and writes no result for calls that never ran; a ctx-honouring `Store.Append` then fails at :741 with the canceled ctx. History ends with tool calls without results, which strict endpoints refuse on the next request.
 - **proposed:** stop dispatch at the first `ctx.Err()`; append `ERROR: canceled before this call ran` for each remaining call under `context.WithoutCancel(ctx)`. Own commit, independent of voice.
