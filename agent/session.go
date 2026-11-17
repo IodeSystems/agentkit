@@ -53,6 +53,14 @@ type Session struct {
 	// of ChatOpts. Set by Turn per round; never persisted.
 	reasoningOffRound bool
 
+	// UnrunResult, if set, writes the tool result for a call the Turn never
+	// ran because ctx was canceled first. It gets the Turn's CANCELED ctx, so
+	// a host can read why the turn stopped from its values (dun tells a user
+	// interrupt from a budget cut, and the model must not read a budget cut as
+	// the user). Nil, or "", keeps "ERROR: canceled before this call ran". It
+	// only words the result: the call is not dispatched either way.
+	UnrunResult func(ctx context.Context, tc llm.ToolCall) string
+
 	// OnAssistantToken, if set, receives streamed content chunks for
 	// SSE / live broadcast.
 	OnAssistantToken func(string)
@@ -779,11 +787,17 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				canceled = true
 			}
 			if canceled {
-				results = append(results, errCanceledBeforeRun)
+				unrun := errCanceledBeforeRun
+				if s.UnrunResult != nil {
+					if txt := s.UnrunResult(ctx, tc); txt != "" {
+						unrun = txt
+					}
+				}
+				results = append(results, unrun)
 				if e := s.Store.Append(context.WithoutCancel(ctx), s.SessionID, Entry{
 					ID:         NewID(),
 					Kind:       KindToolResult,
-					Content:    errCanceledBeforeRun,
+					Content:    unrun,
 					ToolCallID: tc.ID,
 					ToolName:   tc.Function.Name,
 					CreatedAt:  now(),

@@ -169,3 +169,45 @@ func (r *cancelAfterRunner) ChatStream(ctx context.Context, m []llm.Message, td 
 	r.cancel()
 	return ch, err
 }
+
+type reasonKey struct{}
+
+// A host must be able to say WHO stopped the turn in an unrun call's result:
+// dun words a user interrupt and a budget cut differently, and reads which one
+// from the canceled ctx. Before UnrunResult, v0.32.1 wrote one fixed text and
+// dun's own wording was lost. "" falls back to the fixed text.
+func TestTurn_UnrunResultWordsCallsTheTurnNeverRan(t *testing.T) {
+	store := &memStore{}
+	store.queue(Entry{ID: "u1", Kind: KindUser, Content: "go", CreatedAt: 1})
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), reasonKey{}, "budget cut"))
+	defer cancel()
+	var seen []string
+	s := &Session{
+		SessionID: "s1", System: "sys", Store: store, Runner: threeCalls(),
+		Now: func() int64 { return 100 },
+		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
+			cancel()
+			return "real c1", nil
+		},
+		UnrunResult: func(ctx context.Context, tc llm.ToolCall) string {
+			seen = append(seen, tc.ID)
+			if ctx.Err() == nil {
+				t.Errorf("UnrunResult got a live ctx; want the Turn's canceled one")
+			}
+			if tc.ID == "c3" {
+				return ""
+			}
+			return "ERROR: not run (" + ctx.Value(reasonKey{}).(string) + ")"
+		},
+	}
+	if _, err := s.Turn(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	r := assertPaired(t, store.entries)
+	if r["c1"] != "real c1" || r["c2"] != "ERROR: not run (budget cut)" || r["c3"] != errCanceledBeforeRun {
+		t.Fatalf("results = %v", r)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("UnrunResult called for %v; want c2 and c3 only", seen)
+	}
+}

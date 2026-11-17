@@ -130,7 +130,8 @@ plan/     living plan. plan.md = current state + active work + decisions;
   loop stops and answers the current and remaining calls with `ERROR: canceled
   before this call ran`; the call and result appends use `context.WithoutCancel` (the host
   canceled the turn, not the history). Strict endpoints refuse a tool call
-  with no result. Never use WithoutCancel for dispatch.
+  with no result. Never use WithoutCancel for dispatch. `Session.UnrunResult`
+  (gets the canceled ctx) lets a host word that result, e.g. who stopped the turn.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
