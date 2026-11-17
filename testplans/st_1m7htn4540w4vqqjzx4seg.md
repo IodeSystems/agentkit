@@ -27,3 +27,13 @@ echo "== count of named tests (lines that are a test name, not a package header)
 grep -E '^Test[A-Z][A-Za-z0-9_]*$' $OUT/list.raw | sort > $OUT/named.tests
 wc -l < $OUT/named.tests
 ```
+
+Diagnosis: run the declared check (`go vet ./...`) to see why the hand-off gate refused.
+
+```sh produces=vet.out inputs=go.mod
+set -e
+cd /home/nthalk/local/src/iodesystems/agentkit.wt0
+echo "== declared check: go vet ./... =="
+go vet ./... 2>&1 | tee $OUT/vet.out
+echo "vet exit: ${PIPESTATUS[0]}"
+```
