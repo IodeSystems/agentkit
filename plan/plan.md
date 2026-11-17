@@ -52,12 +52,6 @@ Proposed by corrallm-a3; Carl approved 2026-11-16 (on by default, `NoReasoningCu
 - **blocking decisions:** none.
 - **corrallm side (live 2026-11-16, v0.3.0-106-g389f3ee):** `completion_tokens_details.reasoning_tokens` on /v1/chat/completions (stream + non-stream; /v1/messages unchanged). Answer-room guard only lowers corrallm's own injected budget (`reasoning-budget-clamped from=N to=M`); a client budget leaving < 2048 for the answer gets `reasoning-budget-short answer_room=N` (life-raglit: 800). No "budget forcing triggered" signal exists anywhere (OpenRouter, vLLM, LiteLLM; llama-server logs it at trace only), so detection is empty text + no tool call + reasoning present.
 
-### ◻ Cancel during tool dispatch leaves orphan tool calls (2026-11-14)
-Found in the voice trace. A round's `KindToolCall` entries are persisted first (`agent/session.go:674-686`); the dispatch loop (:690-745) never checks `ctx.Err()` and writes no result for calls that never ran; a ctx-honouring `Store.Append` then fails at :741 with the canceled ctx. History ends with tool calls without results, which strict endpoints refuse on the next request.
-- **proposed:** stop dispatch at the first `ctx.Err()`; append `ERROR: canceled before this call ran` for each remaining call under `context.WithoutCancel(ctx)`. Own commit, independent of voice.
-- **risks:** a tool that already ran side effects but returned after cancel still gets its real result (correct); `WithoutCancel` writes after the host canceled, which a host may not expect.
-- **blocking decisions:** Carl's OK (behaviour change on a shared path).
-
 ### ◐ Context overflow: bounded fold + one shrink-retry (2026-11-06)
 Shipped in v0.25.0 (`68c81e8` typed overflow, `4a8dd0c` staged fold + one shrink-retry + `ShapeHint`). The aw4 16:59 case is pinned as `TestFold_AW4ScaleBacklogGetsThrough`. dun stacks its own `rescue.go` as a second rung (kept, 2026-11-08).
 - **next:** live confirmation. Waits on Carl approving an aw4 daemon rebuild; aw4-3b then counts 400 "exceeds the available context size" (3–13/day since 10-29) and TurnOverflow.

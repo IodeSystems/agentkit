@@ -261,6 +261,10 @@ func (s *Session) Inject(ctx context.Context, e Entry) error {
 	return s.Store.Append(ctx, s.SessionID, e)
 }
 
+// errCanceledBeforeRun is the tool result written for a call the Turn never
+// dispatched because ctx was done.
+const errCanceledBeforeRun = "ERROR: canceled before this call ran"
+
 // Turn runs the unified loop and returns a TurnResult: the model's final reply,
 // any compactions the Shaper performed to stay in budget, and the running token
 // tally (cumulative Total + current Active window).
@@ -734,7 +738,10 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if refusal != "" {
 				args = rejectedArgsPlaceholder(tc.Function.Arguments, refusal)
 			}
-			if e := s.Store.Append(ctx, s.SessionID, Entry{
+			// WithoutCancel: the round already happened, and its calls are
+			// answered below even on a cancel. A canceled ctx here would write
+			// some calls and not others, or none, and lose the round.
+			if e := s.Store.Append(context.WithoutCancel(ctx), s.SessionID, Entry{
 				ID:         NewID(),
 				Kind:       KindToolCall,
 				Content:    args,
@@ -751,7 +758,40 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 
 		var sessionClosed bool
 		results := make([]string, 0, len(toolCalls))
+		// Every persisted KindToolCall MUST get a KindToolResult, even when the
+		// host cancels the turn mid-round. An assistant(tool_calls) message
+		// with no matching tool message is refused by strict endpoints (OpenAI,
+		// Anthropic), so one cancel would make every later request on the
+		// session fail. Once ctx is done: stop dispatching, answer this call and
+		// every remaining one with errCanceledBeforeRun, then end the Turn
+		// (TurnCanceled) without another chat round. A call whose Dispatch was
+		// already running and returned keeps its real result.
+		//
+		// Result appends after a cancel use context.WithoutCancel: the host
+		// canceled the turn, not the history, and a ctx-honouring Store would
+		// otherwise reject the very writes that keep the history valid. It is
+		// used for these persistence writes ONLY, never for dispatch.
+		// Synthetic results skip slot capture and EncodeToolResult: there are
+		// no tool bytes to transclude or re-encode. No per-result hook exists.
+		canceled := false
 		for _, tc := range toolCalls {
+			if ctx.Err() != nil {
+				canceled = true
+			}
+			if canceled {
+				results = append(results, errCanceledBeforeRun)
+				if e := s.Store.Append(context.WithoutCancel(ctx), s.SessionID, Entry{
+					ID:         NewID(),
+					Kind:       KindToolResult,
+					Content:    errCanceledBeforeRun,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Function.Name,
+					CreatedAt:  now(),
+				}); e != nil {
+					return result, fmt.Errorf("agent: persist tool result: %w", e)
+				}
+				continue
+			}
 			if s.ForcedTerminalTool != "" && tc.Function.Name == s.ForcedTerminalTool {
 				sawForcedToolCall = true
 			}
@@ -792,7 +832,12 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				toolResult = s.EncodeToolResult(toolResult)
 			}
 			results = append(results, toolResult)
-			if e := s.Store.Append(ctx, s.SessionID, Entry{
+			// Cancel may have hit while Dispatch ran; see the block above.
+			appendCtx := ctx
+			if ctx.Err() != nil {
+				appendCtx = context.WithoutCancel(ctx)
+			}
+			if e := s.Store.Append(appendCtx, s.SessionID, Entry{
 				ID:         NewID(),
 				Kind:       KindToolResult,
 				Content:    toolResult,
@@ -807,6 +852,11 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// A terminal tool fired. Don't loop into another chat round.
 			endReason = TurnTerminalTool
 			return result, nil
+		}
+		if err := ctx.Err(); err != nil {
+			// Canceled during or before dispatch; every call is answered.
+			// No further chat round. OnTurnEnd classifies this TurnCanceled.
+			return result, err
 		}
 
 		// Turn-level loop: the model keeps making the same call and getting the

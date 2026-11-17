@@ -1096,3 +1096,6 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - 2026-11-09: agentkit v0.27.0: LoadDeclared reads corrallm's `capabilities` (c8ccbbf); taskgraph node shape (ad9e4b3) and unknown-field refusal (95fcc26).
 - 2026-11-08: agentkit v0.26.0 (5b4c6ee, shim v0.5.0) and shim v0.6.0 (290b9de).
 - Consumers at the time: corrallm v0.2.1 → v0.2.2 (learn() skipped after a funds rewrite, de207fb); dun v0.3.0 (v0.26.0), v0.4.1 (v0.27.0).
+
+### ✅ Cancel during tool dispatch no longer leaves orphan tool calls (2026-11-17, Carl approved)
+Once ctx is done the dispatch loop stops, answers the current and remaining calls with `ERROR: canceled before this call ran`, writes every result under `context.WithoutCancel`, and Turn returns ctx.Err() (TurnCanceled) with no further chat round. Tests: `agent/cancel_dispatch_test.go`. Synthetic results skip slot capture and EncodeToolResult (no per-result hook exists). The KindToolCall persist also runs under `WithoutCancel`, so a round the model already returned is written whole and then answered.
