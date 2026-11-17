@@ -1087,6 +1087,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-17: agentkit v0.32.2: `Session.UnrunResult` words the result of a call a cancel skipped (81801e4; dun asked, its interrupt wording).
 - 2026-11-17: agentkit v0.32.1: a canceled Turn never leaves a tool call without a result (f3cbe0b).
 - 2026-11-17: agentkit v0.32.0: `ShaperPolicy.PinLatestUser` keeps the turn's ask through folds (880eed7; dun-bf asked, dun v0.6.0 waits on it).
 - 2026-11-16: agentkit v0.31.0: a reasoning-only round is repaired once per Turn, `TurnReasoningCut` (8f2352c); a spent 402 takes AskedWait from retry_at, the regain date or Retry-After (b3a7368).
