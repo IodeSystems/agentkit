@@ -30,17 +30,6 @@ Carl (2026-11-08): "capabilities and effort selector are things that should be r
 - **risks:** "default" differs per dialect (send nothing vs. the server's own default); moving it changes dun's wire output unless the mapping is ported exactly.
 - **blocking decisions:** none yet.
 
-### ◻ Voice conversation: barge-in + phrase splitter (2026-11-14)
-Carl: "io listen events that have stt stream input audio that feeds a model", "Conversation." Design only; no code before Carl's OK.
-- **split:** the host owns audio, the STT/TTS sockets (WebSocket client is host-side; no provider needs extensions or subprotocols server-side), endpointing, playback position, echo cancel. agentkit owns the turn: a final transcript is a pending user Entry, end-of-turn starts `Turn` (batching collects all pending), barge-in cancels it.
-- **found (2026-11-14, code trace):** a canceled stream persists nothing: `streamChat` returns partial text + error, the caller returns at `agent/session.go:449` before the `Append` at :504; reasoning and usage are lost too. `OnAssistantToken` (:42, :986) already gives the host each text delta. No Entry field marks a cut.
-- **piece 1, barge-in:** host cancels with `context.WithCancelCause(ctx)` → `cancel(agent.Interrupted{Heard: n})`. `n` = bytes of reply text (as streamed through `OnAssistantToken`) the user heard. Session persists `content[:n]` as the assistant Entry (cut back to a rune boundary), drops reasoning-only and partial tool calls (same rule as truncated arguments), ends `TurnInterrupted`. A plain cancel keeps today's behaviour. How the host gets `n`: ElevenLabs gives per-char `alignment` (`charStartTimesMs`); OpenAI Realtime, Deepgram Aura and Kokoro give none, so the host counts played audio per phrase (whole phrases heard + estimate inside the current one). OpenAI's own `conversation.item.truncate{audio_end_ms}` is the same idea server-side.
-- **piece 2, phrase splitter:** stdlib-only, text in, speakable phrases out: split at sentence end, then clause marks past a min length, hard cap; skip fenced code, strip markdown. Needed for whole-text TTS (Kokoro `/v1/audio/speech`, Aura `Speak`+`Flush`). ElevenLabs buffers itself (`chunk_length_schedule` [120,160,250,290]), so there it only sets flush points. Each phrase carries its byte range in the reply, which is what makes `Heard` countable.
-- **optional, speculative turn:** Deepgram Flux only (`EagerEndOfTurn` / `TurnResumed` / `EndOfTurn`, needs `eager_eot_threshold`; +50–70% LLM calls per Deepgram). Host starts `Turn` on eager, plain-cancels on `TurnResumed`. Problem: `ClaimPending` already marked the eager transcript shown; the host must replace that user Entry with the final one. Not designed.
-- **risks:** `Heard` is an estimate for every provider but ElevenLabs; too high and the model believes it said something unheard. Echo of our own TTS read as user speech triggers false barge-in (host). Split phrases break mid-number or abbreviation ("e.g.", "3.5").
-- **blocking decisions (Carl):** (a) where "io" lives (aw4 events, `/para io`, new), which names the first host; (b) the marker for a cut reply: a new `Entry` field (e.g. `Interrupted bool`, the model sees nothing) vs. a following `KindNotification` "user interrupted after: …" the model sees; (c) splitter location: new package `speech/` vs. `llm`; (d) `Heard` in bytes of text (proposed) vs. runes vs. a string prefix.
-- **optional extensions:** speculative turn; a reasoning-delta hook beside `OnAssistantToken`; stdlib WebSocket client in agentkit (icebox unless two hosts need it).
-
 ### ◐ Reasoning-cut repair (2026-11-16)
 Proposed by corrallm-a3; Carl approved 2026-11-16 (on by default, `NoReasoningCutRepair` off switch). Released in v0.31.0: `agent/reasoningcut.go`. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 retries length-cut empties itself (aw4 007de172a).
 - **found (2026-11-16, code trace):** an empty reply (no text, no tool call) persists nothing and drops its reasoning (`agent/session.go:508`, `:517`); ends `TurnReply`. finish `length` → `*Overflow` → `OnOverflow`, whose Retry is a plain resend. No prefill anywhere; the shim turns a trailing assistant message into a user "Continue." (shim.go:733). `Usage.CompletionTokensDetails.ReasoningTokens` already parsed.
@@ -83,6 +72,7 @@ Owner: centralize loop detection here, input is session + stream chunk (no cache
 Live against api.anthropic.com through dun. Gaps, proposals, next steps and blocking decisions: `plan/claude-api-plan.md`.
 
 ## Decisions / conventions
+- Kept in agentkit (Carl, 2026-11-17), not moved to dun: `anthropicadmin` (corrallm should use it too), `ragnotify` (aw4 may use it), `mcpauth` (useful to anyone writing a harness).
 - Module path `github.com/iodesystems/agentkit` is final.
 - `llm` and `mcpmgr` stay zero-internal-dep (`go list -deps ./llm ./mcpmgr`).
 - Neutral seam: `agent` imports only `agentkit/llm` + stdlib. It must never import a host's `events`/storage model. If a host type is tempting, add a field to `Entry` or a method to `Store`.
