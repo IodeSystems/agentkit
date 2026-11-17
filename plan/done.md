@@ -1087,6 +1087,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-17: agentkit v0.32.0: `ShaperPolicy.PinLatestUser` keeps the turn's ask through folds (880eed7; dun-bf asked, dun v0.6.0 waits on it).
 - 2026-11-16: agentkit v0.31.0: a reasoning-only round is repaired once per Turn, `TurnReasoningCut` (8f2352c); a spent 402 takes AskedWait from retry_at, the regain date or Retry-After (b3a7368).
 - 2026-11-15: agentkit v0.30.0: `prompt_cache_key` per session and compaction marker, refused → learned and dropped (fbab5f2); a provider's billing 400/403/429 is `BudgetSpentError` typed `upstream_funds_exhausted` (f35ec49).
 - 2026-11-12: agentkit v0.29.0: taskgraph split into four tools, `ERROR: plan: ` refusals (ee3007a).
