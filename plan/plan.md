@@ -10,7 +10,7 @@ Packages: `llm`, `mcpmgr` (stdlib only, standalone), `agent` (imports `llm` + st
 
 ## Current state (2026-11-11)
 
-- Release: agentkit v0.32.0 (`ShaperPolicy.PinLatestUser`). Before it, v0.31.0 (reasoning-cut repair, `TurnReasoningCut`; spent-402 AskedWait from retry_at / regain date / Retry-After; neither checked live). Before it, v0.30.0 (`ChatOpts.PromptCacheKey`, derived by Session from SessionID + newest compaction marker, for corrallm's slot affinity; billing refusals sent as 400/403/429 are `BudgetSpentError`; neither checked live). Before it, v0.29.0 (taskgraph split into plan_add/update/close/show, `ERROR: plan: ` refusals; breaks `taskgraph.Tool` callers). Before it, v0.28.0 (Usage.ServedModel/RequestID from corrallm, OpenAI, Anthropic, LiteLLM headers and the reply's model; not yet checked live, dun-bf asked 2026-11-11), shim v0.6.0. v0.17.0 is retracted (carried the Anthropic SDK). Release history: `done.md` "Releases".
+- Release: agentkit v0.32.1 (cancel answers every unrun tool call). Before it, v0.32.0 (`ShaperPolicy.PinLatestUser`), v0.31.0 (reasoning-cut repair, `TurnReasoningCut`; spent-402 AskedWait from retry_at / regain date / Retry-After; neither checked live). Before it, v0.30.0 (`ChatOpts.PromptCacheKey`, derived by Session from SessionID + newest compaction marker, for corrallm's slot affinity; billing refusals sent as 400/403/429 are `BudgetSpentError`; neither checked live). Before it, v0.29.0 (taskgraph split into plan_add/update/close/show, `ERROR: plan: ` refusals; breaks `taskgraph.Tool` callers). Before it, v0.28.0 (Usage.ServedModel/RequestID from corrallm, OpenAI, Anthropic, LiteLLM headers and the reply's model; not yet checked live, dun-bf asked 2026-11-11), shim v0.6.0. v0.17.0 is retracted (carried the Anthropic SDK). Release history: `done.md` "Releases".
 - Consumers, by their peers' reports: dun v0.4.1 on agentkit v0.27.0 / shim v0.6.0 (2026-11-09); corrallm v0.2.2 on v0.26.0 / shim v0.6.0, deployed on box1 (2026-11-10); autowork3 v0.6.0; aw4 uses `replace => ../agentkit`.
 - Guardrail: `go build ./... && go vet ./... && go test ./...`.
 
@@ -72,6 +72,7 @@ Owner: centralize loop detection here, input is session + stream chunk (no cache
 Live against api.anthropic.com through dun. Gaps, proposals, next steps and blocking decisions: `plan/claude-api-plan.md`.
 
 ## Decisions / conventions
+- Contraction groups 2 (unset knobs) and 3 (unexport tuning) not done: Carl, 2026-11-17, "let's not close down those options".
 - Kept in agentkit (Carl, 2026-11-17), not moved to dun: `anthropicadmin` (corrallm should use it too), `ragnotify` (aw4 may use it), `mcpauth` (useful to anyone writing a harness).
 - Module path `github.com/iodesystems/agentkit` is final.
 - `llm` and `mcpmgr` stay zero-internal-dep (`go list -deps ./llm ./mcpmgr`).
