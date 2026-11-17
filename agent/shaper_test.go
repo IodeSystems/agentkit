@@ -219,6 +219,73 @@ func TestCompact_TwiceDoesNotRefoldMarker(t *testing.T) {
 	}
 }
 
+// On a tool-heavy turn the pristine tail fills with call/result pairs and the
+// turn's own ask falls into the older region; a fold summarized it away and the
+// model answered that it was given no task (dun, 2026-11-16). PinLatestUser
+// keeps it verbatim across every fold of the turn, out of the summarizer's
+// input, and the second fold still leaves one marker.
+func TestCompact_PinLatestUserSurvivesToolHeavyFolds(t *testing.T) {
+	const ask = "rename Foo to Bar across the repo"
+	store := &memStore{}
+	store.entries = append(store.entries,
+		Entry{ID: "old", Kind: KindUser, Content: "earlier question", CreatedAt: 1},
+		Entry{ID: "olda", Kind: KindAssistant, Content: "earlier answer", CreatedAt: 2},
+		Entry{ID: "ask", Kind: KindUser, Content: ask, CreatedAt: 3},
+	)
+	at := int64(4)
+	addPairs := func(n int) {
+		for i := 0; i < n; i++ {
+			id := fmt.Sprintf("c%d", at)
+			store.entries = append(store.entries,
+				Entry{ID: id, Kind: KindToolCall, ToolCallID: id, ToolName: "grep", Content: `{"p":"Foo"}`, CreatedAt: at},
+				Entry{ID: id + "r", Kind: KindToolResult, ToolCallID: id, Content: "match", CreatedAt: at + 1},
+			)
+			at += 2
+		}
+	}
+	addPairs(4) // more than PreserveLastToolCalls
+	r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}, {{Content: "SUMMARY2"}}}}
+	sh := &Shaper{Store: store, Runner: r, Policy: ShaperPolicy{
+		BudgetTokens: 1_000_000, PreserveLastMessages: 1, PreserveLastToolCalls: 2, PinLatestUser: true}}
+
+	check := func(fold int) {
+		t.Helper()
+		ctxEntries, err := store.Context(context.Background(), "s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept := false
+		for _, e := range ctxEntries {
+			if e.ID == "ask" && e.Content == ask {
+				kept = true
+			}
+		}
+		if !kept {
+			t.Errorf("fold %d: the latest ask is gone from Store.Context", fold)
+		}
+		for _, m := range r.seen[fold-1] {
+			if strings.Contains(m.Content, ask) {
+				t.Errorf("fold %d: the summarizer was asked to fold the pinned ask", fold)
+			}
+		}
+		if n := markerCount(store); n != 1 {
+			t.Errorf("fold %d: marker count = %d, want 1", fold, n)
+		}
+	}
+	if _, did, err := sh.Compact(context.Background(), "s"); err != nil || !did {
+		t.Fatalf("first compact: did %v err %v", did, err)
+	}
+	check(1)
+	addPairs(3) // the same turn goes on calling tools
+	if _, did, err := sh.Compact(context.Background(), "s"); err != nil || !did {
+		t.Fatalf("second compact: did %v err %v", did, err)
+	}
+	check(2)
+	if strings.Contains(fmt.Sprint(r.seen[0]), "earlier question") == false {
+		t.Error("the older user entry should be folded: only the latest is pinned")
+	}
+}
+
 // ── AlwaysLOD ───────────────────────────────────────────────────────
 
 // AlwaysLOD forces LOD truncation of oversized older entries on every Build even

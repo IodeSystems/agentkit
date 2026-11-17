@@ -102,6 +102,15 @@ type ShaperPolicy struct {
 	// never stubbed, never counted among the entries a fold subsumes, and
 	// stays where it was.
 	PinFirstUser bool
+	// PinLatestUser keeps the session's LATEST user entry verbatim the same
+	// way: never stubbed, never folded, rendered in place. The pristine tail is
+	// counted in tool calls as well as messages, so on a tool-heavy turn the
+	// tail fills with call/result pairs and the turn's own ask falls into the
+	// older region; a fold then summarizes it away and the model answers that
+	// it was given no task (dun, 2026-11-16). With this set the ask survives
+	// every fold of its turn, until a newer user entry takes the pin. Both pins
+	// may be set; they name the same entry while there is one user entry.
+	PinLatestUser bool
 	// AlwaysLOD forces LOD (level-of-detail) truncation of oversized older
 	// entries on EVERY Build, from Phase 0 on — skipping the "pristine, no-LOD"
 	// fast path that otherwise leaves the context untouched while under budget.
@@ -439,13 +448,13 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		return CompactionInfo{}, false, nil
 	}
 
-	pinned := sh.pinnedIndex(entries)
+	pinned := sh.pins(entries)
 	var subsumed []Entry
 	var foldable []Entry // what the summarizer reads: the older entries but the pinned one
 	var fresh []Entry    // the subsumed entries that are not markers
 	for i := 0; i < olderEnd; i++ {
-		if i == pinned {
-			continue // the subject stays verbatim
+		if pinned.has(i) {
+			continue // the subject and the latest ask stay verbatim
 		}
 		foldable = append(foldable, entries[i])
 		subsumed = append(subsumed, entries[i])
@@ -562,18 +571,28 @@ func (sh *Shaper) taskOr(system string) string {
 	return system
 }
 
-// pinnedIndex is the index of the entry PinFirstUser keeps verbatim: the first
-// KindUser entry, or -1 when the policy does not pin or there is none.
-func (sh *Shaper) pinnedIndex(entries []Entry) int {
-	if !sh.Policy.PinFirstUser {
-		return -1
-	}
+// pinSet is the indexes PinFirstUser and PinLatestUser keep verbatim; -1 for
+// a pin that is off or names no entry.
+type pinSet struct{ first, latest int }
+
+func (p pinSet) has(i int) bool { return i >= 0 && (i == p.first || i == p.latest) }
+
+// pins finds the first and the latest KindUser entry, each only when its
+// policy asks for it.
+func (sh *Shaper) pins(entries []Entry) pinSet {
+	p := pinSet{first: -1, latest: -1}
 	for i, e := range entries {
-		if e.Kind == KindUser {
-			return i
+		if e.Kind != KindUser {
+			continue
+		}
+		if sh.Policy.PinFirstUser && p.first < 0 {
+			p.first = i
+		}
+		if sh.Policy.PinLatestUser {
+			p.latest = i
 		}
 	}
-	return -1
+	return p
 }
 
 // classifyPristineCount returns the number of trailing entries that qualify
@@ -643,7 +662,7 @@ func keepCallsWithResults(entries []Entry, count int) int {
 // pristine tail get LOD-truncated content.
 func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod bool) []llm.Message {
 	olderEnd := len(entries) - pristineCount
-	pinned := sh.pinnedIndex(entries)
+	pinned := sh.pins(entries)
 	// What each result was ASKED. The arguments live on the call and the
 	// truncation happens on the result, so a stub cannot see them without this.
 	//
@@ -662,7 +681,7 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 	}
 	return groupMessages(system, entries, func(i int, e Entry) string {
 		content := e.Content
-		if i == pinned {
+		if pinned.has(i) {
 			return content
 		}
 		if e.Kind == KindCompaction {
