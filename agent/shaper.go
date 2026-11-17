@@ -296,6 +296,27 @@ type Shaper struct {
 	// fold's summary as their description (see SessionIndex). A failed Put
 	// does not undo the fold; it is reported in CompactionInfo.IndexErr.
 	Index SessionIndex
+
+	// SessionPrefix, when set, carries the session's own prefix into a
+	// single-stage fold: the session's system prompt and tool definitions,
+	// byte-identical to what the session sends on its normal rounds. The
+	// provider caches that prefix, so a fold that reuses it spends its
+	// uncached input only on the summary instruction.
+	//
+	// Set it to the session's EFFECTIVE system — the same string the turn is
+	// built with, including any slot note the session appends — and the
+	// session's tools. A staged fold (history larger than the window) keeps
+	// the compaction worker's own prompt and does not use the prefix, because
+	// a shrunk stage is not the session and would not match the cache.
+	SessionPrefix SessionPrefix
+}
+
+// SessionPrefix is the session's prefix: its system prompt and tool
+// definitions. A single-stage fold sends it byte-identically so the provider
+// cache prefix stays warm; a staged fold ignores it.
+type SessionPrefix struct {
+	System string
+	Tools  []llm.ToolDef
 }
 
 func (sh *Shaper) spanName(n string) string {
@@ -895,6 +916,33 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		lines[i] = fmt.Sprintf("%d. [%s] %s\n", i+1, label, e.Content)
 	}
 
+	// Single-stage prefix path: the fold fits in one request AND the session
+	// prefix is set. The request is the session's system + the foldable history
+	// rendered as messages + the summary instruction as the final user message,
+	// with the session's tools and tool_choice "none" — so the provider cache
+	// prefix is warm and the uncached input is the summary instruction only.
+	// A staged fold (history larger than the window) keeps the worker prompt.
+	totalEventTokens := 0
+	for _, line := range lines {
+		totalEventTokens += sh.Estimate.Estimate(line)
+	}
+	if sh.SessionPrefix.System != "" && (limit == 0 || totalEventTokens <= limit) {
+		msgs := groupMessages(sh.SessionPrefix.System, entries,
+			func(_ int, e Entry) string { return e.Content },
+			sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
+		msgs = append(msgs, llm.Message{Role: "user", Content: header})
+		out, err := sh.summaryCallWithPrefix(ctx, msgs, budget)
+		if err == nil {
+			return out, nil
+		}
+		var tooLarge *llm.InputTooLargeError
+		if !errors.As(err, &tooLarge) {
+			return "", summarizeErr(ctx, err)
+		}
+		// The endpoint refused the full history. Fall through to the staged
+		// worker-prompt loop, which shrinks the input.
+	}
+
 	var summary string
 	shrunk := false
 	for next := 0; next < len(lines); {
@@ -974,17 +1022,39 @@ func clipToTokens(est TokenEstimator, s string, n int) string {
 		strings.ToValidUTF8(s[len(s)-tail:], "")
 }
 
-// summaryCall sends one fold request and returns the trimmed summary.
+// summaryCall sends one worker-prompt fold request: the compaction worker's
+// system prompt, the numbered events, and no tools — so the request does not
+// carry the session's prefix and cannot match the session's cache.
 func (sh *Shaper) summaryCall(ctx context.Context, system, user string, budget int) (string, error) {
+	return sh.summaryCallWithTools(ctx, []llm.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, nil, budget)
+}
+
+// summaryCallWithPrefix sends a fold request that carries the session's
+// prefix: the messages are the session's system + rendered history + the
+// summary instruction, and the request goes out with the session's tools and
+// tool_choice "none" so the model cannot act on the task it is summarizing.
+// The provider caches that prefix, so the round's uncached input is the
+// summary instruction only.
+func (sh *Shaper) summaryCallWithPrefix(ctx context.Context, msgs []llm.Message, budget int) (string, error) {
+	return sh.summaryCallWithTools(ctx, msgs, sh.SessionPrefix.Tools, budget)
+}
+
+// summaryCallWithTools is the one wire call both fold paths share. tools nil
+// sends no tools and no tool_choice; a non-empty tools list sets
+// tool_choice "none" so the model cannot act on what it is summarizing.
+func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, budget int) (string, error) {
 	var opts llm.ChatOpts
 	if sh.SummaryOpts != nil {
 		opts = *sh.SummaryOpts
 	}
 	opts.MaxTokens = SummaryCap(budget)
-	ch, err := sh.Runner.ChatStream(ctx, []llm.Message{
-		{Role: "system", Content: system},
-		{Role: "user", Content: user},
-	}, nil, &opts)
+	if len(tools) > 0 {
+		opts.ToolChoice = "none"
+	}
+	ch, err := sh.Runner.ChatStream(ctx, msgs, tools, &opts)
 	if err != nil {
 		return "", err
 	}
