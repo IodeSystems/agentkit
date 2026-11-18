@@ -1093,6 +1093,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-18: agentkit v0.33.1: the prefix fold sends the session's PromptCacheKey (4793552; dun waits on it to wire SessionPrefix).
 - 2026-11-18: agentkit v0.33.0: `Shaper.SessionPrefix` lets a single-stage fold reuse the session's cached prefix (50fb94e; opt-in; the fold request does not set PromptCacheKey yet, so dun waits to wire it).
 - 2026-11-17: agentkit v0.32.2: `Session.UnrunResult` words the result of a call a cancel skipped (81801e4; dun asked, its interrupt wording).
 - 2026-11-17: agentkit v0.32.1: a canceled Turn never leaves a tool call without a result (f3cbe0b).
