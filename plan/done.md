@@ -8,6 +8,12 @@
 > kept as written. Slice-level "Not done (icebox)" / "Known limits" notes stay inside
 > their entries below.
 
+### ✅ Prefix fold sends the session's cache key (2026-11-18)
+- `Shaper.SessionPrefix` (50fb94e, v0.33.0) sent the session's system + tools but no `PromptCacheKey`, so on OpenAI-shaped endpoints and corrallm the fold could miss the slot holding the prefix. Now `compactOldest` derives the session's current key (session id + newest marker before the fold) and the prefix path sends it; a `SummaryOpts` key wins; staged folds send none.
+- Tests: `TestPrefixFoldSendsTheSessionsCacheKey`, `TestPrefixFoldKeepsHostSummaryKey`, no-key check in `TestStagedFoldKeepsWorkerPrompt`. Docs: features.md §8, CLAUDE.md mechanics.
+- Known limit, not fixed: pinned entries are left out of the fold request, so the cache matches only up to the first pinned entry. Not checked live.
+- dun waits on this tag to wire SessionPrefix.
+
 ### ✅ `files` — a mountable file toolset (2026-10-22, branch `files-tools`)
 
 USER: dun had no file tools; wanted one "minimal, configurable, but efficient and

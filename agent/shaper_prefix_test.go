@@ -215,7 +215,7 @@ func TestStagedFoldKeepsWorkerPrompt(t *testing.T) {
 		SessionPrefix: SessionPrefix{System: "session system", Tools: prefixTools()},
 		Estimate:      Default(),
 	}
-	summary, err := sh.summarize(context.Background(), st.entries[:10], "t", 100, 5000)
+	summary, err := sh.summarize(context.Background(), st.entries[:10], "t", 100, 5000, "k")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +234,9 @@ func TestStagedFoldKeepsWorkerPrompt(t *testing.T) {
 		}
 		if r.opts[i] != nil && r.opts[i].ToolChoice != "" {
 			t.Errorf("stage %d sets tool_choice %q, want none set", i, r.opts[i].ToolChoice)
+		}
+		if r.opts[i] != nil && r.opts[i].PromptCacheKey != "" {
+			t.Errorf("stage %d sends cache key %q; a stage is not the session prefix", i, r.opts[i].PromptCacheKey)
 		}
 	}
 }
@@ -283,4 +286,47 @@ func (r *refusePrefix) ChatStream(ctx context.Context, msgs []llm.Message, tools
 		return nil, &llm.InputTooLargeError{Status: 400, PromptTokens: 200000, ContextTokens: 128000}
 	}
 	return r.recordingMultiRunner.ChatStream(ctx, msgs, tools, o)
+}
+
+// Scenario: the prefix fold must send the key the session's own rounds send
+// (session id + newest marker before this fold). The key routes the request on
+// OpenAI-shaped endpoints and corrallm; without it the warm prefix can sit on a
+// slot the fold never reaches, and SessionPrefix buys nothing. v0.33.0 sent no
+// key.
+func TestPrefixFoldSendsTheSessionsCacheKey(t *testing.T) {
+	st := smallHistory()
+	// An earlier fold's marker: the session's current key names it.
+	st.entries = append([]Entry{{ID: "m-old", Kind: KindCompaction, Content: "older", CreatedAt: 0}}, st.entries...)
+	r := &recordingMultiRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}}}
+	sh := &Shaper{
+		Store: st, Runner: r,
+		Policy:        ShaperPolicy{BudgetTokens: 1_000_000, PreserveLastMessages: 1},
+		SessionPrefix: SessionPrefix{System: "sys", Tools: prefixTools()},
+	}
+	if _, did, err := sh.Compact(context.Background(), "s1"); err != nil || !did {
+		t.Fatalf("fold: did=%v err=%v", did, err)
+	}
+	want := promptCacheKey("s1", "m-old")
+	if len(r.opts) != 1 || r.opts[0] == nil || r.opts[0].PromptCacheKey != want {
+		t.Fatalf("fold key = %+v, want %q (the session's current key)", r.opts, want)
+	}
+}
+
+// Scenario: a host that sets its own key in SummaryOpts keeps it, as a host
+// key in Session.ChatOpts is kept on the session's rounds.
+func TestPrefixFoldKeepsHostSummaryKey(t *testing.T) {
+	st := smallHistory()
+	r := &recordingMultiRunner{turns: [][]llm.StreamChunk{{{Content: "SUMMARY"}}}}
+	sh := &Shaper{
+		Store: st, Runner: r,
+		Policy:        ShaperPolicy{BudgetTokens: 1_000_000, PreserveLastMessages: 1},
+		SessionPrefix: SessionPrefix{System: "sys", Tools: prefixTools()},
+		SummaryOpts:   &llm.ChatOpts{PromptCacheKey: "host-key"},
+	}
+	if _, did, err := sh.Compact(context.Background(), "s1"); err != nil || !did {
+		t.Fatalf("fold: did=%v err=%v", did, err)
+	}
+	if got := r.opts[0].PromptCacheKey; got != "host-key" {
+		t.Fatalf("fold key = %q, want the host's", got)
+	}
 }

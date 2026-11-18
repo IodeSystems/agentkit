@@ -311,6 +311,18 @@ tokens, and the same turn continues to the reply. Every Turn also reports
 shows a compaction folding `1150→28` tokens, the summary emitted as a hidden
 field, and the `total`/`active` tally.
 
+**A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
+`SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the
+exact tool defs it sends. When the fold fits in one request, it is sent as the
+session's own prefix: that system, the history as messages, the session's tools
+with `tool_choice: "none"`, and the summary instruction last. It also sends the
+session's current `PromptCacheKey` (session id + newest marker before the fold;
+a key in `SummaryOpts` wins), because that key routes the request to the slot
+holding the prefix. A fold too large for one request, or refused with
+`InputTooLargeError`, uses the staged worker-prompt fold: no session tools, no
+key. Limit: pinned entries (`PinFirstUser`, `PinLatestUser`) are not in the fold
+request, so the cached prefix matches only up to the first pinned entry.
+
 ## 9. MCP tools — `mcp`
 
 `mcpmgr.Manager` spawns stdio MCP servers, discovers their tools, and calls

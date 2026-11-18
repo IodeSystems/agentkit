@@ -516,7 +516,18 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		At:           startedAt,
 	})
 
-	summary, err := sh.summarize(ctx, foldable, task, budget, window)
+	// The key the session's rounds send right now: session id + the newest
+	// marker in the history being folded (the new marker does not exist yet).
+	// Same derivation as Session.streamChat, so the prefix fold is routed to
+	// the slot that holds the session's prefix.
+	newest := ""
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Kind == KindCompaction {
+			newest = entries[i].ID
+			break
+		}
+	}
+	summary, err := sh.summarize(ctx, foldable, task, budget, window, promptCacheKey(sessionID, newest))
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -884,7 +895,10 @@ func DefaultSummaryPrompt(task string, budget int) string {
 //
 // If the endpoint still refuses a stage (the estimator undercounted), the cap
 // shrinks by the endpoint's own counts and the stage is sent again, once.
-func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget, window int) (string, error) {
+// cacheKey is the session's current prompt-cache key. Only the prefix path
+// sends it: a staged request is not the session's prefix, and naming the
+// session's slot for it would route it there for nothing.
+func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget, window int, cacheKey string) (string, error) {
 	prompt, system := sh.SummaryPrompt, sh.SummarySystem
 	if prompt == nil {
 		prompt = DefaultSummaryPrompt
@@ -931,7 +945,7 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 			func(_ int, e Entry) string { return e.Content },
 			sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
 		msgs = append(msgs, llm.Message{Role: "user", Content: header})
-		out, err := sh.summaryCallWithPrefix(ctx, msgs, budget)
+		out, err := sh.summaryCallWithPrefix(ctx, msgs, budget, cacheKey)
 		if err == nil {
 			return out, nil
 		}
@@ -1029,7 +1043,7 @@ func (sh *Shaper) summaryCall(ctx context.Context, system, user string, budget i
 	return sh.summaryCallWithTools(ctx, []llm.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, nil, budget)
+	}, nil, budget, "")
 }
 
 // summaryCallWithPrefix sends a fold request that carries the session's
@@ -1037,15 +1051,19 @@ func (sh *Shaper) summaryCall(ctx context.Context, system, user string, budget i
 // summary instruction, and the request goes out with the session's tools and
 // tool_choice "none" so the model cannot act on the task it is summarizing.
 // The provider caches that prefix, so the round's uncached input is the
-// summary instruction only.
-func (sh *Shaper) summaryCallWithPrefix(ctx context.Context, msgs []llm.Message, budget int) (string, error) {
-	return sh.summaryCallWithTools(ctx, msgs, sh.SessionPrefix.Tools, budget)
+// summary instruction only. cacheKey is the session's prompt-cache key: on an
+// OpenAI-shaped endpoint (and corrallm) the key routes the request, so without
+// it the matching prefix can sit on a slot the fold is never sent to.
+func (sh *Shaper) summaryCallWithPrefix(ctx context.Context, msgs []llm.Message, budget int, cacheKey string) (string, error) {
+	return sh.summaryCallWithTools(ctx, msgs, sh.SessionPrefix.Tools, budget, cacheKey)
 }
 
 // summaryCallWithTools is the one wire call both fold paths share. tools nil
 // sends no tools and no tool_choice; a non-empty tools list sets
 // tool_choice "none" so the model cannot act on what it is summarizing.
-func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, budget int) (string, error) {
+// cacheKey fills PromptCacheKey when SummaryOpts does not set one; a host key
+// in SummaryOpts wins, as a host key in Session.ChatOpts does.
+func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, budget int, cacheKey string) (string, error) {
 	var opts llm.ChatOpts
 	if sh.SummaryOpts != nil {
 		opts = *sh.SummaryOpts
@@ -1053,6 +1071,9 @@ func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, 
 	opts.MaxTokens = SummaryCap(budget)
 	if len(tools) > 0 {
 		opts.ToolChoice = "none"
+	}
+	if opts.PromptCacheKey == "" {
+		opts.PromptCacheKey = cacheKey
 	}
 	ch, err := sh.Runner.ChatStream(ctx, msgs, tools, &opts)
 	if err != nil {

@@ -132,6 +132,11 @@ plan/     living plan. plan.md = current state + active work + decisions;
   canceled the turn, not the history). Strict endpoints refuse a tool call
   with no result. Never use WithoutCancel for dispatch. `Session.UnrunResult`
   (gets the canceled ctx) lets a host word that result, e.g. who stopped the turn.
+- **A prefix fold must look like a session round to the cache.**
+  `Shaper.SessionPrefix` sends the session's system + tools byte-identically AND
+  the session's current `PromptCacheKey` (`promptCacheKey(sessionID, newest
+  marker)`, the same derivation as `streamChat`). Drop the key and the fold
+  can be routed off the slot that holds the prefix. Staged folds send neither.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
