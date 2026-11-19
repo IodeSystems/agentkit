@@ -1110,7 +1110,7 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 	done := false
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return content.String(), "", toolCalls, usage, nil, nil, finish, chunk.Err()
+			return content.String(), "", toolCalls, usage, nil, nil, finish, fmt.Errorf("%s", chunk.Error)
 		}
 		think.WriteString(chunk.Reasoning)
 		if chunk.StopReason != "" {

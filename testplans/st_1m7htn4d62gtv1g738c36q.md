@@ -8,16 +8,6 @@ The declared check command is `go vet ./...`. A clean exit is the proof that the
 mkdir -p $OUT
 go vet ./... > $OUT/vet.log 2>&1
 echo "exit=$?" >> $OUT/vet.log
-```
-
-## D1 / D7: `go vet ./...` passes
-
-The declared check command is `go vet ./...`. A clean exit is the proof that the tree lints (D7) and that the code is syntactically and semantically sound (D1, the "it builds" half).
-
-```sh produces=vet.log inputs=go.mod
-mkdir -p $OUT
-go vet ./... > $OUT/vet.log 2>&1
-echo "exit=$?" >> $OUT/vet.log
 cat $OUT/vet.log
 ```
 
@@ -70,14 +60,14 @@ Measured at base main (this session, branch aw4/st_1m7htn4d62gtv1g738c36q).
 
 ## D1 — It builds
 
-Proof: `go vet ./...` exits 0 (block 2, vet.log) AND `go test ./...` passes
-(625 tests: 621 passed, 4 skipped, 0 failed, ~17.6s).
+Proof: `go vet ./...` exits 0 (block 1, vet.log) AND `go test ./...` passes
+(677 tests: 673 passed, 4 skipped, 0 failed, ~21s).
 A fresh clone of go.mod (one require: openai-claude-api-shim, ours, stdlib only)
 builds with no install step.
 
 ## D2 — The test library
 
-Proof: `go test ./... -list '.*'` produces 624 named tests (block 3,
+Proof: `go test ./... -list '.*'` produces 676 named tests (block 2,
 test_count.txt). The declared list command works and the suite is listable.
 
 ## D3 — Every promise names what proves it
@@ -119,47 +109,50 @@ F5 has no implementation on base. The specs are unproven, not unattributed.
 
 | Spec | Proof (test) |
 |------|-------------|
-| sp_1m7j0vx8n3h60vccb20183 (fold carries session system prompt) | `TestPromptCacheKeyIsStableAcrossTurnsWithoutCompaction` (agent/cachekey_test.go:26) — key stability implies the prefix is carried |
-| sp_1m7j0vx8n9vhmw9b79wgfj (fold carries session tools) | `TestPromptCacheKeyIsStableAcrossTurnsWithoutCompaction` (same test) |
-| sp_1m7j0vx8n9fvszmvgzf5s1 (fold request shape: history + summary, tool_choice none) | `TestCompact_FoldsHistory` (agent/shaper_test.go:120) + `TestPromptCacheKeyFollowsFoldInsideTurn` (agent/cachekey_test.go:66) |
-| sp_1m7j0vx8nfbe5xpc4xp9wx (staged fold keeps own prompt) | `TestSummarizerCallCarriesNoPromptCacheKey` (agent/cachekey_test.go:120) — summarizer call carries no key, proving it does not reuse the session prefix |
-| sp_1m7j0vx8nc0pbmb4wx1799 (fold round reads from cache ≥90%) | `TestPromptCacheKeyChangesAfterCompaction` (agent/cachekey_test.go:42) — key changes after compaction, enabling cache read |
+| sp_1m7j0vx8n3h60vccb20183 (fold carries session system prompt) | `TestFoldCarriesSessionPrefix` (agent/shaper_prefix_test.go:102) — asserts the fold request's system prompt is byte-identical to the session's |
+| sp_1m7j0vx8n9vhmw9b79wgfj (fold carries session tools) | `TestFoldToolDefinitionsByteIdentical` (agent/shaper_prefix_test.go:125) — asserts the fold request's tool definitions are byte-identical to the session's |
+| sp_1m7j0vx8n9fvszmvgzf5s1 (fold request shape: history + summary, tool_choice none) | `TestFoldRequestShape` (agent/shaper_prefix_test.go:147) — asserts messages are system + history + summary instruction, tool_choice none |
+| sp_1m7j0vx8nfbe5xpc4xp9wx (staged fold keeps own prompt) | `TestSplitFoldFirstRequestCarriesPrefixRestStage` (agent/shaper_prefix_test.go:207) — first request carries session prefix; later stages use the worker prompt with no tools and no key |
+| sp_1m7j0vx8nc0pbmb4wx1799 (fold round reads from cache ≥90%) | UNPROVEN — `TestPrefixFoldSendsTheSessionsCacheKey` (agent/shaper_prefix_test.go:393) asserts the precondition (the cache key is sent) but does not assert the ≥90% read rate. A true proof would require a mock provider that reports cached tokens in usage. |
 
-All five F6 specs are proven by passing tests in agent/cachekey_test.go and agent/shaper_test.go.
+Four of five F6 specs are proven by passing tests in agent/shaper_prefix_test.go.
+The ≥90% cache-read spec is UNPROVEN: the closest test asserts the precondition
+(cache key sent) but not the promised read rate.
 
 ### Summary for D3
 
 - F1 (3 specs): PROVEN by named tests in llm/servertiming_wire_test.go
 - F4 (3 specs): UNPROVEN — no implementation on base
 - F5 (4 specs): UNPROVEN — no implementation on base
-- F6 (5 specs): PROVEN by named tests in agent/cachekey_test.go, agent/shaper_test.go
+- F6 (4 of 5 specs): PROVEN by named tests in agent/shaper_prefix_test.go
+- F6 sp_1m7j0vx8nc0pbmb4wx1799 (≥90% cache read): UNPROVEN — precondition proven, threshold not
 - Zero feature.attested rows exist for any spec; attestation is a reviewer act.
 
 ## D4 — Work isolates
 
 Proof: scm declares git, base main, worktrees:true. The branch
-`aw4/st_1m7htn4d62gtv1g738c36q` is on a dedicated worktree (block 5,
+`aw4/st_1m7htn4d62gtv1g738c36q` is on a dedicated worktree (block 4,
 branch.txt). Work on the branch does not touch base until it lands.
 
 ## D5 — The change is visible
 
 Proof: the branch-vs-base diff is the mechanism. `git log main..HEAD` shows
-commits on the branch (block 5, branch_commits.txt). `git diff main` shows
+commits on the branch (block 4, branch_commits.txt). `git diff main` shows
 the change. The base.* tools (base.grep, base.read, base.status) read the
 base tree separately from the checkout.
 
 ## D7 — The tree is generated, formatted, linted and tested before hand-off
 
-Proof: check (`go vet ./...`) exits 0 (block 2) AND test_suite
-(`go test ./...`) passes (625 tests, 0 failed). The `done` hand-off runs the
+Proof: check (`go vet ./...`) exits 0 (block 1) AND test_suite
+(`go test ./...`) passes (677 tests, 0 failed). The `done` hand-off runs the
 project check and refuses if it fails.
 
 ## D9 — A fresh checkout is made ready
 
 Proof: go.mod is final (module path, go version, one require:
 openai-claude-api-shim v0.5.0, ours, stdlib only). `go list -m all` shows
-exactly two lines (block 4, module_list.txt). `go build ./...` exits 0
-(block 4, build.log). No install step, no bootstrap, no setup script: a
+exactly two lines (block 3, module_list.txt). `go build ./...` exits 0
+(block 3, build.log). No install step, no bootstrap, no setup script: a
 fresh clone + `go build ./...` is the ready state.
 EOF
 echo "mapping written"

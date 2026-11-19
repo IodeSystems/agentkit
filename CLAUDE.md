@@ -191,11 +191,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
   is NOT infinite: `Client.RetryBudget` (default `defaultRetryBudget` = 5m)
   caps total wall-clock spent retrying 429/5xx; ctx deadline still wins if
   shorter. The api key is the scheduling IDENTITY (Authorization Bearer →
-  priority), not the trace header. A transient `{"error":{...}}`
-  SSE event inside a 200 stream is retried by `pumpStream` on the same budget and
-  jitter ONLY while nothing was forwarded to the caller (`streamAttempt`'s
-  `forwarded` flag; the failed attempt skips OnUsage/observeStream); it is kept
-  as `*llm.StreamError` (`StreamChunk.StreamErr`, `chunk.Err()`).
+  priority), not the trace header.
 - **Every retry sleep is jittered, additively.** `jittered()` adds a random
   `[0, retryJitterFraction)` of the sleep — never subtracts. corrallm hands
   every caller rejected in the same moment the IDENTICAL `Retry-After`, and an

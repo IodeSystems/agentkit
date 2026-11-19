@@ -299,12 +299,6 @@ type StreamChunk struct {
 	ToolCall  *ToolCall
 	Done      bool
 	Error     string
-	// StreamErr is the parsed form of Error when the provider reported it as an
-	// error event inside the 200 stream (code, type, metadata). Nil for every
-	// other Error (read failure, truncation). Error stays set and starts with
-	// the provider's message, so a consumer that reads only the string is
-	// unchanged.
-	StreamErr *StreamError
 	Usage     *Usage
 
 	// PartialToolCalls carries whatever tool-call arguments had accumulated
@@ -1716,78 +1710,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		return nil, err
 	}
 	ch := make(chan StreamChunk, 64)
-	go c.pumpStream(ctx, resp, ch, messages, tools, opts, callStart, sent)
+	go c.readStream(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent)
 	return ch, nil
-}
-
-// pumpStream owns the caller's channel for one ChatStream call and re-sends the
-// request when the provider reports a transient error inside the 200 stream
-// BEFORE anything reached the caller.
-//
-// Why here and not in postWithRetry: that loop classifies a status code, and
-// this failure has status 200 — it is only knowable by reading the first
-// events. Why not peek in ChatStream before returning: that would hold the call
-// until the first token. The attempt already runs in a goroutine and owns every
-// send, so it can know exactly whether it forwarded anything; that is the
-// condition that makes a retry invisible. After the first forwarded chunk the
-// reply is partly the caller's, a resend would regenerate it from scratch, and
-// the typed error is returned instead.
-//
-// Same policy as the HTTP path: the sleep is the error's own retry_after when it
-// gave one, else the exponential schedule, jittered additively, and the whole
-// request (callStart onward, so HTTP retries count too) is bounded by
-// Client.RetryBudget and ctx. A refused attempt skips its bookkeeping (OnUsage,
-// observeStream) — it produced no reply — so a retried call is counted once,
-// by the attempt that answered or the one that finally gave up.
-func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- StreamChunk, messages []Message, tools []ToolDef, opts *ChatOpts, callStart time.Time, sent sentRequest) {
-	defer close(ch)
-	budget := c.retryBudget()
-	deadline := callStart.Add(budget)
-	backoff := retryInitialBackoff
-	var sleep time.Duration
-	gate := func(se *StreamError) bool {
-		if !se.Retryable() || ctx.Err() != nil {
-			return false
-		}
-		sleep = backoff
-		if se.RetryAfter > 0 {
-			sleep = se.RetryAfter
-		}
-		sleep = jittered(sleep)
-		if time.Now().Add(sleep).After(deadline) {
-			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Err: se, Elapsed: time.Since(callStart), Budget: budget,
-				Reason: fmt.Sprintf("gave up on a stream error after %s (retry budget %s): %v",
-					time.Since(callStart).Round(time.Second), budget, se)})
-			return false
-		}
-		return true
-	}
-	for attempt := 1; ; attempt++ {
-		se := c.streamAttempt(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent, gate)
-		if se == nil {
-			if attempt > 1 {
-				c.emitRetry(RetryEvent{Kind: RetryRecovered, Attempt: attempt, Elapsed: time.Since(callStart), Budget: budget})
-			}
-			return
-		}
-		c.emitRetry(RetryEvent{Kind: RetryStream, Attempt: attempt, Err: se, Body: se.Message,
-			Delay: sleep, Elapsed: time.Since(callStart), Budget: budget, ServerAsked: se.RetryAfter > 0})
-		log.Printf("llm: stream error before any output (attempt %d): %v; resending in %s", attempt, se, sleep)
-		if !sleepOrCancel(ctx, sleep) {
-			ch <- StreamChunk{Error: ctx.Err().Error()}
-			return
-		}
-		backoff *= 2
-		if backoff > retryMaxBackoff {
-			backoff = retryMaxBackoff
-		}
-		var err error
-		resp, _, _, err = c.sendChat(ctx, messages, tools, opts, true)
-		if err != nil {
-			ch <- StreamChunk{Error: err.Error()}
-			return
-		}
-	}
 }
 
 // sendChat builds the chat body, sends it, and returns the 200 response. A
@@ -1947,23 +1871,8 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // sent is what the request asked for that the stream can confirm or deny
 // (capabilities_learn.go); the zero value asks nothing.
 func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest) {
-	defer close(ch)
-	c.streamAttempt(ctx, body, ch, history, callStart, meta, sent, nil)
-}
-
-// streamAttempt reads one response. It does not close ch. When gate is non-nil
-// and a provider error event arrives before ANY chunk was sent to ch and gate
-// says yes, it sends nothing, skips its end-of-stream bookkeeping and returns
-// the error so the caller can resend; every other path returns nil.
-func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest, gate func(*StreamError) bool) (retry *StreamError) {
 	defer body.Close()
-	// forwarded: something reached the caller, so a resend can no longer be
-	// invisible. Every send in this function goes through send.
-	forwarded := false
-	send := func(sc StreamChunk) {
-		forwarded = true
-		rawCh <- sc
-	}
+	defer close(ch)
 
 	// lastUsage is what OnUsage gets, once, when the stream ends — not per
 	// usage chunk, since a provider may send more than one and a host totalling
@@ -1973,7 +1882,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// the Usage because the usage chunk itself may omit it.
 	var streamModel string
 	defer func() {
-		if retry != nil || c.OnUsage == nil {
+		if c.OnUsage == nil {
 			return
 		}
 		if lastUsage != nil {
@@ -1988,11 +1897,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// registered after the others so it runs BEFORE close(ch): a consumer that
 	// sees the channel close also sees the facts.
 	var obs streamObservation
-	defer func() {
-		if retry == nil {
-			c.observeStream(sent, obs)
-		}
-	}()
+	defer func() { c.observeStream(sent, obs) }()
 
 	// stampUsage is the one place a usage chunk gets what the client measured
 	// and what the headers said.
@@ -2038,7 +1943,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 				"The stream was closed client-side; output up to the cut is kept. This is a MODEL "+
 				"fault (degenerate repetition), not a transport error, and is not worth retrying "+
 				"unchanged.", events, contentChars, info)
-		send(StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: info})
+		ch <- StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: info}
 	}
 
 	// flushTools emits the accumulated calls. reason is the provider's
@@ -2079,7 +1984,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 						"NOT be dispatched or persisted verbatim. Cause is upstream, not the caller.",
 					tc.Function.Name, len(tc.Function.Arguments), why)
 			}
-			send(StreamChunk{ToolCall: tc})
+			ch <- StreamChunk{ToolCall: tc}
 			obs.toolCalls++
 		}
 		toolBuf = map[int]*ToolCall{}
@@ -2113,7 +2018,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			sawDone = true
 			obs.done = true
 			_ = flushTools("")
-			send(StreamChunk{Done: true})
+			ch <- StreamChunk{Done: true}
 			return
 		}
 
@@ -2148,23 +2053,20 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			Loop *RepetitionInfo `json:"loop"`
 			// Timings is a SIBLING of usage in llama.cpp's final event, not a
 			// member of it; folded into Usage where Usage is stamped below.
-			Timings *Timings        `json:"timings"`
-			Error   json.RawMessage `json:"error"`
+			Timings *Timings `json:"timings"`
+			Error   struct {
+				Message string `json:"message"`
+			} `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			continue
 		}
-		if se := parseStreamError(event.Error); se != nil {
-			// Nothing sent yet and the gate agrees it is transient: let the
-			// caller resend. See pumpStream.
-			if gate != nil && !forwarded && gate(se) {
-				return se
-			}
+		if event.Error.Message != "" {
 			// Hand back whatever arguments had accumulated. The buffer holds the
 			// partial write at exactly this moment; returning without it drops
 			// work the caller could otherwise resume from.
 			obs.failed = true
-			send(StreamChunk{Error: se.Error(), StreamErr: se, PartialToolCalls: partialTools(toolBuf, toolOrder)})
+			ch <- StreamChunk{Error: event.Error.Message, PartialToolCalls: partialTools(toolBuf, toolOrder)}
 			return
 		}
 		if streamModel == "" {
@@ -2175,7 +2077,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		if len(event.Choices) == 0 {
 			if event.Usage != nil {
 				stampUsage(event.Usage, event.Timings, data)
-				send(StreamChunk{Usage: event.Usage})
+				ch <- StreamChunk{Usage: event.Usage}
 			}
 			continue
 		}
@@ -2190,7 +2092,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 					obs.reasoningField = reasoningFieldContent
 				}
 			}
-			send(StreamChunk{Reasoning: r})
+			ch <- StreamChunk{Reasoning: r}
 			if watch != nil {
 				if info := watch.Watch(ChannelReasoning, r); info != nil {
 					// The copies are in the reasoning, not the reply: there is
@@ -2205,7 +2107,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		// Forward content immediately for token-level streaming.
 		if choice.Delta.Content != "" {
 			contentChars += len(choice.Delta.Content)
-			send(StreamChunk{Content: choice.Delta.Content})
+			ch <- StreamChunk{Content: choice.Delta.Content}
 			if watch != nil {
 				if info := watch.Watch(ChannelContent, choice.Delta.Content); info != nil {
 					cutLoop(info)
@@ -2265,7 +2167,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			// as there. A bare content_filter is some provider's own refusal.
 			if choice.FinishReason == "content_filter" && event.Loop != nil {
 				obs.failed = true
-				send(StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: event.Loop})
+				ch <- StreamChunk{Done: true, StopReason: StopReasonRepetition, Repetition: event.Loop}
 				return
 			}
 			if tw, ok := watch.(ToolCallWatcher); ok {
@@ -2295,16 +2197,16 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			// A proxy saw a loop and let the stream pass. Information only: with
 			// no StopReason nothing was cut, and what it means is the caller's.
 			done.Repetition = event.Loop
-			send(done)
+			ch <- done
 		} else if event.Usage != nil {
 			// Same stamp as the other two emission points: a usage chunk that
 			// skipped it would report the round as all work.
 			stampUsage(event.Usage, event.Timings, data)
-			send(StreamChunk{Usage: event.Usage})
+			ch <- StreamChunk{Usage: event.Usage}
 		}
 	}
 	if readErr != nil {
-		send(StreamChunk{Error: readErr.Error()})
+		ch <- StreamChunk{Error: readErr.Error()}
 	}
 	// The stream ended WITHOUT a finish_reason — a dropped connection, a server
 	// that gave up mid-generation, a truncated body. Anything still in the
@@ -2339,7 +2241,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 				"connection), not the caller.",
 			events, contentChars, sawFinish, sawDone, len(partial), names, bytes)
 		log.Print(detail)
-		send(StreamChunk{Error: detail, PartialToolCalls: partial})
+		ch <- StreamChunk{Error: detail, PartialToolCalls: partial}
 		return
 	}
 	// No partial call, but also no terminator: the body closed with neither
@@ -2352,9 +2254,8 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 				"with no finish_reason and no [DONE]. The reply is incomplete. Cause is upstream "+
 				"(a dropped connection or a server that gave up), not the caller.", events, contentChars)
 		log.Print(detail)
-		send(StreamChunk{Error: detail})
+		ch <- StreamChunk{Error: detail}
 	}
-	return nil
 }
 
 // StreamChunkToSSE formats a StreamChunk as an SSE event string.
