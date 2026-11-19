@@ -628,3 +628,106 @@ func TestPromptCacheKeyRefusalOnAccountStatusTeachesNothing(t *testing.T) {
 		t.Errorf("400 taught %v", got)
 	}
 }
+
+// A thinking-only model refuses EVERY off form, not just reasoning_effort. Each
+// form left on the wire makes the retry the same 400 (Gemini behind a
+// llama.cpp-dialect proxy).
+func TestThinkingOnlyDropsEnableThinkingFalse(t *testing.T) {
+	c := openaiClient("http://x")
+	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningThinkingOnly: fact("true", SourceRefused)}})
+	f := false
+	body := map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}
+	trs := c.translate(body, &ChatOpts{EnableThinking: &f})
+	if _, ok := body["chat_template_kwargs"]; ok || len(trs) != 1 || trs[0].Key != "chat_template_kwargs.enable_thinking" {
+		t.Fatalf("body %v, translations %v", body, trs)
+	}
+	// Other kwargs stay; enable_thinking=true is not an off form.
+	body = map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false, "x": 1}}
+	c.translate(body, nil)
+	if kw := body["chat_template_kwargs"].(map[string]any); len(kw) != 1 || kw["x"] != 1 {
+		t.Fatalf("kwargs = %v", kw)
+	}
+	body = map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": true}}
+	if trs := c.translate(body, nil); len(trs) != 0 || body["chat_template_kwargs"] == nil {
+		t.Fatalf("enable_thinking=true touched: %v %v", body, trs)
+	}
+}
+
+func TestThinkingOnlyDropsZeroReasoningBudgetOnly(t *testing.T) {
+	c := openaiClient("http://x")
+	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningThinkingOnly: fact("true", SourceRefused)}})
+	body := map[string]any{"reasoning_budget_tokens": 0}
+	trs := c.translate(body, nil)
+	if _, ok := body["reasoning_budget_tokens"]; ok || len(trs) != 1 || trs[0].Key != "reasoning_budget_tokens" {
+		t.Fatalf("body %v, translations %v", body, trs)
+	}
+	body = map[string]any{"reasoning_budget_tokens": 512}
+	if trs := c.translate(body, nil); len(trs) != 0 || body["reasoning_budget_tokens"] != 512 {
+		t.Fatalf("positive budget touched: %v %v", body, trs)
+	}
+}
+
+func TestThinkingOnlyRewritesReasoningEnabledFalseToLowestEffort(t *testing.T) {
+	c := openaiClient("http://x")
+	c.SetCapabilities(Capabilities{Facts: map[string]Fact{
+		CapReasoningThinkingOnly:   fact("true", SourceRefused),
+		CapReasoningEffortsRefused: fact("minimal", SourceRefused),
+	}})
+	body := map[string]any{"reasoning": map[string]any{"enabled": false}}
+	trs := c.translate(body, nil)
+	r, _ := body["reasoning"].(map[string]any)
+	if r["effort"] != "low" || len(r) != 1 || len(trs) != 1 || trs[0].Key != "reasoning.enabled" || trs[0].Sent != "low" {
+		t.Fatalf("body %v, translations %v", body, trs)
+	}
+	// Nothing chosen: every rung refused.
+	c.SetCapabilities(Capabilities{Facts: map[string]Fact{
+		CapReasoningThinkingOnly:   fact("true", SourceRefused),
+		CapReasoningEffortsRefused: fact("minimal,low,medium,high,xhigh", SourceRefused),
+	}})
+	body = map[string]any{"reasoning": map[string]any{"enabled": false}}
+	c.translate(body, nil)
+	if _, ok := body["reasoning"]; ok {
+		t.Fatalf("reasoning kept: %v", body)
+	}
+}
+
+func TestEmptyRecordKeepsOffForms(t *testing.T) {
+	c := openaiClient("http://x")
+	body := map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}, "reasoning_budget_tokens": 0}
+	if trs := c.translate(body, nil); len(trs) != 0 || body["reasoning_budget_tokens"] != 0 {
+		t.Fatalf("empty record changed %v: %v", body, trs)
+	}
+}
+
+// The refusal that carries no reasoning_effort at all (llama.cpp dialect, off
+// by enable_thinking=false) still teaches thinking_only, and the next request
+// goes out without the off field.
+const geminiMandatory = `{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","type":"invalid_request_error","code":400}}`
+
+func TestThinkingOnlyLearnedFromEnableThinkingFalseRefusalThenOmitted(t *testing.T) {
+	srv := newCapServer(t, func(n int, body map[string]any) (int, string) {
+		if kw, _ := body["chat_template_kwargs"].(map[string]any); kw["enable_thinking"] == false {
+			return 400, geminiMandatory
+		}
+		return 200, okReply
+	})
+	c := NewClient(srv.URL, "k", "gemini")
+	c.SetReasoningDialect(DialectLlamaCpp)
+	f := false
+	off := &ChatOpts{EnableThinking: &f}
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	_, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off)
+	if err == nil {
+		t.Fatal("first request should fail with the 400")
+	}
+	if only, ok := c.Capabilities().ThinkingOnly(); !ok || !only {
+		t.Fatalf("thinking_only not learned: %+v", c.Capabilities().Facts)
+	}
+	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	sent := srv.sent()
+	if _, ok := sent[len(sent)-1]["chat_template_kwargs"]; ok {
+		t.Fatalf("off field still sent: %v", sent[len(sent)-1])
+	}
+}

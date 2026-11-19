@@ -90,6 +90,9 @@ func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
 			out = append(out, Translation{Key: "reasoning_effort", Sent: send, Wanted: want})
 		}
 	}
+	if only, ok := caps.ThinkingOnly(); ok && only {
+		out = append(out, translateOffForms(body, caps)...)
+	}
 	if want, ok := body["prompt_cache_key"].(string); ok {
 		if v, _ := caps.fact(CapSamplingPrefix + "prompt_cache_key"); v == "refused" {
 			// Same as a refused reasoning_effort: the endpoint rejects the field
@@ -110,6 +113,62 @@ func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
 		}
 	}
 	return out
+}
+
+// translateOffForms removes the "thinking off" forms other than
+// reasoning_effort from body, for a model the record says is thinking-only.
+// reasoning_effort="none" is handled by translateEffort; the dialects in
+// reasoning.go write three more, and a thinking-only endpoint refuses each of
+// them the same way ("Reasoning is mandatory for this endpoint and cannot be
+// disabled", Gemini behind a llama.cpp-dialect proxy), so leaving them on the
+// wire makes every retry the same 400:
+//
+//   - chat_template_kwargs.enable_thinking=false: dropped; true is left alone,
+//     and the kwargs map goes too when it ends up empty.
+//   - reasoning_budget_tokens=0: dropped. Only 0 means "off"; a positive
+//     budget is a limit on thinking, which a thinking-only model can honor.
+//   - reasoning={"enabled":false}: becomes the lowest effort the record does
+//     not refuse (the same pick translateEffort makes for "none"), or is
+//     dropped when none can be chosen.
+func translateOffForms(body map[string]any, caps Capabilities) []Translation {
+	var out []Translation
+	if kw, ok := body["chat_template_kwargs"].(map[string]any); ok {
+		if v, ok := kw["enable_thinking"].(bool); ok && !v {
+			delete(kw, "enable_thinking")
+			if len(kw) == 0 {
+				delete(body, "chat_template_kwargs")
+			}
+			out = append(out, Translation{Key: "chat_template_kwargs.enable_thinking", Wanted: "false"})
+		}
+	}
+	if n, ok := body["reasoning_budget_tokens"]; ok && isZeroNumber(n) {
+		delete(body, "reasoning_budget_tokens")
+		out = append(out, Translation{Key: "reasoning_budget_tokens", Wanted: "0"})
+	}
+	if r, ok := body["reasoning"].(map[string]any); ok {
+		if v, ok := r["enabled"].(bool); ok && !v {
+			if send := translateEffort("none", caps); send != "none" {
+				body["reasoning"] = map[string]any{"effort": send}
+				out = append(out, Translation{Key: "reasoning.enabled", Sent: send, Wanted: "false"})
+			} else {
+				delete(body, "reasoning")
+				out = append(out, Translation{Key: "reasoning.enabled", Wanted: "false"})
+			}
+		}
+	}
+	return out
+}
+
+func isZeroNumber(v any) bool {
+	switch n := v.(type) {
+	case int:
+		return n == 0
+	case int64:
+		return n == 0
+	case float64:
+		return n == 0
+	}
+	return false
 }
 
 // translateEffort is the effort to send for want under caps.
