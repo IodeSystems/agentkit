@@ -8,6 +8,11 @@
 > kept as written. Slice-level "Not done (icebox)" / "Known limits" notes stay inside
 > their entries below.
 
+### ✅ Mid-turn user words land after the round's tool results (2026-11-18)
+- dun-bf asked (Gemini via OpenRouter ignores text inside a functionResponse); Carl approved. A host interjects by saving a pending `KindUser`; Turn claims it at the next loop iteration. Bug fixed: entries sort by CreatedAt and a result is stamped when the tool ends, so words typed mid-tool rendered between assistant(tool_calls) and its result. `groupMessages` now holds user/notification/compaction entries until the open calls are answered (`RenderOptions`; Shaper render and prefix fold agree).
+- Fallback, off by default: `ShaperPolicy.FoldUserIntoToolResult` / `RenderOptions.FoldUserIntoToolResult` (no Shaper: `DefaultContextBuilderWith`) folds a TEXT user entry after tool results into the last result; an entry with Parts stays a user message.
+- Shim v0.5.0 already puts the text after the tool_result blocks in one user turn (`TestMessagesAPI_UserAfterToolResultSharesTheResultsTurn`). Tests: `agent/interject_test.go` (8). The pristine-tail cut keeps calls with results by ToolCallID (`keepCallsWithResults`), so an interleaved user entry does not orphan a result. Not checked live.
+
 ### ✅ Effort scale in agentkit (2026-11-18)
 - Asked by dun-bf; design `plan/effort-design.md`; Carl took every recommendation (lower-first clamp; OpenRouter native effort; budgets 512/1024/4096 llama, 1024/4096/16k/32k/64k anthropic; old fields removed; no Gemini dialect).
 - `llm/effort.go`: `Effort` (unset, none..max), `EffortFor`/`EffortSupport` (pure) + `Client.Effective`/`Client.EffortSupport`, `EffortChoice{Wanted, Effective, Native, Reason, Cause}`. `ChatOpts.Effort` replaces `ReasoningEffort`/`EnableThinking`. `Translation.Reason`, `Key:"effort"` per request when the level or its budget changes. `agent` `reasoningOff` → `EffortNone`.

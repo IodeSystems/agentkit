@@ -84,12 +84,40 @@ func toToolCall(e Entry) llm.ToolCall {
 	return tc
 }
 
+// RenderOptions are the knobs of the entries → messages rendering that live
+// outside the entries themselves. A Shaper carries them in its ShaperPolicy; a
+// host with no Shaper passes them to DefaultContextBuilderWith.
+type RenderOptions struct {
+	// ToolFormat must match the Session's.
+	ToolFormat ToolFormat
+	// VerbatimToolResults: see ShaperPolicy.VerbatimToolResults.
+	VerbatimToolResults bool
+	// FoldUserIntoToolResult: see ShaperPolicy.FoldUserIntoToolResult.
+	FoldUserIntoToolResult bool
+}
+
+// userFrame prefixes a user's words folded into a tool result
+// (FoldUserIntoToolResult). The frame says whose words they are and that they
+// arrived while the tool ran, so the model does not read them as tool output.
+const userFrame = "\n\n[the user wrote, while this ran] "
+
 // groupMessages renders sorted entries into OpenAI-format messages, collapsing
 // an assistant text + its following KindToolCall entries into ONE assistant
 // message carrying tool_calls — so the model sees a valid
 // assistant(tool_calls) → tool(tool_call_id) exchange, not orphan tool
 // messages. contentOf yields the (possibly LOD-truncated) content per entry.
-func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, verbatimToolResults bool, format ToolFormat) []llm.Message {
+//
+// Entries sort by CreatedAt, and a tool result is stamped when the tool
+// FINISHES. Words a person typed while the tool ran (a pending KindUser saved
+// mid-dispatch) are therefore older than the result and would sort between the
+// assistant(tool_calls) and its tool message: a sequence strict endpoints
+// refuse. While calls are still unanswered, every other entry (user,
+// notification, compaction) is held back and emitted right after the last open
+// result, or when the next assistant entry or the end arrives. Each held entry
+// keeps its ORIGINAL index for contentOf (the Shaper's LOD keys on it). The
+// order depends only on the entries, so round N's messages stay a prefix of
+// round N+1's and the provider's prompt cache keeps hitting.
+func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, ro RenderOptions) []llm.Message {
 	out := make([]llm.Message, 0, len(entries)+1)
 	if system != "" {
 		out = append(out, llm.Message{Role: "system", Content: system})
@@ -101,10 +129,37 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 			pending = nil
 		}
 	}
+	open := 0 // tool calls rendered whose result has not been
+	type held struct {
+		i int
+		e Entry
+	}
+	var buf []held
+	emit := func(i int, e Entry) {
+		content := contentOf(i, e)
+		// Parts stay a user message: a tool result carries text only, and
+		// folding would drop the attachment. (A stubbed Parts entry has lost
+		// them already and folds as text.)
+		textOnly := len(e.Parts) == 0 || content != e.Content
+		if ro.FoldUserIntoToolResult && e.Kind == KindUser && textOnly &&
+			len(out) > 0 && out[len(out)-1].Role == "tool" {
+			out[len(out)-1].Content += userFrame + content
+			return
+		}
+		out = append(out, renderEntry(e, content, ro.VerbatimToolResults, ro.ToolFormat))
+	}
+	release := func() {
+		for _, h := range buf {
+			emit(h.i, h.e)
+		}
+		buf = nil
+	}
 	for i, e := range entries {
 		switch e.Kind {
 		case KindAssistant:
 			flush()
+			release()
+			open = 0
 			m := llm.Message{Role: "assistant", Content: contentOf(i, e)}
 			pending = &m
 		case KindToolCall:
@@ -112,7 +167,8 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 				m := llm.Message{Role: "assistant"}
 				pending = &m
 			}
-			if format == ToolFormatHeredoc {
+			open++
+			if ro.ToolFormat == ToolFormatHeredoc {
 				// Replay the call as the TEXT the model wrote. Sending it as
 				// native tool_calls would re-render it through the provider's XML
 				// path — the one this format exists to avoid — and would need a
@@ -124,12 +180,26 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 				continue
 			}
 			pending.ToolCalls = append(pending.ToolCalls, toToolCall(e))
+		case KindToolResult:
+			flush()
+			out = append(out, renderEntry(e, contentOf(i, e), ro.VerbatimToolResults, ro.ToolFormat))
+			if open > 0 {
+				open--
+			}
+			if open == 0 {
+				release()
+			}
 		default:
 			flush()
-			out = append(out, renderEntry(e, contentOf(i, e), verbatimToolResults, format))
+			if open > 0 {
+				buf = append(buf, held{i, e})
+				continue
+			}
+			emit(i, e)
 		}
 	}
 	flush()
+	release()
 	return out
 }
 
@@ -137,13 +207,8 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 // The budget-aware Shaper does the same but adds pristine-tail / LOD /
 // compaction on top.
 func DefaultContextBuilder(ctx context.Context, store Store, sessionID, system string) ([]llm.Message, error) {
-	entries, err := store.Context(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	sortEntries(entries)
 	// No policy here: default to the SAFE behavior.
-	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }, false, ToolFormatNative), nil
+	return DefaultContextBuilderWith(ctx, store, sessionID, system, RenderOptions{})
 }
 
 // DefaultContextBuilderFormat is DefaultContextBuilder for a specific tool
@@ -152,11 +217,18 @@ func DefaultContextBuilder(ctx context.Context, store Store, sessionID, system s
 // plain builder.
 func DefaultContextBuilderFormat(ctx context.Context, store Store, sessionID, system string,
 	format ToolFormat) ([]llm.Message, error) {
+	return DefaultContextBuilderWith(ctx, store, sessionID, system, RenderOptions{ToolFormat: format})
+}
+
+// DefaultContextBuilderWith is DefaultContextBuilder with every rendering knob.
+// A host without a Shaper that needs FoldUserIntoToolResult passes this as the
+// Session's Build.
+func DefaultContextBuilderWith(ctx context.Context, store Store, sessionID, system string,
+	ro RenderOptions) ([]llm.Message, error) {
 	entries, err := store.Context(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
 	sortEntries(entries)
-	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content },
-		false, format), nil
+	return groupMessages(system, entries, func(_ int, e Entry) string { return e.Content }, ro), nil
 }

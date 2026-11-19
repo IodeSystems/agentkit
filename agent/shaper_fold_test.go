@@ -43,7 +43,7 @@ func TestCompact_NeverSplitsACallFromItsResult(t *testing.T) {
 	}
 	entries, _ := store.Context(context.Background(), "s")
 	sortEntries(entries)
-	msgs := groupMessages("", entries, func(_ int, e Entry) string { return e.Content }, false, ToolFormatNative)
+	msgs := groupMessages("", entries, func(_ int, e Entry) string { return e.Content }, RenderOptions{})
 	if n := orphanResults(msgs); n != 0 {
 		t.Fatalf("%d orphan tool result(s) after fold: %+v", n, msgs)
 	}

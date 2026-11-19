@@ -294,3 +294,36 @@ func TestMessagesAPI_FailedAliasResolutionIsNotRetriedEveryCall(t *testing.T) {
 		t.Errorf("model list asked %d times for 4 calls; want 1 inside the failure window", lists)
 	}
 }
+
+// A person's words typed while a tool ran arrive as assistant(tool_calls) →
+// tool → user. Anthropic wants the text in the SAME user turn as the
+// tool_result blocks, after them. If the shim ever stops merging, the host's
+// mid-turn interjection becomes a request the API refuses (two user turns in a
+// row, or text before the result).
+func TestMessagesAPI_UserAfterToolResultSharesTheResultsTurn(t *testing.T) {
+	c, got := fakeMessages(t, evStart, evStop)
+	var tc ToolCall
+	tc.ID, tc.Type = "c1", "function"
+	tc.Function.Name, tc.Function.Arguments = "read", `{}`
+	msgChunks(t, c, []Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []ToolCall{tc}},
+		{Role: "tool", ToolCallID: "c1", Content: "result"},
+		{Role: "user", Content: "also check b"},
+	}, nil)
+	msgs, _ := (*got)["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("want user, assistant, user (3 turns); got %d: %v", len(msgs), msgs)
+	}
+	last := msgs[2].(map[string]any)
+	if last["role"] != "user" {
+		t.Fatalf("last turn role %v", last["role"])
+	}
+	blocks := last["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("want tool_result + text in one turn, got %v", blocks)
+	}
+	if blocks[0].(map[string]any)["type"] != "tool_result" || blocks[1].(map[string]any)["type"] != "text" {
+		t.Fatalf("tool_result must lead, text follow: %v", blocks)
+	}
+}

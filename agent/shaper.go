@@ -64,7 +64,21 @@ type ShaperPolicy struct {
 
 	// ToolFormat must match the Session's, so replayed history is shown in the
 	// same dialect the model writes.
-	ToolFormat            ToolFormat
+	ToolFormat ToolFormat
+
+	// FoldUserIntoToolResult is for chat templates that refuse a user message
+	// directly after tool results. Off by default: the normal rendering is
+	// assistant(tool_calls) → tool → user, which is what a host's mid-turn
+	// interjection (a pending KindUser saved while a tool ran) should look like.
+	//
+	// When set, a TEXT user entry that would directly follow tool results (no
+	// assistant between) is appended to the last tool result's content as
+	// "\n\n[the user wrote, while this ran] <text>". Models that read
+	// functionResponse text poorly may ignore it; that is why it is not the
+	// default. A user entry carrying multimodal Parts stays a user message: a
+	// tool result is text only and folding would drop the attachment.
+	FoldUserIntoToolResult bool
+
 	LODTruncateAboveChars int
 	// MaxToolResultChars bounds a single tool result REGARDLESS of age.
 	//
@@ -730,7 +744,13 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 			content = sh.stub(e, n, askedBy[e.ToolCallID])
 		}
 		return content
-	}, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
+	}, sh.Policy.renderOptions())
+}
+
+// renderOptions is the policy's share of the rendering knobs.
+func (p ShaperPolicy) renderOptions() RenderOptions {
+	return RenderOptions{ToolFormat: p.ToolFormat, VerbatimToolResults: p.VerbatimToolResults,
+		FoldUserIntoToolResult: p.FoldUserIntoToolResult}
 }
 
 // stub truncates one entry, keeping the end of it this tool's answers live at.
@@ -947,7 +967,7 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		if cut := sh.prefixCut(entries, lines, header, budget, window); cut > 0 {
 			msgs := groupMessages(sh.SessionPrefix.System, entries[:cut],
 				func(_ int, e Entry) string { return e.Content },
-				sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
+				sh.Policy.renderOptions())
 			msgs = append(msgs, llm.Message{Role: "user", Content: header})
 			out, err := sh.summaryCallWithPrefix(ctx, msgs, budget, cacheKey)
 			var tooLarge *llm.InputTooLargeError

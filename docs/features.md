@@ -263,6 +263,31 @@ the top of a turn, and the context builder renders every non-subsumed entry —
 so several messages that queued between activations reach the model in **one**
 turn, not one turn each.
 
+### Interjecting while a turn runs
+
+A person's words typed while a turn is in flight are delivered as a real
+`role: user` message, not text inside a tool result (some models, Gemini via
+OpenRouter among them, ignore text inside a functionResponse). The host saves a
+pending `KindUser` entry to the store; `Turn` claims pending entries at the top
+of every loop iteration, so the next request carries it and the loop goes on.
+
+Where it lands: entries sort by `CreatedAt`, and a tool result is stamped when
+the tool finishes, so words typed while a tool ran are older than its result.
+The renderer holds any user, notification or compaction entry back while a
+round's tool calls are unanswered and emits it right after the last result:
+`assistant(tool_calls) -> tool -> user`. On the Claude Messages API the shim
+puts the text in the same user turn as the tool_result blocks, after them.
+
+Some chat templates refuse a user message right after tool results. Set
+`ShaperPolicy.FoldUserIntoToolResult` (or `RenderOptions.FoldUserIntoToolResult`
+through `DefaultContextBuilderWith`, as the Session's `Build`) and a text user
+entry that follows tool results is appended to the last result as
+`[the user wrote, while this ran] <text>`. An entry with multimodal `Parts`
+stays a user message. Off by default.
+
+Cache: the order depends only on the stored entries, so each round's messages
+are a prefix of the next round's.
+
 ## 6. Async tool results (lifting) — `lift`
 
 A tool that can't answer inline (kicked off a job, an approval, a long shell)

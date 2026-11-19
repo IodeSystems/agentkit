@@ -121,6 +121,15 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `ReasoningBudgetTokens` is a cap: min(level budget, explicit); with no Effort it is sent as before. Refusals (`reasoning.efforts.refused`, `reasoning.off`) bind only dialects that send an effort field; `thinking_only` binds all. Anthropic-compat budgets stay below max_tokens.
   The change is reported via `OnTranslate` with `Key` "effort" and a `Reason`.
   `ReasoningEffort`/`EnableThinking` no longer exist.
+- **Mid-turn user words render AFTER the round's tool results.** A host saves a
+  pending `KindUser` while a tool runs; `ClaimPending` picks it up next
+  iteration. It sorts before the result (`CreatedAt`), so `groupMessages` holds
+  every non-assistant/call/result entry while calls are unanswered and emits it
+  after the last open result (original index kept for `contentOf`). Order is a
+  pure function of the entries, so round N is a prefix of round N+1.
+  `RenderOptions.FoldUserIntoToolResult` (`ShaperPolicy` field;
+  `DefaultContextBuilderWith` without a Shaper) folds text user entries into
+  the last tool result for templates that refuse user-after-tool. Parts stay.
 - **Batching is inherent in `Turn`:** `ClaimPending` marks ALL pending arrivals
   shown at the top of an iteration, and `build()` renders every non-subsumed
   entry — so N queued messages are seen in ONE turn.
