@@ -162,7 +162,18 @@ type CompactionInfo struct {
 	Summary       string // the tight summary that replaced the folded prefix
 	SubsumedCount int    // how many entries were folded into the summary
 	TokensBefore  int    // estimated active-window tokens before this compaction
-	TokensAfter   int    // estimated active-window tokens after
+	TokensAfter   int    // estimated tokens of what the next build sends (LOD-rendered, as before)
+
+	// TokensAfterFull is the post-fold window rendered WITHOUT LOD: every kept
+	// entry whole. TokensAfter is what the next build would send under
+	// pressure; this is what it sends while under target, and the number
+	// FoldKeepPct is sized against.
+	TokensAfterFull int
+	// KeptCount is how many of the newest entries the fold left verbatim (the
+	// pristine tail, or more under ShaperPolicy.FoldKeepPct), and KeptTokens
+	// their estimated tokens, rendered without LOD.
+	KeptCount  int
+	KeptTokens int
 
 	// Duration is how long the fold took, dominated by the summarizer's own
 	// round-trip. Reported because compaction is an unasked-for LLM call in the

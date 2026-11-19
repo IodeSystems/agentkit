@@ -373,6 +373,17 @@ tokens, and the same turn continues to the reply. Every Turn also reports
 shows a compaction folding `1150→28` tokens, the summary emitted as a hidden
 field, and the `total`/`active` tally.
 
+**A fold can keep more than the pristine tail (`ShaperPolicy.FoldKeepPct`, opt-in).**
+By default a fold keeps only the `PreserveLast*` tail, so the window is nearly
+empty after it and the next fold comes soon. With `FoldKeepPct` set (say 55) and
+a target, the fold keeps the largest newest suffix whose rebuilt prompt (the
+caller's prefix, a summary at its cap, pinned entries, the suffix; no LOD) fits
+that percent of the target. The pristine tail is the minimum, the suffix is
+widened so no result loses its call, and when the band holds nothing more the
+fold is the default one. `CompactionInfo` reports `KeptCount`, `KeptTokens` and
+`TokensAfterFull` (post-fold tokens without LOD; `TokensAfter` stays the LOD
+count).
+
 **A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
 `SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the
 exact tool defs it sends. The fold's FIRST request is then sent as the session's

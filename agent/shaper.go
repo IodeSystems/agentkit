@@ -134,6 +134,18 @@ type ShaperPolicy struct {
 	// persisted-LOD op — so a policy flag, not a stored operation, is the right
 	// shape for this knob.
 	AlwaysLOD bool
+	// FoldKeepPct makes a fold keep more than the pristine tail: the newest
+	// entries stay verbatim, as many as fit with the prompt after the fold
+	// (the caller's prefix, a summary at its cap, the pinned entries and the
+	// kept ones, rendered without LOD) within FoldKeepPct percent of the
+	// target. Only the oldest entries are folded. WHY: a fold that keeps only
+	// the pristine tail leaves the window nearly empty, so the next fold comes
+	// soon and each one pays a summarizer round-trip. The pristine tail is the
+	// minimum kept, so when the band cannot hold more than it, the fold is what
+	// it was without this. The kept part is widened so no result loses its
+	// call. 0 → the pristine tail only. A fold with no target (Compact) keeps
+	// the pristine tail.
+	FoldKeepPct int
 }
 
 // defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
@@ -478,6 +490,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	}
 	sortEntries(entries)
 	pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+	pristineCount = sh.foldKeep(entries, pristineCount, tokensBefore, target)
 
 	olderEnd := len(entries) - pristineCount
 	if olderEnd <= 0 {
@@ -571,12 +584,15 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, fresh)
 
 	// Measure the new active window by re-rendering the post-compaction entries.
+	// TokensAfter keeps its meaning (LOD, what a build under pressure sends);
+	// TokensAfterFull is without LOD, what the next build sends under target.
 	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
-	after := 0
+	after, afterFull := 0, 0
 	if aerr == nil {
 		sortEntries(afterEntries)
 		ap := classifyPristineCount(afterEntries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
 		after = sh.tokens(sh.render(afterEntries, ap, "", true))
+		afterFull = sh.tokens(sh.render(afterEntries, len(afterEntries), "", false))
 	}
 
 	return CompactionInfo{
@@ -585,9 +601,63 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		SubsumedCount: len(fresh),
 		TokensBefore:  tokensBefore,
 		TokensAfter:   after,
-		Duration:      time.Since(startedAt),
-		IndexErr:      indexErr,
+
+		TokensAfterFull: afterFull,
+		KeptCount:       pristineCount,
+		KeptTokens:      sh.tokens(sh.render(entries[olderEnd:], pristineCount, "", false)),
+		Duration:        time.Since(startedAt),
+		IndexErr:        indexErr,
 	}, true, nil
+}
+
+// foldKeep is how many of the newest entries a fold keeps verbatim: floor (the
+// pristine tail) without Policy.FoldKeepPct or a target, else the most whose
+// rebuilt prompt fits FoldKeepPct of target, never fewer than floor. The prefix
+// is what tokensBefore counted beside the entries (the system prompt); the
+// summary is reserved at its largest cap, so the band holds whatever size the
+// summary comes out. Rendered without LOD, as the next build under target is.
+func (sh *Shaper) foldKeep(entries []Entry, floor, tokensBefore, target int) int {
+	if sh.Policy.FoldKeepPct <= 0 || target <= 0 || tokensBefore <= 0 || floor >= len(entries) {
+		return floor
+	}
+	prefix := max(tokensBefore-sh.tokens(sh.render(entries, len(entries), "", false)), 0)
+	room := target*sh.Policy.FoldKeepPct/100 - prefix - SummaryCap(SummaryMaxTokens)
+	pinned := sh.pins(entries)
+	fits := func(k int) bool {
+		var kept []Entry
+		for i, e := range entries {
+			if i >= len(entries)-k || pinned.has(i) {
+				kept = append(kept, e)
+			}
+		}
+		return sh.tokens(sh.render(kept, len(kept), "", false)) <= room
+	}
+	// The kept size only grows with k: the largest k that fits, by halving.
+	lo, hi := floor, len(entries)-1
+	if lo > hi || !fits(lo) {
+		return floor
+	}
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if fits(mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	// Widening for the calls can overshoot the band: then the floor stands.
+	k := keepCallsWithResults(entries, lo)
+	if !fits(k) {
+		return floor
+	}
+	// The fold must still have something new to fold; otherwise it folds what
+	// it would have without the band.
+	for i := 0; i < len(entries)-k; i++ {
+		if !pinned.has(i) && entries[i].Kind != KindCompaction {
+			return k
+		}
+	}
+	return floor
 }
 
 // Compact forces a compaction fold NOW, regardless of budget — the manual

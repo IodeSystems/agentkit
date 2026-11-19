@@ -155,6 +155,13 @@ plan/     living plan. plan.md = current state + active work + decisions;
   beside the session's system AND tools, never ending on a tool call); later
   stages carry a running summary, so they use the worker prompt, no tools, no
   key. Every fold request's ctx is marked: `IsFold(ctx)`.
+- **A fold keeps the pristine tail, or more with `ShaperPolicy.FoldKeepPct`.**
+  `foldKeep` (shaper.go) picks the largest newest suffix whose rebuilt prompt
+  (prefix from `tokensBefore` + `SummaryCap(SummaryMaxTokens)` + pinned + suffix,
+  rendered WITHOUT LOD) fits that percent of target, widened by
+  `keepCallsWithResults`; it falls back to the pristine tail when the band is no
+  wider or nothing new would fold. 0 is the old behavior exactly;
+  `CompactionInfo.TokensAfter` stays LOD-rendered, `TokensAfterFull` is not.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different

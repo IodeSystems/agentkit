@@ -8,6 +8,12 @@
 > kept as written. Slice-level "Not done (icebox)" / "Known limits" notes stay inside
 > their entries below.
 
+### ✅ `ShaperPolicy.FoldKeepPct` — a fold keeps the newest entries up to a band (2026-11-18)
+- dun-bf: a real fold took 281k → 8.75k (folds everything older than the fixed PreserveLast* tail). Carl approved dun's proposal with review changes. `foldKeep` keeps the largest newest suffix whose prompt (prefix + SummaryCap(SummaryMaxTokens) + pinned + suffix, no LOD) fits FoldKeepPct% of target; pristine tail is the minimum; widened by `keepCallsWithResults`; falls back when the widened suffix overshoots or nothing new would fold. 0 = today's fold exactly.
+- `CompactionInfo.KeptCount`, `KeptTokens`, `TokensAfterFull` added; `TokensAfter` unchanged (still what the next build sends). dun sets 55; dun's simulation 295k → 148k (53%).
+- Tests: `agent/shaper_foldkeep_test.go` (6). Cost: folds come more often (next after ~45% growth, not ~90%). Not checked live.
+- Parked: mid-stream SSE error typing + retry on local branch `sse-stream-error` (956dcec); Carl: no good logs yet.
+
 ### ✅ Mid-turn user words land after the round's tool results (2026-11-18)
 - dun-bf asked (Gemini via OpenRouter ignores text inside a functionResponse); Carl approved. A host interjects by saving a pending `KindUser`; Turn claims it at the next loop iteration. Bug fixed: entries sort by CreatedAt and a result is stamped when the tool ends, so words typed mid-tool rendered between assistant(tool_calls) and its result. `groupMessages` now holds user/notification/compaction entries until the open calls are answered (`RenderOptions`; Shaper render and prefix fold agree).
 - Fallback, off by default: `ShaperPolicy.FoldUserIntoToolResult` / `RenderOptions.FoldUserIntoToolResult` (no Shaper: `DefaultContextBuilderWith`) folds a TEXT user entry after tool results into the last result; an entry with Parts stays a user message.
