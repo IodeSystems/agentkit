@@ -14,6 +14,11 @@
 - Tests: `agent/shaper_foldkeep_test.go` (6). Cost: folds come more often (next after ~45% growth, not ~90%). Not checked live.
 - Parked: mid-stream SSE error typing + retry on local branch `sse-stream-error` (956dcec); Carl: no good logs yet.
 
+### ✅ Mid-stream SSE errors: typed, retried before output (2026-11-18)
+- Carl saw `agent: chat: JSON error injected into SSE stream` once from llm.iodesystems.com (aw4 issue i_1m7rqbptp6z6f22q6jgff8, project dun; model not confirmed). The text is the endpoint's; llm kept only `error.message`.
+- `llm.StreamError{Message, Code, Type, Param, Metadata, Raw, RetryAfter}` + `StreamChunk.StreamErr` / `Err()`; agent wraps it with %w. `Client.pumpStream` retries a `Retryable()` error (429/5xx code, or overloaded/rate limit/unavailable/resource_exhausted) that arrives before anything was forwarded, within RetryBudget, jittered; `RetryStream` events. Usage/observation fire once per call.
+- Open: the real event's payload is not captured; if it has no retryable code or word, it is returned typed, not retried.
+
 ### ✅ Mid-turn user words land after the round's tool results (2026-11-18)
 - dun-bf asked (Gemini via OpenRouter ignores text inside a functionResponse); Carl approved. A host interjects by saving a pending `KindUser`; Turn claims it at the next loop iteration. Bug fixed: entries sort by CreatedAt and a result is stamped when the tool ends, so words typed mid-tool rendered between assistant(tool_calls) and its result. `groupMessages` now holds user/notification/compaction entries until the open calls are answered (`RenderOptions`; Shaper render and prefix fold agree).
 - Fallback, off by default: `ShaperPolicy.FoldUserIntoToolResult` / `RenderOptions.FoldUserIntoToolResult` (no Shaper: `DefaultContextBuilderWith`) folds a TEXT user entry after tool results into the last result; an entry with Parts stays a user message.
