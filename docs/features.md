@@ -23,6 +23,8 @@ is another shot at a slot, but the budget stops it hanging forever. 5xx retries
 a bounded number of times then fails. A billing refusal (corrallm's 402, or a provider's own 400/403/429 saying the credit balance, quota or workspace limit is spent) is never retried: it returns `*llm.BudgetSpentError`, typed `upstream_funds_exhausted`, so a host can fall back. A retry delay is always clamped to a
 safety ceiling.
 
+A provider can also fail with HTTP 200 and then an `{"error":{...}}` SSE event. The client keeps the whole object as `*llm.StreamError` (message, code as number or string, type, param, raw `metadata`, `retry_after`), on `StreamChunk.StreamErr` and as the Turn's error (`errors.As`). If such an error arrives before any content, reasoning, tool call or usage was forwarded and looks transient (code 429 or 5xx, or "overloaded", "rate limit", "unavailable" in code, type or message), the request is re-sent inside the same `RetryBudget`, jittered, honoring the error's `retry_after`; the caller sees one stream. After the first forwarded chunk it is not retried.
+
 ```go
 client := llm.NewClient(baseURL, apiKey, model)
 client.RetryBudget = 5 * time.Minute // cap total time spent retrying one request

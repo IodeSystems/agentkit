@@ -1229,7 +1229,7 @@ func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, 
 	var summary strings.Builder
 	for chunk := range ch {
 		if chunk.Error != "" {
-			return "", fmt.Errorf("%s", chunk.Error)
+			return "", chunk.Err()
 		}
 		summary.WriteString(chunk.Content)
 		if chunk.Done {

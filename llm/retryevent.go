@@ -18,6 +18,9 @@ const (
 	Retry429 RetryKind = "429"
 	// Retry5xx — the upstream answered with a server error.
 	Retry5xx RetryKind = "5xx"
+	// RetryStream — the provider answered 200, then reported a transient error
+	// inside the stream before sending any output; the request is resent.
+	RetryStream RetryKind = "stream"
 	// RetryRecovered — a later attempt succeeded. Fires once, so a UI that put up
 	// a "retrying" banner knows to take it down.
 	RetryRecovered RetryKind = "recovered"
