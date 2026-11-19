@@ -1110,6 +1110,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-18: agentkit v0.36.0: mid-turn user words render after the round's tool results; `RenderOptions`/`ShaperPolicy.FoldUserIntoToolResult`, `DefaultContextBuilderWith` (fac03c4; dun-bf asked).
 - 2026-11-18: agentkit v0.35.0: one effort scale, `ChatOpts.Effort`, lower-first clamp, `EffortChoice`/`EffortSupport` (d196fd9, docs b3051ca; dun-bf asked; breaks dun `applyEffort` and aw4 `thinking.go` at compile time).
 - 2026-11-18: agentkit v0.34.0: split prefix fold + `IsFold` (b472cb2), thinking-only off forms (9773824), resend on by default, `ResendOnRefusal` → `NoResendOnRefusal` (635dc26).
 - 2026-11-18: agentkit v0.33.1: the prefix fold sends the session's PromptCacheKey (4793552; dun waits on it to wire SessionPrefix).
