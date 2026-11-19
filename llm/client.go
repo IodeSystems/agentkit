@@ -394,6 +394,13 @@ type Usage struct {
 	ServedModel string `json:"served_model,omitempty"`
 	RequestID   string `json:"request_id,omitempty"`
 
+	// Model is the model field of the response body, verbatim: the last
+	// streamed chunk that carried one, or the non-streaming body. Empty when
+	// the response names none. Body-only — unlike ServedModel, it never falls
+	// back to a proxy header. A caller resolving a configured alias to the
+	// model that served it reads this.
+	Model string `json:"model,omitempty"`
+
 	// Timings is what the MODEL SERVER said it spent computing this round, when
 	// it says so: llama.cpp's non-standard top-level "timings" object, a sibling
 	// of "usage" on the final stream event (corrallm relays it verbatim). Nil
@@ -1920,6 +1927,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 			}
 			u.LatencyMS = time.Since(callStart).Milliseconds()
 			meta.stamp(&u, usageCost(raw), result.Model)
+			u.Model = result.Model
 			c.OnUsage(u)
 		}
 	}
@@ -1972,6 +1980,10 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// streamModel is the first non-empty "model" any chunk carried; stamped on
 	// the Usage because the usage chunk itself may omit it.
 	var streamModel string
+	// lastModel is the last non-empty "model" any chunk carried — the
+	// body-only value Usage.Model reports, distinct from streamModel's
+	// first-seen semantics.
+	var lastModel string
 	defer func() {
 		if retry != nil || c.OnUsage == nil {
 			return
@@ -1981,6 +1993,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		} else if meta.reported() {
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
 			meta.stamp(&u, nil, streamModel)
+			u.Model = lastModel
 			c.OnUsage(u)
 		}
 	}()
@@ -2000,6 +2013,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		u.LatencyMS = time.Since(callStart).Milliseconds()
 		u.Timings = timings
 		meta.stamp(u, usageCost([]byte(data)), streamModel)
+		u.Model = lastModel
 		lastUsage = u
 		obs.usage = true
 	}
@@ -2169,6 +2183,9 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		}
 		if streamModel == "" {
 			streamModel = event.Model
+		}
+		if event.Model != "" {
+			lastModel = event.Model
 		}
 		// Usage-only chunk (no choices) — providers using
 		// stream_options.include_usage send one of these after content.
