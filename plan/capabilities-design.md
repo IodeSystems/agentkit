@@ -113,8 +113,8 @@ func ProbeCapabilities(ctx, c) (Capabilities, error) // explicit; dun's /model p
 
 There is one hook, in `applyReasoning` and in `chatBody` (shared by `Chat`, `ChatStream` and `ChatWithOpts`). The first slice changes only reasoning:
 
-- An off request (`ReasoningEffort: "none"`) sends `reasoning.off` when the record knows it. Otherwise it sends the standard `"none"`.
-- An effort in `reasoning.efforts.refused` is replaced by the nearest accepted effort above it, and the substitution is noted in the RetryEvent-style hook (see below) so it is never silent.
+- An off request (`Effort: none`) sends `reasoning.off` when the record knows it. Otherwise it sends the standard `"none"`.
+- An effort in `reasoning.efforts.refused` is replaced by the nearest accepted effort below it (above only if none is below; changed from above-first, Carl 2026-11-18), and the substitution is noted in the RetryEvent-style hook (see below) so it is never silent.
 - A known `limits.output` caps `max_tokens`.
 
 Everything else in the table is read-only for hosts at first (dun asked for `limits.context`, `tools.choice_forced` and `stream.reasoning_field`). The wire changes for those come one key at a time, each with its own call-out.

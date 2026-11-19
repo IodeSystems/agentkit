@@ -23,12 +23,7 @@ Shipped (slices 1–5, passthrough, corrallm publishing, LoadDeclared reader): `
 - **risks:** a record learned from one bad response pins wrong behavior and persists in the host's store; the evidence travels with each fact so a host can expire or override it.
 - **blocking decisions:** none open.
 
-### ◻ Effort selector rooted in agentkit (2026-11-08)
-Carl (2026-11-08): "capabilities and effort selector are things that should be rooted in agentkit and integrated by dun." Today dun's `effort.go` owns the levels (default/off/low/medium/high), their descriptions and Level → ChatOpts. agentkit owns the record and the per-dialect translation.
-- **next:** dun-bb sends effort.go's semantics (levels, defaults, what "default" means per dialect) when dun is ready to move it; design note before code.
-- **sketch:** agentkit owns the levels, their descriptions, and Level → ChatOpts through the record (off → `reasoning.off`, refused → nearest accepted). dun keeps `/effort`, its config line, and the UI.
-- **risks:** "default" differs per dialect (send nothing vs. the server's own default); moving it changes dun's wire output unless the mapping is ported exactly.
-- **blocking decisions:** none yet.
+### ✅ Effort selector rooted in agentkit → `done.md` (2026-11-18, not tagged)
 
 ### ◐ Reasoning-cut repair (2026-11-16)
 Proposed by corrallm-a3; Carl approved 2026-11-16 (on by default, `NoReasoningCutRepair` off switch). Released in v0.31.0: `agent/reasoningcut.go`. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 retries length-cut empties itself (aw4 007de172a).

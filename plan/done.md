@@ -8,6 +8,12 @@
 > kept as written. Slice-level "Not done (icebox)" / "Known limits" notes stay inside
 > their entries below.
 
+### ✅ Effort scale in agentkit (2026-11-18)
+- Asked by dun-bf; design `plan/effort-design.md`; Carl took every recommendation (lower-first clamp; OpenRouter native effort; budgets 512/1024/4096 llama, 1024/4096/16k/32k/64k anthropic; old fields removed; no Gemini dialect).
+- `llm/effort.go`: `Effort` (unset, none..max), `EffortFor`/`EffortSupport` (pure) + `Client.Effective`/`Client.EffortSupport`, `EffortChoice{Wanted, Effective, Native, Reason, Cause}`. `ChatOpts.Effort` replaces `ReasoningEffort`/`EnableThinking`. `Translation.Reason`, `Key:"effort"` per request when the level or its budget changes. `agent` `reasoningOff` → `EffortNone`.
+- Audit (opus) found 4, all fixed: effort refusals and `reasoning.off` bind only effort-field dialects (thinking_only binds all); anthropic budget kept below max_tokens (else none, reported); `ReasoningBudgetTokens` is a cap (min), unset + budget byte-identical; one record snapshot per request (`translateWith`). `thinkingOnlyRe` matches "mandatory".
+- Not checked live: xhigh on OpenRouter/Anthropic, max on the Messages API. Breaks callers of the removed fields at compile time (dun `applyEffort`; check autowork3/aw4/corrallm).
+
 ### ✅ Split prefix fold, `IsFold`, thinking-only off forms (2026-11-18)
 - dun-bf, Carl approved all three. (1) A fold too big for one request now sends its FIRST request as the session prefix with the key (`prefixCut`: the head that fits beside the session's system + tools, never ending on a tool call); later stages are worker-prompt. dun's test showed the split fold is the common case, so v0.33.1 left most folds uncached. The size check now counts the session's system and tools, not the worker prompt. (2) `agent.IsFold(ctx)` marks every fold request's ctx; dun matched the system prompt. (3) `translate` drops `enable_thinking=false` and `reasoning_budget_tokens=0`, and rewrites `reasoning.enabled=false` to the lowest effort, when the record says `reasoning.thinking_only` (Gemini behind llm.iodesystems.com refused all three forms).
 - Tests: `TestSplitFoldFirstRequestCarriesPrefixRestStage`, `TestPrefixCutKeepsToolExchangesWhole`, `TestPrefixCutCountsSessionTools`, `TestIsFoldMarksEveryFoldRequest`, `TestThinkingOnly*` (4) and `TestEmptyRecordKeepsOffForms` in llm.

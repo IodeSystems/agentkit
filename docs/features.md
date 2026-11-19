@@ -73,10 +73,47 @@ reads. The decision is per client, so a parent on one provider can run a child o
 another. The reason is cost: Anthropic's OpenAI-compatible endpoint reads nothing from
 the prompt cache, and the shim places breakpoints.
 
-`ReasoningEffort` becomes `output_config.effort`; thinking cannot be switched off on
+`ChatOpts.Effort` becomes `output_config.effort`; thinking cannot be switched off on
 every model, so `none` is `low`. A refusal is a stream error. The client needs a key:
 Workload Identity Federation went with the SDK. What the shape cannot carry is listed
 in the shim's README.
+
+### Effort levels
+
+`ChatOpts.Effort` is the one setting for how hard the model thinks. Levels, lowest
+first: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. The empty value
+(`EffortUnset`) sends nothing and the server decides. `llm.Efforts` lists the levels;
+`llm.ParseEffort` reads a name; `llm.EffortAbout` has one line per level.
+
+The client maps the level to the endpoint's fields. In brief:
+
+| level | openai | openrouter | llama.cpp | anthropic compat | Messages API |
+|---|---|---|---|---|---|
+| none | `none` | thinking off | thinking off, budget 0 | no thinking | `low` |
+| minimal | `minimal` | `minimal` | budget 512 | budget 1024 (`low`) | `low` |
+| low, medium | as is | as is | budget 1024, 4096 | budget 1024, 4096 | as is |
+| high | `high` | `high` | thinking on, no budget | budget 16k | `high` |
+| xhigh | `xhigh` | `xhigh` | `high` | budget 32k | `xhigh` |
+| max | `xhigh` | `xhigh` | `high` | budget 64k | `max` |
+
+A Messages API model that predates the effort field gets nothing. `ReasoningBudgetTokens`
+is an explicit cap: with a level it sends min(level budget, explicit); with no level, the explicit budget alone; at `none`, nothing. Anthropic-compat keeps the budget below `max_tokens` (or sends no thinking block if under 1024). The record's refusals and `reasoning.off` bind only openai, openrouter and the Messages API; llama.cpp and anthropic-compat ignore them, while `thinking_only` binds all.
+
+**Clamp.** If the capability record refuses a level, the client sends the nearest
+lower level that is allowed. If none is lower, it sends the nearest higher one. It never
+steps down to `none`: that is a different request. A `none` request that the record
+refuses (`thinking_only`) goes to the lowest level allowed. If no level is left, the
+client sends nothing and says why.
+
+**Read the result.** `Client.Effective(level)` returns an `EffortChoice`: `Wanted`,
+`Effective`, `Native` (false when a token budget stands in for the level), `Reason`
+(empty when `Effective` equals `Wanted`) and `Cause`. `Client.OnTranslate` reports each
+request whose level changed, with `Key` `"effort"` and `Reason` set. A refusal that
+teaches a fact rebuilds the request, so the new level is reported in the same call.
+
+**Pickers.** `Client.EffortSupport()` returns one `EffortChoice` per level. A row whose
+`Effective` differs from `Wanted` is not available as asked; `Reason` says why. The
+pure form, `llm.EffortSupport(dialect, messagesAPI, model, caps)`, needs no Client.
 
 ### Runaway-loop detection (on by default)
 
@@ -111,9 +148,9 @@ is the backstop for those.
 (a thinking budget ate the room, or the model stopped after a failed call) used
 to persist nothing and end the Turn as `TurnReply`. Now the loop appends a
 notification tagged `agent.ReasoningCutTag` holding the last ~2000 bytes of the
-reasoning, and runs one repair round with reasoning off (`ReasoningEffort`
-"none", `EnableThinking` false, a reasoning budget of 0; the capability record rewrites the
-effort per model). One repair per Turn. If that round is empty too, the Turn
+reasoning, and runs one repair round with reasoning off (`Effort`
+`none` and a reasoning budget of 0; the capability record rewrites the level per
+model). One repair per Turn. If that round is empty too, the Turn
 ends `TurnReasoningCut` with `*agent.ReasoningCutError`. `Session.OnReasoningCut`
 reports the cut (`Repaired` false) and the recovery (`Repaired` true);
 `Session.NoReasoningCutRepair` restores the old behaviour.

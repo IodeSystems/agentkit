@@ -116,6 +116,11 @@ plan/     living plan. plan.md = current state + active work + decisions;
   happy / notify / stderr-die / hang / bad-init / slow-tools. The older
   `poly-lsp-mcp` tests still run when that binary is on PATH and are the
   real-server check.
+- **One effort path.** `ChatOpts.Effort` (none..max) → `EffortFor` clamp (record
+  refusals, lower level first, never down to `none`) → the dialect's fields.
+  `ReasoningBudgetTokens` is a cap: min(level budget, explicit); with no Effort it is sent as before. Refusals (`reasoning.efforts.refused`, `reasoning.off`) bind only dialects that send an effort field; `thinking_only` binds all. Anthropic-compat budgets stay below max_tokens.
+  The change is reported via `OnTranslate` with `Key` "effort" and a `Reason`.
+  `ReasoningEffort`/`EnableThinking` no longer exist.
 - **Batching is inherent in `Turn`:** `ClaimPending` marks ALL pending arrivals
   shown at the top of an iteration, and `build()` renders every non-subsumed
   entry — so N queued messages are seen in ONE turn.
