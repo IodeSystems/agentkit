@@ -511,11 +511,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			}
 		}
 		if usage != nil {
-			s.usageTotal += usage.PromptTokens + usage.CompletionTokens
-			s.usageCached += usage.CachedPromptTokens()
-			s.usageProcessed += usage.NewPromptTokens()
-			s.usageGenerated += usage.CompletionTokens
-			s.usageTurns++
+			s.addRoundUsage(usage)
 			// Summed across the turn's rounds, because a Turn's cost is the sum
 			// of its round-trips and a host budgets the turn, not the round.
 			serverOverheadMS += usage.Server.OverheadMS()
@@ -1236,6 +1232,37 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		return prose, "", nil, usage, nil, nil, finish, perr
 	}
 	return prose, "", calls, usage, nil, cut, finish, nil
+}
+
+// addRoundUsage folds one chat round's provider usage report into the
+// session's ledger: the cumulative Total and the three priced channels,
+// plus the round counter. The normal chat loop (Turn) and the Shaper's
+// fold calls (via FoldUsageSink) both route through it, so every model
+// request this session pays for is counted the same way.
+func (s *Session) addRoundUsage(u *llm.Usage) {
+	s.usageTotal += u.PromptTokens + u.CompletionTokens
+	s.usageCached += u.CachedPromptTokens()
+	s.usageProcessed += u.NewPromptTokens()
+	s.usageGenerated += u.CompletionTokens
+	s.usageTurns++
+}
+
+// AddFoldUsage is the function a host points Shaper.OnFoldUsage at to
+// surface the fold's usage into this session's ledger. The Shaper is the
+// host's to build, so the session hands out the sink rather than receiving
+// the shaper:
+//
+//	shaper.OnFoldUsage = s.AddFoldUsage
+//
+// A fold runs inside the session's Turn (mid-loop compaction) and the loop
+// and the fold write the same counters from the same goroutine, so no lock
+// is needed. Without it, a host reporting cost from the ledger undercounts
+// every compaction.
+func (s *Session) AddFoldUsage(u *llm.Usage) {
+	if u == nil {
+		return // the endpoint did not report this request's usage
+	}
+	s.addRoundUsage(u)
 }
 
 // entryUsage projects a provider usage report, and the reasoning text the round

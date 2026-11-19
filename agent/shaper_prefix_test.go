@@ -251,6 +251,71 @@ func TestSplitFoldFirstRequestCarriesPrefixRestStage(t *testing.T) {
 	}
 }
 
+// Scenario: fold round reads from cache.
+//
+// A warm session folds over its own history. The fold request carries the
+// session's prefix (part 1), so the provider reports the session prompt as a
+// cache read; its usage must land in the session's ledger (s.usageCached)
+// with the cached count at 90% or more of the session's prompt size.
+func TestFoldRoundUsageSurfacesIntoSessionLedger(t *testing.T) {
+	const sessionPrompt = 120_000 // the warm prefix the fold request reuses
+
+	st := smallHistory() // ~10k estimated tokens, over the budget below
+	shaper := &Shaper{
+		Store: st,
+		Policy: ShaperPolicy{BudgetTokens: 10_000, PreserveLastMessages: 1},
+		Estimate:      Default(),
+		SessionPrefix: SessionPrefix{System: "session system", Tools: prefixTools()},
+	}
+	// Warm mock: the prefix fold request reports the whole session prompt as
+	// a cache read; the second fold stage and the final round report nothing.
+	r := &scriptRunner{turns: [][]llm.StreamChunk{
+		{{Content: "SUMMARY"},
+			{Usage: &llm.Usage{PromptTokens: sessionPrompt + 200,
+				PromptTokensDetails: &llm.PromptTokensDetails{CachedTokens: sessionPrompt},
+				CompletionTokens: 800}}},
+		{{Content: "STAGE2"}},
+		{{Content: "done"}},
+	}}
+	shaper.Runner = r
+	s := &Session{
+		SessionID: "s",
+		Store:     st,
+		Runner:    r,
+		MaxTurns:  5,
+		Build:     shaper.Build,
+	}
+	shaper.OnFoldUsage = s.AddFoldUsage
+
+	// The turn's prompt arrives in the inbox; Build sees it and the backlog
+	// is over budget, so the round forces a fold first.
+	st.queue(Entry{ID: "ask", Kind: KindUser, Content: "keep going", CreatedAt: 200})
+	res, err := s.Turn(context.Background())
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+
+	// The fold round's usage reached the session ledger: the cached count is
+	// the session prompt size, and the ledger says so.
+	if got := res.Usage.Cached; got < sessionPrompt {
+		t.Fatalf("ledger cached = %d, want >= %d (the fold round's cache read must land in the ledger)",
+			got, sessionPrompt)
+	}
+	ratio := float64(res.Usage.Cached) / float64(sessionPrompt)
+	if ratio < 0.90 {
+		t.Errorf("fold round's cached count is %.1f%% of the session prompt, want >=90%%", ratio*100)
+	}
+	// The fold's generated tokens are in the ledger too, not only the cache.
+	if res.Usage.Generated < 800 {
+		t.Errorf("ledger generated = %d, want >= 800 (the fold's summary)", res.Usage.Generated)
+	}
+	// The fold request was the warm one: prefix system, tools, choice none.
+	fold := r.seen[0]
+	if fold[0].Content != "session system" {
+		t.Errorf("fold request system = %q, want the session's", fold[0].Content)
+	}
+}
+
 // Scenario: the split never ends the prefix request on a tool call whose
 // result it leaves out: a strict endpoint refuses a call with no result.
 func TestPrefixCutKeepsToolExchangesWhole(t *testing.T) {

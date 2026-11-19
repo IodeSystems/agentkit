@@ -353,6 +353,16 @@ type Shaper struct {
 	// the compaction worker's own prompt and does not use the prefix, because
 	// a shrunk stage is not the session and would not match the cache.
 	SessionPrefix SessionPrefix
+
+	// OnFoldUsage, if set, receives each fold request's usage report as the
+	// fold runs — once per model request, so a staged fold fires once per
+	// stage. A nil usage is a request the endpoint did not report.
+	//
+	// The fold bypasses the session's chat loop, so without this its tokens
+	// never reach the session's ledger (Session.usageTotal and friends), and
+	// a host reporting cost from the ledger undercounts every compaction.
+	// Session.AddFoldUsage is the sink to install.
+	OnFoldUsage func(u *llm.Usage)
 }
 
 // SessionPrefix is the session's prefix: its system prompt and tool
@@ -1404,12 +1414,19 @@ func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, 
 		return "", err
 	}
 	var summary strings.Builder
+	var usage *llm.Usage
 	for chunk := range ch {
 		if chunk.Error != "" {
 			return "", chunk.Err()
 		}
 		summary.WriteString(chunk.Content)
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
 		if chunk.Done {
+			if sh.OnFoldUsage != nil {
+				sh.OnFoldUsage(usage)
+			}
 			go func() {
 				for range ch {
 				}
