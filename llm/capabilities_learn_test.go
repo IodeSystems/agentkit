@@ -174,6 +174,7 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 		return 200, okReply
 	})
 	c := openaiClient(srv.URL)
+	c.NoResendOnRefusal = true // the next-request path, not the resend
 	var learned []Learned
 	var trs []Translation
 	c.OnLearn = func(l Learned) { learned = append(learned, l) }
@@ -200,7 +201,7 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 	}
 	sent := srv.sent()
 	if len(sent) != 2 {
-		t.Fatalf("requests = %d, want 2 (ResendOnRefusal is off)", len(sent))
+		t.Fatalf("requests = %d, want 2 (NoResendOnRefusal)", len(sent))
 	}
 	if got := sent[1]["reasoning_effort"]; got != "minimal" {
 		t.Fatalf("second request sent %v, want minimal", got)
@@ -455,6 +456,7 @@ func TestResendOnRefusal(t *testing.T) {
 	t.Run("off: the refusal is returned, one request", func(t *testing.T) {
 		srv := newCapServer(t, refuseNone)
 		c := openaiClient(srv.URL)
+		c.NoResendOnRefusal = true
 		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
 			t.Fatal("want the 400")
 		}
@@ -462,10 +464,9 @@ func TestResendOnRefusal(t *testing.T) {
 			t.Fatalf("requests = %d, want 1", n)
 		}
 	})
-	t.Run("on: resent once, translated", func(t *testing.T) {
+	t.Run("default: resent once, translated", func(t *testing.T) {
 		srv := newCapServer(t, refuseNone)
 		c := openaiClient(srv.URL)
-		c.ResendOnRefusal = true
 		var trs []Translation
 		c.OnTranslate = func(tr Translation) { trs = append(trs, tr) }
 		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
@@ -487,7 +488,6 @@ func TestResendOnRefusal(t *testing.T) {
 			return 200, sse(`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`, `[DONE]`)
 		})
 		c := openaiClient(srv.URL)
-		c.ResendOnRefusal = true
 		drain(t, c, off, nil)
 		if sent := srv.sent(); len(sent) != 2 || sent[1]["reasoning_effort"] != "minimal" {
 			t.Fatalf("requests = %d", len(sent))
@@ -498,7 +498,6 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, `{"error":{"message":"bad request"}}`
 		})
 		c := openaiClient(srv.URL)
-		c.ResendOnRefusal = true
 		_, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off)
 		if err == nil || !strings.Contains(err.Error(), "bad request") {
 			t.Fatalf("err = %v", err)
@@ -512,7 +511,6 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, `{"error":{"message":"budget_tokens must be >= 1024"}}`
 		})
 		c := openaiClient(srv.URL)
-		c.ResendOnRefusal = true
 		_, _, _ = c.ChatWithOpts(context.Background(), msgs, nil, off)
 		if n := len(srv.sent()); n != 1 {
 			t.Fatalf("requests = %d, want 1", n)
@@ -527,7 +525,6 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, fmt.Sprintf(`{"error":{"message":"'%v' is not one of []"}}`, b["reasoning_effort"])
 		})
 		c := openaiClient(srv.URL)
-		c.ResendOnRefusal = true
 		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
 			t.Fatal("want the second 400")
 		}
@@ -582,12 +579,13 @@ func TestRefusedPromptCacheKeyIsLearnedAndDropped(t *testing.T) {
 		return 200, okReply
 	})
 	c := openaiClient(srv.URL)
+	c.NoResendOnRefusal = true
 	learned := 0
 	c.OnLearn = func(Learned) { learned++ }
 	opts := &ChatOpts{PromptCacheKey: "k1"}
 	msgs := []Message{{Role: "user", Content: "hi"}}
 	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err == nil {
-		t.Fatal("want the 400 returned without ResendOnRefusal")
+		t.Fatal("want the 400 returned with NoResendOnRefusal")
 	}
 	if v, _ := c.Capabilities().fact("sampling.prompt_cache_key"); v != "refused" || learned != 1 {
 		t.Fatalf("fact %q, OnLearn %d", v, learned)
@@ -608,7 +606,6 @@ func TestRefusedPromptCacheKeyIsResentOnceWithResendOnRefusal(t *testing.T) {
 		return 200, okReply
 	})
 	c := openaiClient(srv.URL)
-	c.ResendOnRefusal = true
 	if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{PromptCacheKey: "k1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -700,11 +697,13 @@ func TestEmptyRecordKeepsOffForms(t *testing.T) {
 }
 
 // The refusal that carries no reasoning_effort at all (llama.cpp dialect, off
-// by enable_thinking=false) still teaches thinking_only, and the next request
-// goes out without the off field.
+// by enable_thinking=false) still teaches thinking_only, and the default
+// resend sends the request again without the off field: ONE call succeeds.
+// Before, the caller got the 400 (no resend by default), and a resend would
+// have failed too, because translate kept enable_thinking=false.
 const geminiMandatory = `{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","type":"invalid_request_error","code":400}}`
 
-func TestThinkingOnlyLearnedFromEnableThinkingFalseRefusalThenOmitted(t *testing.T) {
+func TestThinkingMandatoryRefusalIsLearnedAndResentWithoutOffField(t *testing.T) {
 	srv := newCapServer(t, func(n int, body map[string]any) (int, string) {
 		if kw, _ := body["chat_template_kwargs"].(map[string]any); kw["enable_thinking"] == false {
 			return 400, geminiMandatory
@@ -716,18 +715,17 @@ func TestThinkingOnlyLearnedFromEnableThinkingFalseRefusalThenOmitted(t *testing
 	f := false
 	off := &ChatOpts{EnableThinking: &f}
 	msgs := []Message{{Role: "user", Content: "hi"}}
-	_, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off)
-	if err == nil {
-		t.Fatal("first request should fail with the 400")
+	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
+		t.Fatalf("one call must succeed through the resend: %v", err)
 	}
 	if only, ok := c.Capabilities().ThinkingOnly(); !ok || !only {
 		t.Fatalf("thinking_only not learned: %+v", c.Capabilities().Facts)
 	}
-	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
-		t.Fatalf("second request: %v", err)
-	}
 	sent := srv.sent()
-	if _, ok := sent[len(sent)-1]["chat_template_kwargs"]; ok {
-		t.Fatalf("off field still sent: %v", sent[len(sent)-1])
+	if len(sent) != 2 {
+		t.Fatalf("requests = %d, want 2 (refused, resent)", len(sent))
+	}
+	if _, ok := sent[1]["chat_template_kwargs"]; ok {
+		t.Fatalf("off field still sent on the resend: %v", sent[1])
 	}
 }

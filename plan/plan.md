@@ -80,7 +80,7 @@ Live against api.anthropic.com through dun. Gaps, proposals, next steps and bloc
 - Zero third-party dependencies (invariant 0); adding a `require` is a decision.
 - Pre-release: no compat shims, edit in place, delete freely.
 - Unsupported media fails loudly; agentkit never strips a part (Carl, 2026-11-06).
-- Capability record (Carl, 2026-11-07/08): agentkit does not store it (the host does, via OnLearn); limits only narrow downstream (smallest wins, each lowering reported); corrallm publishes it on `/v1/models`, read as `declared`; `ResendOnRefusal` off by default.
+- Capability record (Carl, 2026-11-07/08): agentkit does not store it (the host does, via OnLearn); limits only narrow downstream (smallest wins, each lowering reported); corrallm publishes it on `/v1/models`, read as `declared`; one resend after a refusal that changed the request, on by default (`NoResendOnRefusal` turns it off; Carl, 2026-11-18, reversing 2026-11-08).
 - No caller ever gets a tool call it could run with truncated arguments (Carl, 2026-11-08): with loop detection on, corrallm holds tool calls to the end of the reply and drops them on a cut; the shim ends a dropped stream with an `error` event.
 
 ## Done pointers

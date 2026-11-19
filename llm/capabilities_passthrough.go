@@ -42,7 +42,7 @@ func (c *Client) TranslateBody(body map[string]any) []Translation {
 // A 2xx records the effort that was sent as accepted. A 4xx is read with the
 // same refusal patterns and overflow parsing the Client uses on its own
 // requests. A 429 or 5xx teaches nothing. LearnResponse never sends a request:
-// a resend is the proxy's decision (see Client.ResendOnRefusal for the
+// a resend is the proxy's decision (see Client.NoResendOnRefusal for the
 // Client's own).
 func (c *Client) LearnResponse(sent map[string]any, status int, respBody []byte) bool {
 	if status >= 200 && status < 300 {

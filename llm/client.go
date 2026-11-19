@@ -645,13 +645,16 @@ type Client struct {
 	// the host can show "sent minimal for none". Same rules as OnLearn.
 	OnTranslate func(Translation)
 
-	// ResendOnRefusal, when true, sends a chat request once more after a 4xx
-	// that taught the record a fact which changes the translated request bytes.
-	// At most one resend per call; a refusal that teaches nothing new is
-	// returned as is. False by default: whether llm resends on its own, in a
-	// path every host shares, is an open decision (plan/capabilities-design.md
-	// "Learning from refusals").
-	ResendOnRefusal bool
+	// NoResendOnRefusal turns off the one resend after a refusal that taught
+	// the record something. By default a chat request refused with a 4xx that
+	// taught a fact which changes the translated request bytes is sent once
+	// more, translated. At most one resend per call; a refusal that teaches
+	// nothing new, or a fact that leaves the bytes the same, is returned as is.
+	// On by default (Carl, 2026-11-18): without it the FIRST request to a new
+	// model always failed — a thinking-only model refused reasoning off, the
+	// record learned it, and the caller still got the 400, including the
+	// Session's reasoning-cut repair round, which then ended the Turn.
+	NoResendOnRefusal bool
 
 	caps capRecord
 }
@@ -1684,7 +1687,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 
 // sendChat builds the chat body, sends it, and returns the 200 response. A
 // refusal is learned from (capabilities_learn.go) and returned as the same
-// error as before; with ResendOnRefusal it may be sent once more, translated
+// error as before; unless NoResendOnRefusal it may be sent once more, translated
 // by what it taught. callStart is taken BEFORE the first request so latency
 // includes retries, queueing, a cold model load and a resend — the parts that
 // make a call slow are exactly the parts a server-side number would omit.
@@ -1719,7 +1722,7 @@ func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolD
 			return nil, sentRequest{}, callStart, statusErrorBody(resp.StatusCode, readErrorBody(resp))
 		}
 		taught, err := c.chatRefusal(resp, body)
-		if !taught || !c.ResendOnRefusal || resent {
+		if !taught || c.NoResendOnRefusal || resent {
 			return nil, sentRequest{}, callStart, err
 		}
 		nbody, ntrs := c.chatBody(ctx, messages, tools, opts, stream)

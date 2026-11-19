@@ -132,17 +132,17 @@ A 400 whose body names a request field is parsed by `refusalFacts(body, sent)`. 
 
 It records the facts and the request still fails as today.
 
-**Open (Carl):** whether `llm` then sends the request again, once, translated by the new fact. Two arguments:
+**Decided (Carl, 2026-11-18): `llm` sends the request again, once, translated by the new fact.** This reverses the 2026-11-08 call (off by default). The case that decided it: a thinking-only Gemini refused reasoning off, the record learned it, and the caller still got the 400 on every first request, including the Session's reasoning-cut repair round. The arguments as they were weighed:
 
 - **For:** this is the only way the first request to a new model succeeds without a probe, and dun asked for it.
 - **Against:** it would be a second automatic resend in a path every host shares, beside the overflow resend in `Session.Turn`.
 
-Until Carl decides, it ships behind `Client.ResendOnRefusal bool`, false by default. When true, it is bounded to one resend per call, only for a refusal whose fact changed the request bytes. A refusal that teaches nothing new is returned as is.
+It is on by default; `Client.NoResendOnRefusal` turns it off. It is bounded to one resend per call, only for a refusal whose fact changed the request bytes. A refusal that teaches nothing new is returned as is. The passthrough path (`LearnResponse`, corrallm) never resends: that is the proxy's decision.
 
 ## Slices
 
 1. **core**: types, precedence, `SetCapabilities`/`Capabilities`/`OnLearn`, typed getters, tests. Independent of the wire.
-2. **learn**: observed facts (stream usage, reasoning field, reasoning tokens against the effort sent, `InputTooLargeError` counts, `tool_choice` honored), the refusal parser, and the reasoning translation. `ResendOnRefusal` is off.
+2. **learn**: observed facts (stream usage, reasoning field, reasoning tokens against the effort sent, `InputTooLargeError` counts, `tool_choice` honored), the refusal parser, and the reasoning translation. The resend shipped off; on by default since 2026-11-18.
 3. **declared**: `LoadDeclared` for the corrallm and OpenRouter shapes, from fixtures of the live bodies.
 4. **probe**: `ProbeCapabilities` over `ProbeToolSurface`.
 5. Hosts: dun replaces `effort_off` (`d41e9a1`) with the record, stores records in `DUN_HOME`, and shows them on `/model`. corrallm stores per (backend, model) for its dashboard. Both run in their own sessions, and both route changes through agentkit-f2.

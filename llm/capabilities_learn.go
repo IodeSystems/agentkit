@@ -15,8 +15,8 @@
 //     the nearest one above it; a known output limit caps max_tokens). Every
 //     change is reported through OnTranslate, so it is never silent.
 //
-// ResendOnRefusal (Client field) decides whether a refusal that changed the
-// translated bytes is sent once more. It is off by default: an open decision.
+// A refusal that changed the translated bytes is sent once more, translated
+// (at most once per call); Client.NoResendOnRefusal turns that off.
 package llm
 
 import (
