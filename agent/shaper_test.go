@@ -752,12 +752,11 @@ func TestSummarize_OptionsBudgetAndTaskFunc(t *testing.T) {
 		s.entries = append(s.entries, Entry{ID: fmt.Sprintf("e%d", i), Kind: k, ToolCallID: "c1",
 			Content: strings.Repeat("body ", 2_000), CreatedAt: int64(i + 1)})
 	}
-	off := false
 	r := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "S"}}}}
 	task := "first"
 	var sized [3]int
 	sh := &Shaper{Store: s, Runner: r, Task: "stale", TaskFunc: func() string { return task },
-		SummaryOpts: &llm.ChatOpts{EnableThinking: &off, TraceID: "t"},
+		SummaryOpts: &llm.ChatOpts{Effort: llm.EffortNone, TraceID: "t"},
 		SummaryTokens: func(folded, kept, target int) int {
 			sized = [3]int{folded, kept, target}
 			return 1234
@@ -771,7 +770,7 @@ func TestSummarize_OptionsBudgetAndTaskFunc(t *testing.T) {
 		t.Errorf("SummaryTokens got folded=%d kept=%d target=%d", sized[0], sized[1], sized[2])
 	}
 	o := r.opts[0]
-	if o == nil || o.EnableThinking == nil || *o.EnableThinking || o.TraceID != "t" {
+	if o == nil || o.Effort != llm.EffortNone || o.TraceID != "t" {
 		t.Fatalf("the host's options did not reach the fold: %+v", o)
 	}
 	if o.MaxTokens != SummaryCap(1234) {

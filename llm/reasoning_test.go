@@ -105,13 +105,12 @@ func TestZeroAndNegativeBudget(t *testing.T) {
 	}
 }
 
-// TestEnableThinkingMergesKwargs: the toggle rides in chat_template_kwargs,
-// which a caller may already be using. Assigning instead of merging would drop
-// theirs silently.
-func TestEnableThinkingMergesKwargs(t *testing.T) {
-	on := true
+// TestEffortMergesKwargs: the toggle rides in chat_template_kwargs, which a
+// caller may already be using. Assigning instead of merging would drop theirs
+// silently.
+func TestEffortMergesKwargs(t *testing.T) {
 	body := map[string]any{"chat_template_kwargs": map[string]any{"mine": "kept"}}
-	llamaClient().applyReasoning(body, &ChatOpts{EnableThinking: &on})
+	llamaClient().applyReasoning(body, &ChatOpts{Effort: EffortHigh})
 	kw, ok := body["chat_template_kwargs"].(map[string]any)
 	if !ok {
 		t.Fatalf("chat_template_kwargs = %T", body["chat_template_kwargs"])
@@ -123,10 +122,10 @@ func TestEnableThinkingMergesKwargs(t *testing.T) {
 		t.Error("caller's own chat_template_kwargs were clobbered")
 	}
 
-	// Anthropic has no toggle — a budget IS the toggle — so this must not
+	// Anthropic has no toggle (a budget IS the toggle), so this must not
 	// invent a kwarg its endpoint would ignore.
 	abody := map[string]any{}
-	claudeClient().applyReasoning(abody, &ChatOpts{EnableThinking: &on})
+	claudeClient().applyReasoning(abody, &ChatOpts{Effort: EffortHigh})
 	if _, ok := abody["chat_template_kwargs"]; ok {
 		t.Error("chat_template_kwargs sent to the Anthropic dialect")
 	}
@@ -212,19 +211,21 @@ func TestLive_AutoReasoningBudget(t *testing.T) {
 }
 
 // OpenRouter takes one `reasoning` object, and none of llama.cpp's fields.
+// low/medium are the native effort (decision 2), a caller's budget replaces it.
 func TestApplyReasoning_OpenRouter(t *testing.T) {
 	c := NewClient("https://openrouter.ai/api/v1", "", "deepseek/deepseek-r1")
-	on, off, n := true, false, 2048
+	n := 2048
 	for name, tc := range map[string]struct {
 		opts ChatOpts
 		want string
 	}{
-		"effort": {ChatOpts{EnableThinking: &on, ReasoningEffort: "high"}, `{"effort":"high"}`},
-		"budget": {ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "low"}, `{"max_tokens":2048}`},
-		"off":    {ChatOpts{EnableThinking: &off}, `{"enabled":false}`},
-		"none":   {ChatOpts{ReasoningEffort: "none"}, `{"enabled":false}`},
-		"on":     {ChatOpts{EnableThinking: &on}, `{"enabled":true}`},
-		"unset":  {ChatOpts{}, ``},
+		"effort":       {ChatOpts{Effort: EffortHigh}, `{"effort":"high"}`},
+		"low":          {ChatOpts{Effort: EffortLow}, `{"effort":"low"}`},
+		"budget":       {ChatOpts{Effort: EffortLow, ReasoningBudgetTokens: &n}, `{"max_tokens":2048}`},
+		"none":         {ChatOpts{Effort: EffortNone}, `{"enabled":false}`},
+		"none+budget":  {ChatOpts{Effort: EffortNone, ReasoningBudgetTokens: &n}, `{"enabled":false}`},
+		"unset":        {ChatOpts{}, ``},
+		"budget alone": {ChatOpts{ReasoningBudgetTokens: &n}, `{"max_tokens":2048}`},
 	} {
 		body := map[string]any{}
 		c.applyReasoning(body, &tc.opts)
@@ -248,42 +249,136 @@ func TestApplyReasoning_OpenRouter(t *testing.T) {
 // A named dialect wins over detection: the openai one sends only an
 // effort, a LiteLLM proxy's address names nothing.
 func TestReasoningDialect_Named(t *testing.T) {
-	on, n := true, 4096
+	n := 4096
 	c := NewClient("https://litellm.corp.example/v1", "", "deepseek-1017")
 	body := map[string]any{}
-	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "medium"})
+	c.applyReasoning(body, &ChatOpts{Effort: EffortMedium, ReasoningBudgetTokens: &n})
 	if _, ok := body["chat_template_kwargs"]; !ok {
 		t.Error("auto on an unnamed address is llama.cpp's dialect")
 	}
 	c.SetReasoningDialect(DialectOpenAI)
 	body = map[string]any{}
-	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningBudgetTokens: &n, ReasoningEffort: "medium"})
+	c.applyReasoning(body, &ChatOpts{Effort: EffortMedium, ReasoningBudgetTokens: &n})
 	if body["reasoning_effort"] != "medium" || len(body) != 1 {
 		t.Errorf("openai: %v", body)
 	}
 	c.SetReasoningDialect(DialectOpenRouter)
 	body = map[string]any{}
-	c.applyReasoning(body, &ChatOpts{EnableThinking: &on, ReasoningEffort: "high"})
+	c.applyReasoning(body, &ChatOpts{Effort: EffortHigh})
 	if r, _ := body["reasoning"].(map[string]any); r["effort"] != "high" {
 		t.Errorf("openrouter: %v", body)
 	}
 }
 
-// The openai dialect sends the standard's values as given, off included, and
-// drops what the standard does not define.
+// goldenBodies is the wire for every dialect x level with an empty record: the
+// table in effort.go, as bytes. A cell that changes is a wire change for every
+// host, so it is spelled out rather than derived.
+func TestEffortGoldenBodies(t *testing.T) {
+	mk := func(dialect, url, model string, msgs bool) *Client {
+		c := NewClient(url, "", model)
+		c.SetReasoningDialect(dialect)
+		c.MessagesAPI = msgs
+		return c
+	}
+	llama := mk(DialectLlamaCpp, "http://x/v1", "Qwen3.8", false)
+	anth := mk(DialectAnthropic, "http://x/v1", "claude-opus-4-6", false)
+	orr := mk(DialectOpenRouter, "http://x/v1", "m", false)
+	oai := mk(DialectOpenAI, "http://x/v1", "m", false)
+	msg := mk(DialectAnthropic, "http://x/v1", "claude-opus-4-6", true)
+	old := mk(DialectAnthropic, "http://x/v1", "claude-haiku-4-5", true)
+	cases := []struct {
+		name string
+		c    *Client
+		e    Effort
+		want string
+	}{
+		{"llama unset", llama, EffortUnset, `{}`},
+		{"llama none", llama, EffortNone, `{"chat_template_kwargs":{"enable_thinking":false},"reasoning_budget_tokens":0}`},
+		{"llama minimal", llama, EffortMinimal, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_budget_tokens":512}`},
+		{"llama low", llama, EffortLow, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_budget_tokens":1024}`},
+		{"llama medium", llama, EffortMedium, `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_budget_tokens":4096}`},
+		{"llama high", llama, EffortHigh, `{"chat_template_kwargs":{"enable_thinking":true}}`},
+		{"llama xhigh", llama, EffortXHigh, `{"chat_template_kwargs":{"enable_thinking":true}}`},
+		{"llama max", llama, EffortMax, `{"chat_template_kwargs":{"enable_thinking":true}}`},
+
+		{"anthropic unset", anth, EffortUnset, `{}`},
+		{"anthropic none", anth, EffortNone, `{}`},
+		{"anthropic minimal", anth, EffortMinimal, `{"thinking":{"budget_tokens":1024,"type":"enabled"}}`},
+		{"anthropic low", anth, EffortLow, `{"thinking":{"budget_tokens":1024,"type":"enabled"}}`},
+		{"anthropic medium", anth, EffortMedium, `{"thinking":{"budget_tokens":4096,"type":"enabled"}}`},
+		{"anthropic high", anth, EffortHigh, `{"thinking":{"budget_tokens":16384,"type":"enabled"}}`},
+		{"anthropic xhigh", anth, EffortXHigh, `{"thinking":{"budget_tokens":32768,"type":"enabled"}}`},
+		{"anthropic max", anth, EffortMax, `{"thinking":{"budget_tokens":65536,"type":"enabled"}}`},
+
+		{"openrouter unset", orr, EffortUnset, `{}`},
+		{"openrouter none", orr, EffortNone, `{"reasoning":{"enabled":false}}`},
+		{"openrouter minimal", orr, EffortMinimal, `{"reasoning":{"effort":"minimal"}}`},
+		{"openrouter low", orr, EffortLow, `{"reasoning":{"effort":"low"}}`},
+		{"openrouter medium", orr, EffortMedium, `{"reasoning":{"effort":"medium"}}`},
+		{"openrouter high", orr, EffortHigh, `{"reasoning":{"effort":"high"}}`},
+		{"openrouter xhigh", orr, EffortXHigh, `{"reasoning":{"effort":"xhigh"}}`},
+		{"openrouter max", orr, EffortMax, `{"reasoning":{"effort":"xhigh"}}`},
+
+		{"openai unset", oai, EffortUnset, `{}`},
+		{"openai none", oai, EffortNone, `{"reasoning_effort":"none"}`},
+		{"openai minimal", oai, EffortMinimal, `{"reasoning_effort":"minimal"}`},
+		{"openai low", oai, EffortLow, `{"reasoning_effort":"low"}`},
+		{"openai medium", oai, EffortMedium, `{"reasoning_effort":"medium"}`},
+		{"openai high", oai, EffortHigh, `{"reasoning_effort":"high"}`},
+		{"openai xhigh", oai, EffortXHigh, `{"reasoning_effort":"xhigh"}`},
+		{"openai max", oai, EffortMax, `{"reasoning_effort":"xhigh"}`},
+
+		{"messages unset", msg, EffortUnset, `{}`},
+		{"messages none", msg, EffortNone, `{"reasoning_effort":"low"}`},
+		{"messages minimal", msg, EffortMinimal, `{"reasoning_effort":"low"}`},
+		{"messages low", msg, EffortLow, `{"reasoning_effort":"low"}`},
+		{"messages medium", msg, EffortMedium, `{"reasoning_effort":"medium"}`},
+		{"messages high", msg, EffortHigh, `{"reasoning_effort":"high"}`},
+		{"messages xhigh", msg, EffortXHigh, `{"reasoning_effort":"xhigh"}`},
+		{"messages max", msg, EffortMax, `{"reasoning_effort":"max"}`},
+		{"messages old model", old, EffortHigh, `{}`},
+	}
+	for _, tc := range cases {
+		body := map[string]any{}
+		tc.c.applyReasoning(body, &ChatOpts{Effort: tc.e})
+		b, _ := json.Marshal(body)
+		if string(b) != tc.want {
+			t.Errorf("%s: %s, want %s", tc.name, b, tc.want)
+		}
+	}
+}
+
+// TestEffortBudgetOverridesLevelBudget: an explicit cap (aw4 sends 2500) beats
+// the budget the level implies, but never revives thinking that none turned off,
+// and the budget message rides with whichever budget goes out.
+func TestEffortBudgetOverridesLevelBudget(t *testing.T) {
+	n := 2500
+	body := map[string]any{}
+	llamaClient().applyReasoning(body, &ChatOpts{Effort: EffortMedium, ReasoningBudgetTokens: &n, ReasoningBudgetMessage: "stop"})
+	if body["reasoning_budget_tokens"] != 2500 || body["reasoning_budget_message"] != "stop" {
+		t.Errorf("llama override: %v", body)
+	}
+	body = map[string]any{}
+	llamaClient().applyReasoning(body, &ChatOpts{Effort: EffortNone, ReasoningBudgetTokens: &n})
+	if body["reasoning_budget_tokens"] != 0 {
+		t.Errorf("none must keep budget 0: %v", body)
+	}
+	body = map[string]any{}
+	claudeClient().applyReasoning(body, &ChatOpts{Effort: EffortHigh, ReasoningBudgetTokens: &n})
+	if th, _ := body["thinking"].(map[string]any); th["budget_tokens"] != 2500 {
+		t.Errorf("anthropic override: %v", body)
+	}
+}
+
+// The openai dialect sends the standard's values as given, off included.
 func TestReasoningDialect_OpenAISendsStandardValues(t *testing.T) {
 	c := NewClient("https://litellm.corp.example/v1", "", "glm")
 	c.SetReasoningDialect(DialectOpenAI)
-	for _, v := range []string{"none", "minimal", "low", "medium", "high", "xhigh"} {
+	for _, v := range []Effort{"none", "minimal", "low", "medium", "high", "xhigh"} {
 		body := map[string]any{}
-		c.applyReasoning(body, &ChatOpts{ReasoningEffort: v})
-		if body["reasoning_effort"] != v || len(body) != 1 {
+		c.applyReasoning(body, &ChatOpts{Effort: v})
+		if body["reasoning_effort"] != string(v) || len(body) != 1 {
 			t.Errorf("%s: %v", v, body)
 		}
-	}
-	body := map[string]any{}
-	c.applyReasoning(body, &ChatOpts{ReasoningEffort: "max"})
-	if len(body) != 0 {
-		t.Errorf("non-standard effort sent: %v", body)
 	}
 }

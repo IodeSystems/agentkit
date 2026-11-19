@@ -1558,23 +1558,16 @@ type ChatOpts struct {
 	// Anthropic ends thinking without saying so. Empty sends nothing.
 	ReasoningBudgetMessage string
 
-	// EnableThinking overrides the SERVER's default mode per request, via
-	// chat_template_kwargs. Needed because the server flag is only a default:
-	// Qwen3.8 ships thinking ON, a deployment may launch it with
-	// --reasoning off, and a caller that wants thinking has to ask for it.
-	//
-	// Meaningless to a template that does not read the kwarg, and unused on the
-	// Anthropic dialect, where a budget is itself the toggle.
-	EnableThinking *bool
-
-	// ReasoningEffort is "low", "medium" or "high" ("none": no thinking), for
-	// an endpoint that takes an effort rather than a budget. Sent by the
-	// openrouter and openai dialects and on the Messages API, where it is the
-	// ONLY reasoning field forwarded (EnableThinking and ReasoningBudgetTokens
-	// are ignored there). The llama.cpp dialect and Anthropic's OpenAI-compat
-	// dialect use EnableThinking and ReasoningBudgetTokens instead (see
-	// reasoning.go).
-	ReasoningEffort string
+	// Effort is how hard the model should think: the one reasoning level, in
+	// every dialect (effort.go has the table and the clamp by the capability
+	// record). EffortUnset sends nothing and leaves the server's default.
+	// ReasoningBudgetTokens above is a CAP on the token budget the level implies:
+	// with Effort set and a level budget, min(level, explicit); a level with no
+	// budget (llama.cpp high, the effort-field dialects) sends the explicit
+	// budget as before; explicit 0 caps at zero (llama.cpp budget 0,
+	// anthropic-compat no thinking block). With Effort unset the explicit budget
+	// is sent exactly as before. The level still decides on/off.
+	Effort Effort
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.
@@ -1583,6 +1576,11 @@ type ChatOpts struct {
 // are dialect-dependent, and the dialect is a property of the client (its model
 // and base URL), not of the options.
 func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
+	c.applySamplingWith(body, opts, c.Capabilities())
+}
+
+// applySamplingWith is applySampling with the record the level is resolved by.
+func (c *Client) applySamplingWith(body map[string]any, opts *ChatOpts, caps Capabilities) {
 	// OpenRouter caches Claude when asked, with one top-level field that it
 	// advances along the conversation. Its address only: a proxy in front of it
 	// may refuse the field.
@@ -1592,7 +1590,7 @@ func (c *Client) applySampling(body map[string]any, opts *ChatOpts) {
 	if opts == nil {
 		return
 	}
-	c.applyReasoning(body, opts)
+	c.applyReasoningWith(body, opts, caps)
 	if opts.Temperature != nil {
 		body["temperature"] = *opts.Temperature
 	}
@@ -1666,11 +1664,42 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 	if opts != nil && opts.ResponseFormat != nil {
 		body["response_format"] = opts.ResponseFormat
 	}
-	c.applySampling(body, opts)
-	if isRawProbe(ctx) {
+	// A raw probe resolves the level against the static table only: the probe
+	// is how the record gets made, and must not be shaped by it.
+	raw := isRawProbe(ctx)
+	caps := Capabilities{}
+	if !raw {
+		caps = c.Capabilities()
+	}
+	c.applySamplingWith(body, opts, caps)
+	if raw {
 		return body, nil
 	}
-	return body, c.translate(body, opts)
+	var trs []Translation
+	if opts != nil && opts.Effort != EffortUnset {
+		// Reported on every request that did not get the level it asked for,
+		// after the record's last lesson: the resend after a refusal rebuilds
+		// this body, so the new level is reported in the same call.
+		ch := EffortFor(c.dialect(), c.usesMessagesAPI(), c.model, caps, opts.Effort)
+		sent, reason := ch.Effective, ch.Reason
+		if sent != EffortUnset {
+			// What applyReasoningWith wrote for the budget dialects: a cap or a
+			// max_tokens reduction is a change the caller did not ask for.
+			if plan := budgetFor(c.dialect(), opts, sent, caps); plan.note != "" {
+				if plan.none {
+					sent = EffortNone
+				}
+				if reason != "" {
+					reason += "; "
+				}
+				reason += plan.note
+			}
+		}
+		if sent != ch.Wanted || reason != "" {
+			trs = append(trs, Translation{Key: "effort", Sent: string(sent), Wanted: string(ch.Wanted), Reason: reason})
+		}
+	}
+	return body, append(trs, c.translateWith(body, opts, caps)...)
 }
 
 // ChatStream sends a chat completion request with streaming enabled.

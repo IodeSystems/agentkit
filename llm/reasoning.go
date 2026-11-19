@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -66,44 +67,56 @@ func (c *Client) anthropicDetected() bool {
 // it from one place; adding a third body-builder without routing it through
 // there would silently lose the budget.
 func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
+	c.applyReasoningWith(body, opts, c.Capabilities())
+}
+
+// applyReasoningWith resolves opts.Effort with EffortFor against caps (empty
+// caps: the static table only, which is what a raw probe needs) and writes the
+// dialect's fields for the level that comes back. effort.go owns the table.
+//
+// ReasoningBudgetTokens is a CAP on the budget the level implies (budgetFor):
+// min(level, explicit). With no Effort the explicit budget alone is sent, as
+// before. A level with no budget (llama.cpp high) sends the explicit budget as
+// before. Not applied at none: a budget on a request that turned thinking off
+// contradicts it.
+func (c *Client) applyReasoningWith(body map[string]any, opts *ChatOpts, caps Capabilities) {
 	if opts == nil {
 		return
 	}
+	dialect := c.dialect()
+	eff := EffortFor(dialect, c.usesMessagesAPI(), c.model, caps, opts.Effort).Effective
 	if c.usesMessagesAPI() {
-		// The shim reads the effort and refuses nothing it does not know.
-		if opts.ReasoningEffort != "" {
-			body["reasoning_effort"] = opts.ReasoningEffort
+		// The shim reads the effort and refuses nothing it does not know; it
+		// forwards no budget.
+		if eff != EffortUnset {
+			body["reasoning_effort"] = string(eff)
 		}
 		return
 	}
-	switch c.dialect() {
+	switch dialect {
 	case DialectOpenRouter:
-		applyOpenRouterReasoning(body, opts)
+		applyOpenRouterReasoning(body, opts, eff)
 		return
 	case DialectOpenAI:
-		// The OpenAI Chat Completions values, sent as given: none, minimal,
-		// low, medium, high, xhigh. This is the most widely implemented form
-		// (Carl, 2026-11-07: use the most open standard), so off is "none".
-		// A model that refuses a value the standard defines (GLM-5.3 on
-		// Fireworks answers 400 to "none") is a capability gap to record per
-		// model, not something to paper over for every model here: the
-		// record's translation (translate, capabilities_learn.go) rewrites
-		// the value after this, in chatBody. Anything else is dropped: a llama.cpp
-		// template refuses an effort it does not know (measured: Qwen3.8
-		// answered 500 to "high"), which is why this dialect is named, never
-		// detected.
-		switch opts.ReasoningEffort {
-		case "none", "minimal", "low", "medium", "high", "xhigh":
-			body["reasoning_effort"] = opts.ReasoningEffort
+		// The OpenAI Chat Completions values: none, minimal, low, medium, high,
+		// xhigh (Carl, 2026-11-07: use the most open standard), so off is
+		// "none". A model that refuses a value the standard defines (GLM-5.3 on
+		// Fireworks answers 400 to "none") is a capability gap the record
+		// holds, and EffortFor clamps by it. This dialect is named, never
+		// detected: a llama.cpp template refuses an effort it does not know
+		// (measured: Qwen3.8 answered 500 to "high").
+		if eff != EffortUnset {
+			body["reasoning_effort"] = string(eff)
 		}
 		return
 	}
-	anth := c.anthropicDialect()
+	anth := dialect == DialectAnthropic
 
-	// Anthropic has no separate thinking toggle: the presence of a `thinking`
-	// block with a budget IS the toggle, so EnableThinking alone cannot be
-	// expressed and is folded into the budget branch below.
-	if opts.EnableThinking != nil && !anth {
+	// Anthropic has no separate thinking toggle: a `thinking` block with a
+	// budget IS the toggle, and none is the absence of the block.
+	plan := budgetFor(dialect, opts, eff, caps)
+	budget, hasBudget := plan.budget, plan.has
+	if eff != EffortUnset && !anth {
 		// chat_template_kwargs is a passthrough to the server's Jinja template,
 		// so this only means anything to a template that reads it (Qwen3.x
 		// does). Merged rather than assigned: a caller may already have put
@@ -112,27 +125,24 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 		if kw == nil {
 			kw = map[string]any{}
 		}
-		kw["enable_thinking"] = *opts.EnableThinking
+		kw["enable_thinking"] = eff != EffortNone
 		body["chat_template_kwargs"] = kw
 	}
-
-	if opts.ReasoningBudgetTokens == nil {
+	if !hasBudget {
 		return
 	}
-	n := *opts.ReasoningBudgetTokens
 
 	if anth {
 		// A non-positive budget is "no budget" here, not "think for zero
 		// tokens": Anthropic rejects budget_tokens < 1, and llama.cpp's 0
-		// ("end immediately") has no equivalent. Emitting nothing leaves the
-		// account default in charge, which is the closest honest mapping.
-		if n > 0 {
-			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": n}
+		// ("end immediately") has no equivalent.
+		if budget > 0 {
+			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 		}
 		return
 	}
 
-	body["reasoning_budget_tokens"] = n
+	body["reasoning_budget_tokens"] = budget
 	if opts.ReasoningBudgetMessage != "" {
 		// Worth sending on every budgeted request. The cut is HARD: measured on
 		// Qwen3.8-27B, reasoning stopped mid-word and the message was appended
@@ -145,19 +155,89 @@ func (c *Client) applyReasoning(body map[string]any, opts *ChatOpts) {
 	}
 }
 
-// applyOpenRouterReasoning is OpenRouter's `reasoning` object: off, a
-// token budget, an effort, or on; nothing when opts asks for none of them.
-func applyOpenRouterReasoning(body map[string]any, opts *ChatOpts) {
-	off := opts.ReasoningEffort == "none" || (opts.EnableThinking != nil && !*opts.EnableThinking)
+// budgetPlan is the token budget a budget dialect (llama.cpp, anthropic-compat)
+// sends for a level, after the explicit cap and Anthropic's max_tokens rule.
+type budgetPlan struct {
+	budget int
+	has    bool
+	// none: thinking ends up off although a level was resolved (no room under
+	// max_tokens, or an explicit cap of zero on anthropic-compat).
+	none bool
+	// note says each reduction, for the effort Translation's Reason; "" when
+	// the budget is the level's own.
+	note string
+}
+
+// budgetFor resolves the budget for eff. Pure: chatBody calls it again to
+// report what applyReasoningWith wrote.
+//
+//   - No Effort: the explicit ReasoningBudgetTokens alone, as before the level
+//     existed (byte-identical for a caller that never sets Effort).
+//   - Effort with a level budget: min(level, explicit). The explicit value is a
+//     cap, never a raise; a negative one ("disabled") caps nothing.
+//   - Effort with no level budget (llama.cpp high): the explicit budget, as before.
+//   - none: no explicit budget; it contradicts "off".
+//   - anthropic-compat: budget_tokens must be below max_tokens. The smaller of
+//     opts.MaxTokens and the record's output limit is the ceiling; a budget at
+//     or above it becomes ceiling-1 when that is >= 1024 (Anthropic's floor),
+//     else no thinking block at all. An explicit cap of 0 is no block either.
+func budgetFor(dialect string, opts *ChatOpts, eff Effort, caps Capabilities) budgetPlan {
+	var p budgetPlan
+	if opts == nil || (dialect != DialectLlamaCpp && dialect != DialectAnthropic) {
+		return p
+	}
+	p.budget, p.has = effortBudget(dialect, eff)
+	var notes []string
+	if ex := opts.ReasoningBudgetTokens; ex != nil && eff != EffortNone {
+		switch {
+		case eff == EffortUnset || !p.has:
+			p.budget, p.has = *ex, true
+		case *ex >= 0 && *ex < p.budget:
+			notes = append(notes, fmt.Sprintf("budget %d capped to %d by ReasoningBudgetTokens", p.budget, *ex))
+			p.budget = *ex
+		}
+	}
+	if dialect == DialectAnthropic && eff != EffortUnset && p.has {
+		if p.budget <= 0 {
+			p.has, p.none = false, true
+			notes = append(notes, "none (ReasoningBudgetTokens 0 caps thinking at zero)")
+		} else if lim := maxTokensCeiling(opts, caps); lim > 0 && p.budget >= lim {
+			if lim-1 >= minAnthropicBudget {
+				notes = append(notes, fmt.Sprintf("budget %d reduced to %d (max_tokens %d)", p.budget, lim-1, lim))
+				p.budget = lim - 1
+			} else {
+				p.has, p.none = false, true
+				notes = append(notes, fmt.Sprintf("none (max_tokens %d leaves no room for thinking)", lim))
+			}
+		}
+	}
+	p.note = strings.Join(notes, "; ")
+	return p
+}
+
+// minAnthropicBudget is the smallest budget_tokens Anthropic accepts.
+const minAnthropicBudget = 1024
+
+// maxTokensCeiling is the smaller of the request's max_tokens and the record's
+// output limit, 0 when neither is known.
+func maxTokensCeiling(opts *ChatOpts, caps Capabilities) int {
+	lim := opts.MaxTokens
+	if o, ok := caps.OutputLimit(); ok && o > 0 && (lim <= 0 || o < lim) {
+		lim = o
+	}
+	return lim
+}
+
+// applyOpenRouterReasoning is OpenRouter's `reasoning` object for the resolved
+// level: off, an explicit token cap, or the effort (native, decision 2).
+func applyOpenRouterReasoning(body map[string]any, opts *ChatOpts, eff Effort) {
 	switch {
-	case off:
+	case eff == EffortNone:
 		body["reasoning"] = map[string]any{"enabled": false}
 	case opts.ReasoningBudgetTokens != nil && *opts.ReasoningBudgetTokens > 0:
 		body["reasoning"] = map[string]any{"max_tokens": *opts.ReasoningBudgetTokens}
-	case opts.ReasoningEffort != "":
-		body["reasoning"] = map[string]any{"effort": opts.ReasoningEffort}
-	case opts.EnableThinking != nil:
-		body["reasoning"] = map[string]any{"enabled": true}
+	case eff != EffortUnset:
+		body["reasoning"] = map[string]any{"effort": string(eff)}
 	}
 }
 
@@ -211,7 +291,7 @@ func (c *Client) AutoReasoningBudget(ctx context.Context, system string, tools [
 // WithAutoReasoningBudget fills in ReasoningBudgetTokens on opts when it is
 // unset, leaving a caller's explicit budget alone.
 //
-// Deliberately does NOT set EnableThinking. Whether to think is a decision about
+// Deliberately does NOT set Effort. Whether to think is a decision about
 // the task; how long to think is a decision about the window, and only the
 // second one is arithmetic this package can do.
 func (c *Client) WithAutoReasoningBudget(ctx context.Context, opts *ChatOpts, system string, tools []ToolDef, reserve int) *ChatOpts {

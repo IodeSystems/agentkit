@@ -67,7 +67,7 @@ func TestMessagesAPI_TextAndUsage(t *testing.T) {
 	c.OnUsage = func(u Usage) { saw = u }
 	var text string
 	var u *Usage
-	for _, chunk := range msgChunks(t, c, []Message{{Role: "system", Content: "S"}, {Role: "user", Content: "hi"}}, &ChatOpts{ReasoningEffort: "none"}) {
+	for _, chunk := range msgChunks(t, c, []Message{{Role: "system", Content: "S"}, {Role: "user", Content: "hi"}}, &ChatOpts{Effort: "none"}) {
 		text += chunk.Content
 		if chunk.Usage != nil {
 			u = chunk.Usage

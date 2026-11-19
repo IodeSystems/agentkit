@@ -83,24 +83,20 @@ func reasoningCutNotice(reasoning string) string {
 		"\nDo not reason again. Answer now: make a tool call or give your final answer."
 }
 
-// reasoningOff returns a copy of o with every reasoning knob set to its "off"
-// form. One setting per dialect reads what it understands and ignores the rest:
-// ReasoningEffort "none" (openai, openrouter, the Messages API; the capability
-// record rewrites it per model in translateEffort, so a model that refuses
-// "none" gets the lowest effort it accepts), EnableThinking=false (llama.cpp
-// chat_template_kwargs; OpenRouter reads it too), and a budget of 0. llama.cpp
-// reads 0 as "end thinking immediately", which holds even for a template that
-// ignores enable_thinking; the Anthropic dialect sends no thinking block for a
-// budget below 1, which is off there; OpenRouter's off wins over a budget.
+// reasoningOff returns a copy of o with the effort set to none and the host's
+// budget cleared. llm maps none per dialect (llama.cpp: enable_thinking false
+// and budget 0, which ends thinking at once even for a template that ignores
+// the flag; Anthropic: no thinking block; openai/openrouter: their off form)
+// and clamps it by the capability record, so a thinking-only model gets the
+// lowest effort it accepts instead of a certain 400. A host budget is cleared
+// because it is a cap on thinking, and this round asks for none.
 func reasoningOff(o *llm.ChatOpts) *llm.ChatOpts {
 	var c llm.ChatOpts
 	if o != nil {
 		c = *o
 	}
-	off, zero := false, 0
-	c.ReasoningEffort = "none"
-	c.EnableThinking = &off
-	c.ReasoningBudgetTokens = &zero
+	c.Effort = llm.EffortNone
+	c.ReasoningBudgetTokens = nil
 	c.ReasoningBudgetMessage = ""
 	return &c
 }

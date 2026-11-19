@@ -126,6 +126,12 @@ func TestRefusalPatternsTeachOnlyWhatTheBodyNames(t *testing.T) {
 		{"thinking is required, effort low", 400,
 			`{"error":{"message":"thinking is required for this model"}}`,
 			map[string]any{"reasoning_effort": "low"}, map[string]string{CapReasoningThinkingOnly: "true"}},
+		{"reasoning is mandatory, alone", 400,
+			`{"error":{"message":"Reasoning is mandatory for this model."}}`,
+			map[string]any{"reasoning_effort": "low"}, map[string]string{CapReasoningThinkingOnly: "true"}},
+		{"reasoning is required, alone", 400,
+			`{"error":{"message":"reasoning is required"}}`,
+			map[string]any{"reasoning_effort": "low"}, map[string]string{CapReasoningThinkingOnly: "true"}},
 		{"escaped json in json", 400,
 			`{"error":{"message":"{\"error\":{\"message\":\"Unsupported parameter: 'temperature'\"}}"}}`,
 			none, map[string]string{"sampling.temperature": "refused"}},
@@ -180,7 +186,7 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 	c.OnLearn = func(l Learned) { learned = append(learned, l) }
 	c.OnTranslate = func(tr Translation) { trs = append(trs, tr) }
 	ctx := context.Background()
-	off := &ChatOpts{ReasoningEffort: "none"}
+	off := &ChatOpts{Effort: "none"}
 
 	if _, _, err := c.ChatWithOpts(ctx, []Message{{Role: "user", Content: "hi"}}, nil, off); err == nil {
 		t.Fatal("first request: want the 400 back, got nil")
@@ -206,7 +212,8 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 	if got := sent[1]["reasoning_effort"]; got != "minimal" {
 		t.Fatalf("second request sent %v, want minimal", got)
 	}
-	if len(trs) != 1 || trs[0] != (Translation{Key: "reasoning_effort", Sent: "minimal", Wanted: "none"}) {
+	if len(trs) != 1 || trs[0].Key != "effort" || trs[0].Sent != "minimal" || trs[0].Wanted != "none" ||
+		!strings.Contains(trs[0].Reason, "thinking_only") {
 		t.Fatalf("translations = %+v", trs)
 	}
 	if acc, _ := c.Capabilities().AcceptedEfforts(); fmt.Sprint(acc) != "[minimal]" {
@@ -218,7 +225,7 @@ func TestHostPinnedOffIsSentAndNeverOverwritten(t *testing.T) {
 	srv := newCapServer(t, func(int, map[string]any) (int, string) { return 400, glmRefusal })
 	c := openaiClient(srv.URL)
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningOff: fact("low", SourceHost)}})
-	_, _, _ = c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{ReasoningEffort: "none"})
+	_, _, _ = c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
 	if got := srv.sent()[0]["reasoning_effort"]; got != "low" {
 		t.Fatalf("sent %v, want the pinned low", got)
 	}
@@ -247,10 +254,14 @@ func TestTranslateEffortLadder(t *testing.T) {
 		{"none", caps(CapReasoningThinkingOnly, "true"), "minimal"},
 		{"none", caps(CapReasoningOff, "low", CapReasoningEffortsRefused, "none"), "low"},
 		{"minimal", caps(CapReasoningEffortsRefused, "minimal,low"), "medium"},
-		{"high", caps(CapReasoningEffortsRefused, "high"), "xhigh"},
+		{"high", caps(CapReasoningEffortsRefused, "high"), "medium"},
+		{"low", caps(CapReasoningEffortsRefused, "minimal,low,medium"), "high"},
+		{"medium", caps(CapReasoningEffortsRefused, "none,minimal,low,medium"), "high"},
 		{"xhigh", caps(CapReasoningEffortsRefused, "high,xhigh"), "medium"},
 		{"low", caps(CapReasoningEffortsRefused, "none"), "low"},
-		{"max", caps(CapReasoningEffortsRefused, "max"), "max"},
+		{"max", caps(CapReasoningEffortsRefused, "max"), "xhigh"},
+		{"max", caps(), "max"},
+		{"banana", caps(), "banana"},
 	}
 	for _, tc := range cases {
 		if got := translateEffort(tc.want, tc.caps); got != tc.send {
@@ -261,7 +272,7 @@ func TestTranslateEffortLadder(t *testing.T) {
 
 func TestEmptyRecordTranslatesNothing(t *testing.T) {
 	c := openaiClient("http://x/v1")
-	body, trs := c.chatBody(context.Background(), nil, nil, &ChatOpts{ReasoningEffort: "none", MaxTokens: 50}, false)
+	body, trs := c.chatBody(context.Background(), nil, nil, &ChatOpts{Effort: "none", MaxTokens: 50}, false)
 	if trs != nil || body["reasoning_effort"] != "none" || body["max_tokens"] != 50 {
 		t.Fatalf("body changed by an empty record: %v %v", body, trs)
 	}
@@ -284,7 +295,7 @@ func TestOutputLimitCapsMaxTokens(t *testing.T) {
 func TestRefusedEffortFieldIsDropped(t *testing.T) {
 	c := openaiClient("http://x/v1")
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{"sampling.reasoning_effort": fact("refused", SourceRefused)}})
-	body, trs := c.chatBody(context.Background(), nil, nil, &ChatOpts{ReasoningEffort: "low"}, false)
+	body, trs := c.chatBody(context.Background(), nil, nil, &ChatOpts{Effort: "low"}, false)
 	if _, ok := body["reasoning_effort"]; ok || len(trs) != 1 || trs[0].Sent != "" || trs[0].Wanted != "low" {
 		t.Fatalf("body %v translations %+v", body, trs)
 	}
@@ -295,9 +306,11 @@ func TestRefusedEffortFieldIsDropped(t *testing.T) {
 func TestMessagesAPIOffIsTranslatedToo(t *testing.T) {
 	c := NewClient("https://api.anthropic.com", "k", "claude-x")
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningEffortsRefused: fact("none", SourceRefused)}})
-	body, _ := c.chatBody(context.Background(), nil, nil, &ChatOpts{ReasoningEffort: "none"}, false)
-	if body["reasoning_effort"] != "minimal" {
-		t.Fatalf("sent %v, want minimal", body["reasoning_effort"])
+	body, _ := c.chatBody(context.Background(), nil, nil, &ChatOpts{Effort: "none"}, false)
+	// The Messages API has no none and no minimal: both are low (the shim does
+	// the same), so the refusal of none no longer decides the level.
+	if body["reasoning_effort"] != "low" {
+		t.Fatalf("sent %v, want low", body["reasoning_effort"])
 	}
 }
 
@@ -308,16 +321,16 @@ func TestAcceptedEffortsAreDedupedInLadderOrder(t *testing.T) {
 	n := 0
 	c.OnLearn = func(Learned) { n++ }
 	for _, e := range []string{"high", "low", "xhigh", "low"} {
-		// "high" is refused, so it goes out as xhigh.
-		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{ReasoningEffort: e}); err != nil {
+		// "high" is refused, so it goes out as medium (lower first).
+		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: Effort(e)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if acc, _ := c.Capabilities().AcceptedEfforts(); fmt.Sprint(acc) != "[low xhigh]" {
+	if acc, _ := c.Capabilities().AcceptedEfforts(); fmt.Sprint(acc) != "[low medium xhigh]" {
 		t.Fatalf("accepted = %v", acc)
 	}
-	if n != 2 {
-		t.Fatalf("OnLearn fired %d times, want 2 (a repeat confirmation is quiet)", n)
+	if n != 3 {
+		t.Fatalf("OnLearn fired %d times, want 3 (a repeat confirmation is quiet)", n)
 	}
 }
 
@@ -450,7 +463,7 @@ func TestResendOnRefusal(t *testing.T) {
 		}
 		return 200, okReply
 	}
-	off := &ChatOpts{ReasoningEffort: "none"}
+	off := &ChatOpts{Effort: "none"}
 	msgs := []Message{{Role: "user", Content: "hi"}}
 
 	t.Run("off: the refusal is returned, one request", func(t *testing.T) {
@@ -629,12 +642,11 @@ func TestPromptCacheKeyRefusalOnAccountStatusTeachesNothing(t *testing.T) {
 // A thinking-only model refuses EVERY off form, not just reasoning_effort. Each
 // form left on the wire makes the retry the same 400 (Gemini behind a
 // llama.cpp-dialect proxy).
-func TestThinkingOnlyDropsEnableThinkingFalse(t *testing.T) {
+func TestThinkingOnlyDropsTemplateKwargThinkingOff(t *testing.T) {
 	c := openaiClient("http://x")
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningThinkingOnly: fact("true", SourceRefused)}})
-	f := false
 	body := map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}
-	trs := c.translate(body, &ChatOpts{EnableThinking: &f})
+	trs := c.translate(body, nil)
 	if _, ok := body["chat_template_kwargs"]; ok || len(trs) != 1 || trs[0].Key != "chat_template_kwargs.enable_thinking" {
 		t.Fatalf("body %v, translations %v", body, trs)
 	}
@@ -679,7 +691,7 @@ func TestThinkingOnlyRewritesReasoningEnabledFalseToLowestEffort(t *testing.T) {
 	// Nothing chosen: every rung refused.
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{
 		CapReasoningThinkingOnly:   fact("true", SourceRefused),
-		CapReasoningEffortsRefused: fact("minimal,low,medium,high,xhigh", SourceRefused),
+		CapReasoningEffortsRefused: fact("minimal,low,medium,high,xhigh,max", SourceRefused),
 	}})
 	body = map[string]any{"reasoning": map[string]any{"enabled": false}}
 	c.translate(body, nil)
@@ -712,8 +724,7 @@ func TestThinkingMandatoryRefusalIsLearnedAndResentWithoutOffField(t *testing.T)
 	})
 	c := NewClient(srv.URL, "k", "gemini")
 	c.SetReasoningDialect(DialectLlamaCpp)
-	f := false
-	off := &ChatOpts{EnableThinking: &f}
+	off := &ChatOpts{Effort: EffortNone}
 	msgs := []Message{{Role: "user", Content: "hi"}}
 	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
 		t.Fatalf("one call must succeed through the resend: %v", err)
@@ -725,7 +736,58 @@ func TestThinkingMandatoryRefusalIsLearnedAndResentWithoutOffField(t *testing.T)
 	if len(sent) != 2 {
 		t.Fatalf("requests = %d, want 2 (refused, resent)", len(sent))
 	}
-	if _, ok := sent[1]["chat_template_kwargs"]; ok {
+	// The resend clamps none to minimal: thinking on, 512-token budget.
+	if kw, _ := sent[1]["chat_template_kwargs"].(map[string]any); kw["enable_thinking"] != true {
 		t.Fatalf("off field still sent on the resend: %v", sent[1])
+	}
+	if sent[1]["reasoning_budget_tokens"] != float64(512) {
+		t.Fatalf("resend budget = %v, want 512 (minimal)", sent[1]["reasoning_budget_tokens"])
+	}
+}
+
+// N6, end to end: a thinking-only model refuses none. ONE Chat call with
+// Effort none shows the lesson (OnLearn), then the clamp (OnTranslate "effort",
+// Effective minimal, with a reason that names the fact), then the 200 from the
+// default resend. Order is the contract: a host reads "learned, so now this".
+func TestThinkingOnlyRefusalIsLearnedThenReportedAsEffortClampThenServed(t *testing.T) {
+	srv := newCapServer(t, func(_ int, b map[string]any) (int, string) {
+		if b["reasoning_effort"] == "none" {
+			return 400, glmRefusal
+		}
+		return 200, okReply
+	})
+	c := openaiClient(srv.URL)
+	var events []string
+	var eff []Translation
+	c.OnLearn = func(l Learned) { events = append(events, "learn:"+l.Key) }
+	c.OnTranslate = func(tr Translation) {
+		events = append(events, "translate:"+tr.Key)
+		if tr.Key == "effort" {
+			eff = append(eff, tr)
+		}
+	}
+	if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: EffortNone}); err != nil {
+		t.Fatalf("one call must succeed through the resend: %v", err)
+	}
+	if n := len(srv.sent()); n != 2 {
+		t.Fatalf("requests = %d, want 2", n)
+	}
+	if srv.sent()[1]["reasoning_effort"] != "minimal" {
+		t.Fatalf("resend sent %v, want minimal", srv.sent()[1]["reasoning_effort"])
+	}
+	if len(eff) != 1 || eff[0].Wanted != "none" || eff[0].Sent != "minimal" || !strings.Contains(eff[0].Reason, CapReasoningThinkingOnly) {
+		t.Fatalf("effort translations = %+v", eff)
+	}
+	firstLearn, firstEffort := -1, -1
+	for i, e := range events {
+		if strings.HasPrefix(e, "learn:") && firstLearn < 0 {
+			firstLearn = i
+		}
+		if e == "translate:effort" && firstEffort < 0 {
+			firstEffort = i
+		}
+	}
+	if firstLearn < 0 || firstEffort < firstLearn {
+		t.Fatalf("want OnLearn before the effort translation, got %v", events)
 	}
 }

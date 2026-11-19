@@ -134,8 +134,7 @@ func TestRepairRoundSendsReasoningOffAndOnlyThatRound(t *testing.T) {
 		{{Content: "end"}},
 	}}
 	budget := 2500
-	on := true
-	host := &llm.ChatOpts{ReasoningBudgetTokens: &budget, EnableThinking: &on, ReasoningEffort: "high"}
+	host := &llm.ChatOpts{ReasoningBudgetTokens: &budget, Effort: llm.EffortHigh}
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 6, ChatOpts: host,
 		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
 	if _, err := s.Turn(context.Background()); err != nil {
@@ -145,16 +144,16 @@ func TestRepairRoundSendsReasoningOffAndOnlyThatRound(t *testing.T) {
 		t.Fatalf("rounds = %d", len(runner.opts))
 	}
 	r := runner.opts[1]
-	if r.ReasoningEffort != "none" || r.EnableThinking == nil || *r.EnableThinking || r.ReasoningBudgetTokens == nil || *r.ReasoningBudgetTokens != 0 {
+	if r.Effort != llm.EffortNone || r.ReasoningBudgetTokens != nil {
 		t.Errorf("repair round opts = %+v, want reasoning off", r)
 	}
 	for _, i := range []int{0, 2} {
 		o := runner.opts[i]
-		if o.ReasoningEffort != "high" || o.EnableThinking == nil || !*o.EnableThinking || o.ReasoningBudgetTokens == nil {
+		if o.Effort != llm.EffortHigh || o.ReasoningBudgetTokens == nil {
 			t.Errorf("round %d opts = %+v, want the host's", i, o)
 		}
 	}
-	if s.ChatOpts != host || host.ReasoningEffort != "high" || *host.EnableThinking != true || host.ReasoningBudgetTokens == nil {
+	if s.ChatOpts != host || host.Effort != llm.EffortHigh || host.ReasoningBudgetTokens == nil {
 		t.Errorf("s.ChatOpts was mutated: %+v", host)
 	}
 }

@@ -180,7 +180,7 @@ type effortSample struct {
 func sampleEffort(ctx context.Context, c *Client, eff string) (effortSample, error) {
 	s := effortSample{effort: eff}
 	ch, err := c.ChatStream(ctx, []Message{{Role: "user", Content: "Reply with the word ok."}}, nil,
-		&ChatOpts{ReasoningEffort: eff, MaxTokens: 256})
+		&ChatOpts{Effort: Effort(eff), MaxTokens: 256})
 	if err != nil {
 		return s, err
 	}

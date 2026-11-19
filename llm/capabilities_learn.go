@@ -12,8 +12,11 @@
 //     knows teaches nothing.
 //   - Translation: translate rewrites the outgoing body by the record (an off
 //     request becomes the effort the model accepts; a refused effort becomes
-//     the nearest one above it; a known output limit caps max_tokens). Every
-//     change is reported through OnTranslate, so it is never silent.
+//     the nearest one below it, then above; a known output limit caps max_tokens). Every
+//     change is reported through OnTranslate, so it is never silent. The effort
+//     clamp itself lives in effort.go (EffortFor); chatBody applies it for every
+//     dialect, and translate applies the same core to a raw body's
+//     reasoning_effort (a proxy's passthrough).
 //
 // A refusal that changed the translated bytes is sent once more, translated
 // (at most once per call); Client.NoResendOnRefusal turns that off.
@@ -36,9 +39,12 @@ import (
 // Translation is one request field the capability record changed on the way
 // out. Reported through Client.OnTranslate just before the request is sent.
 type Translation struct {
-	Key    string // the request field that changed: reasoning_effort, max_tokens, prompt_cache_key
+	Key    string
 	Sent   string // what went on the wire; "" when the field was dropped
 	Wanted string // what the caller asked for; "" when it asked for nothing
+	// Reason says why, for the "effort" key (EffortChoice.Reason); "" for the
+	// keys whose change is the record's plain rule.
+	Reason string
 }
 
 // effortLadder is the OpenAI Chat Completions reasoning_effort values, lowest
@@ -71,13 +77,17 @@ const (
 // never set. An empty record changes nothing: a host with no record sends
 // exactly the bytes it sent before this file existed.
 func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
-	c.caps.mu.Lock()
-	if len(c.caps.facts) == 0 {
-		c.caps.mu.Unlock()
+	return c.translateWith(body, opts, c.Capabilities())
+}
+
+// translateWith is translate against a record the caller already took, so one
+// request is shaped and reported by ONE snapshot: chatBody resolves the level
+// and then translates, and a fact learned by a concurrent request between two
+// snapshots would make the two passes disagree.
+func (c *Client) translateWith(body map[string]any, opts *ChatOpts, caps Capabilities) []Translation {
+	if len(caps.Facts) == 0 {
 		return nil
 	}
-	caps := Capabilities{Facts: copyFacts(c.caps.facts)}
-	c.caps.mu.Unlock()
 
 	var out []Translation
 	if want, ok := body["reasoning_effort"].(string); ok {
@@ -86,8 +96,13 @@ func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
 			delete(body, "reasoning_effort")
 			out = append(out, Translation{Key: "reasoning_effort", Wanted: want})
 		} else if send := translateEffort(want, caps); send != want {
-			body["reasoning_effort"] = send
-			out = append(out, Translation{Key: "reasoning_effort", Sent: send, Wanted: want})
+			if send == "" {
+				delete(body, "reasoning_effort")
+			} else {
+				body["reasoning_effort"] = send
+			}
+			out = append(out, Translation{Key: "reasoning_effort", Sent: send, Wanted: want,
+				Reason: EffortFor("", false, "", caps, Effort(want)).Reason})
 		}
 	}
 	if only, ok := caps.ThinkingOnly(); ok && only {
@@ -147,7 +162,7 @@ func translateOffForms(body map[string]any, caps Capabilities) []Translation {
 	}
 	if r, ok := body["reasoning"].(map[string]any); ok {
 		if v, ok := r["enabled"].(bool); ok && !v {
-			if send := translateEffort("none", caps); send != "none" {
+			if send := translateEffort("none", caps); send != "none" && send != "" {
 				body["reasoning"] = map[string]any{"effort": send}
 				out = append(out, Translation{Key: "reasoning.enabled", Sent: send, Wanted: "false"})
 			} else {
@@ -171,58 +186,15 @@ func isZeroNumber(v any) bool {
 	return false
 }
 
-// translateEffort is the effort to send for want under caps.
-//
-// Off ("none") sends reasoning.off when the record knows it: that is the host's
-// pin or what was learned to work. Otherwise, when "none" is refused (or the
-// model is thinking-only), it sends the LOWEST effort not refused — the closest
-// honest reading of "think as little as you can". Sending nothing instead would
-// leave the model's default, which on GLM-5.3 is the most thinking (median 791
-// reasoning tokens against 103 at low).
-//
-// Any other refused effort becomes the nearest one ABOVE it that is not
-// refused (accepted or unknown): the caller asked for at least that much
-// thinking. Only when nothing above is left does it go below, never down to
-// "none" — a known refusal sent again is a certain failure, and "none" would
-// change what was asked for into off. A value off the ladder is left alone.
+// translateEffort is the effort to send for want under caps: the clamp of
+// EffortFor on a raw body (no dialect row, every level passes as itself), so a
+// proxy's passthrough and a Client's own request resolve a level the same way.
+// A value that is not a level is left alone. "" means nothing is left to send.
 func translateEffort(want string, caps Capabilities) string {
-	refused := map[string]bool{}
-	list, _ := caps.RefusedEfforts()
-	for _, e := range list {
-		refused[e] = true
-	}
-	if only, ok := caps.ThinkingOnly(); ok && only {
-		refused["none"] = true
-	}
-	if want == "none" {
-		if off, ok := caps.OffEffort(); ok {
-			return off
-		}
-		if !refused["none"] {
-			return "none"
-		}
-		for _, e := range effortLadder[1:] {
-			if !refused[e] {
-				return e
-			}
-		}
+	if effortIndex(Effort(want)) < 0 {
 		return want
 	}
-	i := effortRank(want)
-	if !refused[want] || i == len(effortLadder) {
-		return want
-	}
-	for j := i + 1; j < len(effortLadder); j++ {
-		if !refused[effortLadder[j]] {
-			return effortLadder[j]
-		}
-	}
-	for j := i - 1; j >= 1; j-- {
-		if !refused[effortLadder[j]] {
-			return effortLadder[j]
-		}
-	}
-	return want
+	return string(EffortFor("", false, "", caps, Effort(want)).Effective)
 }
 
 func (c *Client) reportTranslations(trs []Translation) {
@@ -699,7 +671,10 @@ func clip(s string, n int) string {
 // The rest are wordings of the same refusal reported for other providers and
 // not captured here. Shared by traffic learning and ProbeCapabilities, so the
 // two never disagree about the same body.
-var thinkingOnlyRe = regexp.MustCompile(`(?i)thinking[- ]only|disabling (?:thinking|reasoning)[^.]{0,60}?not supported|(?:thinking|reasoning)[\w\s]{0,40}?(?:cannot|can ?not|can't) be (?:disabled|turned off|switched off)|(?:thinking|reasoning) (?:is|must be) (?:required|enabled|always on)|(?:cannot|can ?not|can't|does not support|doesn't support) (?:disabl(?:e|ing)|turn(?:ing)? off) (?:thinking|reasoning)`)
+// "Reasoning is mandatory for this endpoint and cannot be disabled" (Gemini
+// behind a llama.cpp proxy) and a bare "reasoning is required" both match on the
+// is/must-be alternative, with no "cannot be disabled" needed.
+var thinkingOnlyRe = regexp.MustCompile(`(?i)thinking[- ]only|disabling (?:thinking|reasoning)[^.]{0,60}?not supported|(?:thinking|reasoning)[\w\s]{0,40}?(?:cannot|can ?not|can't) be (?:disabled|turned off|switched off)|(?:thinking|reasoning) (?:is|must be) (?:required|mandatory|enabled|always on)|(?:cannot|can ?not|can't|does not support|doesn't support) (?:disabl(?:e|ing)|turn(?:ing)? off) (?:thinking|reasoning)`)
 
 // bodyInt reads a numeric body field whether chatBody put it there (int) or it
 // was decoded from a caller's JSON (float64, or json.Number with UseNumber).
