@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -930,36 +931,41 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		lines[i] = fmt.Sprintf("%d. [%s] %s\n", i+1, label, e.Content)
 	}
 
-	// Single-stage prefix path: the fold fits in one request AND the session
-	// prefix is set. The request is the session's system + the foldable history
-	// rendered as messages + the summary instruction as the final user message,
-	// with the session's tools and tool_choice "none" — so the provider cache
-	// prefix is warm and the uncached input is the summary instruction only.
-	// A staged fold (history larger than the window) keeps the worker prompt.
-	totalEventTokens := 0
-	for _, line := range lines {
-		totalEventTokens += sh.Estimate.Estimate(line)
-	}
-	if sh.SessionPrefix.System != "" && (limit == 0 || totalEventTokens <= limit) {
-		msgs := groupMessages(sh.SessionPrefix.System, entries,
-			func(_ int, e Entry) string { return e.Content },
-			sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
-		msgs = append(msgs, llm.Message{Role: "user", Content: header})
-		out, err := sh.summaryCallWithPrefix(ctx, msgs, budget, cacheKey)
-		if err == nil {
-			return out, nil
+	// Prefix path: the first request carries the session's own prefix (its
+	// system, its tools, the history as messages, tool_choice "none") and the
+	// session's cache key, so the provider reads that part from its cache and
+	// the uncached input is the summary instruction. When the whole fold fits,
+	// that one request is the fold. When it does not, it covers the longest
+	// head of the history that fits, and the staged worker-prompt loop folds
+	// the rest on top of its summary. Only the first request can match the
+	// cache: every later one carries a running summary the session never sent.
+	// A fold is triggered near the budget, so most real folds are this split
+	// case; sending only whole folds this way left most folds uncached.
+	var summary string
+	start := 0
+	if sh.SessionPrefix.System != "" {
+		if cut := sh.prefixCut(entries, lines, header, budget, window); cut > 0 {
+			msgs := groupMessages(sh.SessionPrefix.System, entries[:cut],
+				func(_ int, e Entry) string { return e.Content },
+				sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
+			msgs = append(msgs, llm.Message{Role: "user", Content: header})
+			out, err := sh.summaryCallWithPrefix(ctx, msgs, budget, cacheKey)
+			var tooLarge *llm.InputTooLargeError
+			switch {
+			case err == nil && cut == len(entries):
+				return out, nil
+			case err == nil:
+				summary, start = out, cut
+			case !errors.As(err, &tooLarge):
+				return "", summarizeErr(ctx, err)
+			}
+			// Refused as too large: the estimate was wrong. The staged loop
+			// starts from the first event and shrinks its stages itself.
 		}
-		var tooLarge *llm.InputTooLargeError
-		if !errors.As(err, &tooLarge) {
-			return "", summarizeErr(ctx, err)
-		}
-		// The endpoint refused the full history. Fall through to the staged
-		// worker-prompt loop, which shrinks the input.
 	}
 
-	var summary string
 	shrunk := false
-	for next := 0; next < len(lines); {
+	for next := start; next < len(lines); {
 		var b strings.Builder
 		b.WriteString(header)
 		room := limit
@@ -1008,6 +1014,57 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 		return "", fmt.Errorf("agent/shaper: model returned empty summary")
 	}
 	return summary, nil
+}
+
+// prefixCut is how many leading entries the prefix request can carry: the
+// longest head whose events fit the window beside the SESSION's fixed part
+// (its system, its tool definitions, the instruction, the summary's room).
+// The worker prompt's fixed part is the wrong measure here: the session's
+// tools alone can be thousands of tokens. 0 means not even one entry fits.
+//
+// The cut never splits a tool exchange: it does not end on a tool call or
+// start on a tool result, since a strict endpoint refuses a call with no
+// result and a result with no call.
+func (sh *Shaper) prefixCut(entries []Entry, lines []string, header string, budget, window int) int {
+	limit := 0 // 0: unbounded
+	if window > 0 {
+		fixed := sh.Estimate.Estimate(sh.SessionPrefix.System) +
+			sh.Estimate.Estimate(header) + SummaryCap(budget)
+		if b, err := json.Marshal(sh.SessionPrefix.Tools); err == nil && len(sh.SessionPrefix.Tools) > 0 {
+			fixed += sh.Estimate.Estimate(string(b))
+		}
+		if window-fixed <= 0 {
+			return 0
+		}
+		limit = window - fixed
+	}
+	cut, used := 0, 0
+	for cut < len(lines) {
+		n := sh.Estimate.Estimate(lines[cut])
+		if limit > 0 && used+n > limit {
+			break
+		}
+		used += n
+		cut++
+	}
+	for cut > 0 && cut < len(entries) &&
+		(entries[cut-1].Kind == KindToolCall || entries[cut].Kind == KindToolResult) {
+		cut--
+	}
+	return cut
+}
+
+// foldKey marks the ctx of a fold's model requests; see IsFold.
+type foldKey struct{}
+
+// IsFold reports whether ctx is that of a request the Shaper sends to fold
+// history. A host that wraps the LLMRunner (to account fold usage apart from
+// the session's, or to route it) reads this instead of matching the system
+// prompt: with SessionPrefix set, a fold sends the session's own system, so
+// the prompt no longer tells a fold from a round.
+func IsFold(ctx context.Context) bool {
+	v, _ := ctx.Value(foldKey{}).(bool)
+	return v
 }
 
 // shrinkLimit is the per-stage event cap after the endpoint refused a stage of
@@ -1075,7 +1132,7 @@ func (sh *Shaper) summaryCallWithTools(ctx context.Context, msgs []llm.Message, 
 	if opts.PromptCacheKey == "" {
 		opts.PromptCacheKey = cacheKey
 	}
-	ch, err := sh.Runner.ChatStream(ctx, msgs, tools, &opts)
+	ch, err := sh.Runner.ChatStream(context.WithValue(ctx, foldKey{}, true), msgs, tools, &opts)
 	if err != nil {
 		return "", err
 	}

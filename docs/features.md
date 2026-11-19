@@ -313,15 +313,24 @@ field, and the `total`/`active` tally.
 
 **A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
 `SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the
-exact tool defs it sends. When the fold fits in one request, it is sent as the
-session's own prefix: that system, the history as messages, the session's tools
-with `tool_choice: "none"`, and the summary instruction last. It also sends the
-session's current `PromptCacheKey` (session id + newest marker before the fold;
-a key in `SummaryOpts` wins), because that key routes the request to the slot
-holding the prefix. A fold too large for one request, or refused with
-`InputTooLargeError`, uses the staged worker-prompt fold: no session tools, no
-key. Limit: pinned entries (`PinFirstUser`, `PinLatestUser`) are not in the fold
+exact tool defs it sends. The fold's FIRST request is then sent as the session's
+own prefix: that system, the history as messages, the session's tools with
+`tool_choice: "none"`, the summary instruction last, and the session's current
+`PromptCacheKey` (session id + newest marker before the fold; a key in
+`SummaryOpts` wins), because that key routes the request to the slot holding the
+prefix. When the whole fold fits, that request is the fold. When it does not
+(the common case: a fold is triggered near the budget), it covers the longest
+head of the history that fits beside the session's system and tools, never
+splitting a tool call from its result; the staged worker-prompt loop folds the
+rest on top of its summary, with no session tools and no key. A prefix request
+refused with `InputTooLargeError` falls back to the staged loop from the start.
+Limit: pinned entries (`PinFirstUser`, `PinLatestUser`) are not in the fold
 request, so the cached prefix matches only up to the first pinned entry.
+
+**Telling a fold from a round: `agent.IsFold(ctx)`.** Every model request the
+Shaper sends to fold carries a ctx mark. A host that wraps the `LLMRunner` (to
+count fold usage apart, or route it) reads `IsFold(ctx)` instead of matching the
+system prompt, which a prefix fold shares with the session.
 
 ## 9. MCP tools — `mcp`
 

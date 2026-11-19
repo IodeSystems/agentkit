@@ -136,7 +136,11 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `Shaper.SessionPrefix` sends the session's system + tools byte-identically AND
   the session's current `PromptCacheKey` (`promptCacheKey(sessionID, newest
   marker)`, the same derivation as `streamChat`). Drop the key and the fold
-  can be routed off the slot that holds the prefix. Staged folds send neither.
+  can be routed off the slot that holds the prefix. A fold too big for one
+  request sends its FIRST request this way (`prefixCut`: the head that fits
+  beside the session's system AND tools, never ending on a tool call); later
+  stages carry a running summary, so they use the worker prompt, no tools, no
+  key. Every fold request's ctx is marked: `IsFold(ctx)`.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different

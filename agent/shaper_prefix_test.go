@@ -198,12 +198,15 @@ func TestFoldRequestShape(t *testing.T) {
 	}
 }
 
-// Scenario: a staged fold keeps the compaction worker's own system prompt
-// and does not carry the session's prefix.
-func TestStagedFoldKeepsWorkerPrompt(t *testing.T) {
+// Scenario: a fold too large for one request sends its FIRST request as the
+// session's prefix (system, tools, key, tool_choice none), covering the head
+// of the history that fits; every later stage uses the worker prompt with no
+// tools and no key, carrying the running summary. A fold is triggered near the
+// budget, so this split is the common case: in v0.33.1 the split fold sent no
+// prefix at all and most real folds read the history uncached (dun-bf).
+func TestSplitFoldFirstRequestCarriesPrefixRestStage(t *testing.T) {
 	st := smallHistory()
-	// 5k window against ~10k of events: the fixed part eats most of it, so
-	// the events cannot fit one stage and the fold must stage.
+	// 5k window against ~10k of events: the fold must split.
 	r := &recordingMultiRunner{turns: [][]llm.StreamChunk{
 		{{Content: "S0"}}, {{Content: "S1"}}, {{Content: "S2"}}, {{Content: "S3"}},
 		{{Content: "S4"}}, {{Content: "S5"}}, {{Content: "S6"}}, {{Content: "S7"}},
@@ -223,22 +226,116 @@ func TestStagedFoldKeepsWorkerPrompt(t *testing.T) {
 		t.Fatal("empty summary")
 	}
 	if len(r.msgs) < 2 {
-		t.Fatalf("a fold that exceeds the window must stage, got %d request(s)", len(r.msgs))
+		t.Fatalf("a fold that exceeds the window must split, got %d request(s)", len(r.msgs))
 	}
-	for i, call := range r.msgs {
+	first := r.msgs[0]
+	if first[0].Content != "session system" || !toolsByteEqual(r.tools[0], prefixTools()) ||
+		r.opts[0].ToolChoice != "none" || r.opts[0].PromptCacheKey != "k" {
+		t.Fatalf("first request is not the session prefix: system=%q tools=%d opts=%+v",
+			first[0].Content, len(r.tools[0]), r.opts[0])
+	}
+	if first[1].Content != st.entries[0].Content {
+		t.Errorf("first request must start at the first event, got %q", first[1].Content)
+	}
+	for i := 1; i < len(r.msgs); i++ {
+		call := r.msgs[i]
 		if call[0].Role != "system" || call[0].Content != DefaultSummarySystem {
-			t.Errorf("stage %d system = %q, want the worker prompt %q", i, call[0].Content, DefaultSummarySystem)
+			t.Errorf("stage %d system = %q, want the worker prompt", i, call[0].Content)
 		}
-		if len(r.tools[i]) != 0 {
-			t.Errorf("stage %d carries %d tool(s), want none", i, len(r.tools[i]))
-		}
-		if r.opts[i] != nil && r.opts[i].ToolChoice != "" {
-			t.Errorf("stage %d sets tool_choice %q, want none set", i, r.opts[i].ToolChoice)
-		}
-		if r.opts[i] != nil && r.opts[i].PromptCacheKey != "" {
-			t.Errorf("stage %d sends cache key %q; a stage is not the session prefix", i, r.opts[i].PromptCacheKey)
+		if len(r.tools[i]) != 0 || r.opts[i].ToolChoice != "" || r.opts[i].PromptCacheKey != "" {
+			t.Errorf("stage %d carries tools=%d opts=%+v; a later stage is not the session prefix", i, len(r.tools[i]), r.opts[i])
 		}
 	}
+	if !strings.Contains(r.msgs[1][1].Content, "S0") {
+		t.Errorf("stage 1 must carry the prefix request's summary, got %q", r.msgs[1][1].Content)
+	}
+}
+
+// Scenario: the split never ends the prefix request on a tool call whose
+// result it leaves out: a strict endpoint refuses a call with no result.
+func TestPrefixCutKeepsToolExchangesWhole(t *testing.T) {
+	sh := &Shaper{Estimate: Default(), SessionPrefix: SessionPrefix{System: "s"}}
+	big := strings.Repeat("x", 4000)
+	entries := []Entry{
+		{Kind: KindUser, Content: "u"},
+		{Kind: KindToolCall, ToolCallID: "c1", Content: "{}"},
+		{Kind: KindToolResult, ToolCallID: "c1", Content: big},
+		{Kind: KindAssistant, Content: "a"},
+	}
+	lines := make([]string, len(entries))
+	for i, e := range entries {
+		lines[i] = e.Content
+	}
+	// Room for the user and the call, not for the result.
+	window := sh.Estimate.Estimate("s") + sh.Estimate.Estimate("h") + SummaryCap(100) +
+		sh.Estimate.Estimate("u") + sh.Estimate.Estimate("{}") + 10
+	if cut := sh.prefixCut(entries, lines, "h", 100, window); cut != 1 {
+		t.Fatalf("cut = %d, want 1 (before the call, not between call and result)", cut)
+	}
+}
+
+// Scenario: the prefix request's size check counts the SESSION's fixed part,
+// tools included. Counting the worker prompt instead let a request pass the
+// check and be refused as too large, a wasted round.
+func TestPrefixCutCountsSessionTools(t *testing.T) {
+	tools := prefixTools()
+	tools[0].Function.Description = strings.Repeat("d", 8000)
+	with := &Shaper{Estimate: Default(), SessionPrefix: SessionPrefix{System: "s", Tools: tools}}
+	without := &Shaper{Estimate: Default(), SessionPrefix: SessionPrefix{System: "s"}}
+	var entries []Entry
+	var lines []string
+	for i := 0; i < 20; i++ {
+		c := strings.Repeat("y", 1000)
+		entries = append(entries, Entry{Kind: KindUser, Content: c})
+		lines = append(lines, c)
+	}
+	a := with.prefixCut(entries, lines, "h", 100, 6000)
+	b := without.prefixCut(entries, lines, "h", 100, 6000)
+	if a >= b {
+		t.Fatalf("cut with big tools = %d, without = %d; tools must take room", a, b)
+	}
+}
+
+// Scenario: a host's runner can tell a fold request from a session round by
+// the ctx, not by matching the system prompt (which a prefix fold shares with
+// the session).
+func TestIsFoldMarksEveryFoldRequest(t *testing.T) {
+	st := smallHistory()
+	var marks []bool
+	r := &ctxRecordingRunner{inner: &recordingMultiRunner{turns: [][]llm.StreamChunk{
+		{{Content: "S0"}}, {{Content: "S1"}}, {{Content: "S2"}}, {{Content: "S3"}},
+		{{Content: "S4"}}, {{Content: "S5"}}, {{Content: "S6"}}, {{Content: "S7"}},
+	}}, marks: &marks}
+	sh := &Shaper{
+		Store: st, Runner: r,
+		Policy:        ShaperPolicy{BudgetTokens: 5000, PreserveLastMessages: 1},
+		SessionPrefix: SessionPrefix{System: "session system", Tools: prefixTools()},
+		Estimate:      Default(),
+	}
+	if _, err := sh.summarize(context.Background(), st.entries[:10], "t", 100, 5000, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if len(marks) < 2 {
+		t.Fatalf("want a split fold, got %d request(s)", len(marks))
+	}
+	for i, m := range marks {
+		if !m {
+			t.Errorf("request %d: IsFold = false", i)
+		}
+	}
+	if IsFold(context.Background()) {
+		t.Error("IsFold true on a plain ctx")
+	}
+}
+
+type ctxRecordingRunner struct {
+	inner *recordingMultiRunner
+	marks *[]bool
+}
+
+func (r *ctxRecordingRunner) ChatStream(ctx context.Context, m []llm.Message, td []llm.ToolDef, o *llm.ChatOpts) (<-chan llm.StreamChunk, error) {
+	*r.marks = append(*r.marks, IsFold(ctx))
+	return r.inner.ChatStream(ctx, m, td, o)
 }
 
 // On an InputTooLargeError the prefix path falls back to the staged
