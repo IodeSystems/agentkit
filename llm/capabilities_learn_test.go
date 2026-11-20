@@ -188,7 +188,7 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 	ctx := context.Background()
 	off := &ChatOpts{Effort: "none"}
 
-	if _, _, err := c.ChatWithOpts(ctx, []Message{{Role: "user", Content: "hi"}}, nil, off); err == nil {
+	if _, err := c.ChatWithOpts(ctx, []Message{{Role: "user", Content: "hi"}}, nil, off); err == nil {
 		t.Fatal("first request: want the 400 back, got nil")
 	}
 	caps := c.Capabilities()
@@ -202,7 +202,7 @@ func TestOffRefusedByThinkingOnlyModelIsTranslatedOnTheNextRequest(t *testing.T)
 		t.Fatal("OnLearn did not fire")
 	}
 
-	if _, _, err := c.ChatWithOpts(ctx, []Message{{Role: "user", Content: "hi"}}, nil, off); err != nil {
+	if _, err := c.ChatWithOpts(ctx, []Message{{Role: "user", Content: "hi"}}, nil, off); err != nil {
 		t.Fatalf("second request: %v", err)
 	}
 	sent := srv.sent()
@@ -225,7 +225,7 @@ func TestHostPinnedOffIsSentAndNeverOverwritten(t *testing.T) {
 	srv := newCapServer(t, func(int, map[string]any) (int, string) { return 400, glmRefusal })
 	c := openaiClient(srv.URL)
 	c.SetCapabilities(Capabilities{Facts: map[string]Fact{CapReasoningOff: fact("low", SourceHost)}})
-	_, _, _ = c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
+	_, _ = c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
 	if got := srv.sent()[0]["reasoning_effort"]; got != "low" {
 		t.Fatalf("sent %v, want the pinned low", got)
 	}
@@ -322,7 +322,7 @@ func TestAcceptedEffortsAreDedupedInLadderOrder(t *testing.T) {
 	c.OnLearn = func(Learned) { n++ }
 	for _, e := range []string{"high", "low", "xhigh", "low"} {
 		// "high" is refused, so it goes out as medium (lower first).
-		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: Effort(e)}); err != nil {
+		if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: Effort(e)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -351,7 +351,7 @@ func TestOverflowTeachesContextWindow(t *testing.T) {
 		return 400, `{"error":{"code":400,"message":"request (89653 tokens) exceeds the available context size (86016 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":89653,"n_ctx":86016}}`
 	})
 	c := openaiClient(srv.URL)
-	_, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
+	_, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
 	var big *InputTooLargeError
 	if !errors.As(err, &big) {
 		t.Fatalf("err = %v, want *InputTooLargeError unchanged", err)
@@ -438,7 +438,7 @@ func TestForcedToolChoiceObserved(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newCapServer(t, func(int, map[string]any) (int, string) { return 200, tc.reply })
 			c := openaiClient(srv.URL)
-			if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, echoTool, &ChatOpts{ToolChoice: tc.choice}); err != nil {
+			if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, echoTool, &ChatOpts{ToolChoice: tc.choice}); err != nil {
 				t.Fatal(err)
 			}
 			if got := c.Capabilities().Facts[CapToolsChoiceForced].Value; got != tc.want {
@@ -474,7 +474,7 @@ func TestResendOnRefusal(t *testing.T) {
 		srv := newCapServer(t, refuseNone)
 		c := openaiClient(srv.URL)
 		c.NoResendOnRefusal = true
-		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
+		if _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
 			t.Fatal("want the 400")
 		}
 		if n := len(srv.sent()); n != 1 {
@@ -486,7 +486,7 @@ func TestResendOnRefusal(t *testing.T) {
 		c := openaiClient(srv.URL)
 		var trs []Translation
 		c.OnTranslate = func(tr Translation) { trs = append(trs, tr) }
-		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
+		if _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
 			t.Fatalf("resend did not succeed: %v", err)
 		}
 		sent := srv.sent()
@@ -515,7 +515,7 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, `{"error":{"message":"bad request"}}`
 		})
 		c := openaiClient(srv.URL)
-		_, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off)
+		_, err := c.ChatWithOpts(context.Background(), msgs, nil, off)
 		if err == nil || !strings.Contains(err.Error(), "bad request") {
 			t.Fatalf("err = %v", err)
 		}
@@ -528,7 +528,7 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, `{"error":{"message":"budget_tokens must be >= 1024"}}`
 		})
 		c := openaiClient(srv.URL)
-		_, _, _ = c.ChatWithOpts(context.Background(), msgs, nil, off)
+		_, _ = c.ChatWithOpts(context.Background(), msgs, nil, off)
 		if n := len(srv.sent()); n != 1 {
 			t.Fatalf("requests = %d, want 1", n)
 		}
@@ -542,7 +542,7 @@ func TestResendOnRefusal(t *testing.T) {
 			return 400, fmt.Sprintf(`{"error":{"message":"'%v' is not one of []"}}`, b["reasoning_effort"])
 		})
 		c := openaiClient(srv.URL)
-		if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
+		if _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err == nil {
 			t.Fatal("want the second 400")
 		}
 		if n := len(srv.sent()); n != 2 {
@@ -601,13 +601,13 @@ func TestRefusedPromptCacheKeyIsLearnedAndDropped(t *testing.T) {
 	c.OnLearn = func(Learned) { learned++ }
 	opts := &ChatOpts{PromptCacheKey: "k1"}
 	msgs := []Message{{Role: "user", Content: "hi"}}
-	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err == nil {
+	if _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err == nil {
 		t.Fatal("want the 400 returned with NoResendOnRefusal")
 	}
 	if v, _ := c.Capabilities().fact("sampling.prompt_cache_key"); v != "refused" || learned != 1 {
 		t.Fatalf("fact %q, OnLearn %d", v, learned)
 	}
-	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err != nil {
+	if _, err := c.ChatWithOpts(context.Background(), msgs, nil, opts); err != nil {
 		t.Fatal(err)
 	}
 	if sent := srv.sent(); len(sent) != 2 || sent[1]["prompt_cache_key"] != nil {
@@ -623,7 +623,7 @@ func TestRefusedPromptCacheKeyIsResentOnceWithResendOnRefusal(t *testing.T) {
 		return 200, okReply
 	})
 	c := openaiClient(srv.URL)
-	if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{PromptCacheKey: "k1"}); err != nil {
+	if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{PromptCacheKey: "k1"}); err != nil {
 		t.Fatal(err)
 	}
 	if sent := srv.sent(); len(sent) != 2 || sent[1]["prompt_cache_key"] != nil {
@@ -730,7 +730,7 @@ func TestThinkingMandatoryRefusalIsLearnedAndResentWithoutOffField(t *testing.T)
 	c.SetReasoningDialect(DialectLlamaCpp)
 	off := &ChatOpts{Effort: EffortNone}
 	msgs := []Message{{Role: "user", Content: "hi"}}
-	if _, _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
+	if _, err := c.ChatWithOpts(context.Background(), msgs, nil, off); err != nil {
 		t.Fatalf("one call must succeed through the resend: %v", err)
 	}
 	if only, ok := c.Capabilities().ThinkingOnly(); !ok || !only {
@@ -770,7 +770,7 @@ func TestThinkingOnlyRefusalIsLearnedThenReportedAsEffortClampThenServed(t *test
 			eff = append(eff, tr)
 		}
 	}
-	if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: EffortNone}); err != nil {
+	if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: EffortNone}); err != nil {
 		t.Fatalf("one call must succeed through the resend: %v", err)
 	}
 	if n := len(srv.sent()); n != 2 {

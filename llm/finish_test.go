@@ -97,7 +97,7 @@ func TestFinishReasonFromNonStreamingBody(t *testing.T) {
 	c := NewClient(srv.URL, "", "m")
 	var got *Usage
 	c.OnUsage = func(u Usage) { got = &u }
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got == nil || got.FinishReason != "stop" || got.NativeFinishReason != "STOP" {

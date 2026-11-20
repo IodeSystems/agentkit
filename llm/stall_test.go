@@ -287,9 +287,9 @@ func TestStall_ChatBodyStallIsRetried(t *testing.T) {
 	})
 	c := stallClient(srv.URL, 100*time.Millisecond, 0)
 	events := collectRetries(c)
-	text, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
-	if err != nil || text != "hi" {
-		t.Fatalf("text=%q err=%v", text, err)
+	text, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	if err != nil || text.Content != "hi" {
+		t.Fatalf("text=%q err=%v", text.Content, err)
 	}
 	if srv.hits.Load() != 2 || !hasKind(events(), RetryStall) {
 		t.Errorf("hits=%d events=%+v", srv.hits.Load(), events())

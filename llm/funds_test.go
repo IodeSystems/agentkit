@@ -136,7 +136,7 @@ func TestPlain400KeepsOldErrorAndStillLearnsItsFact(t *testing.T) {
 	c := openaiClient(srv.URL)
 	var learned int
 	c.OnLearn = func(Learned) { learned++ }
-	_, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
+	_, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
 	var spent *BudgetSpentError
 	if err == nil || errors.As(err, &spent) {
 		t.Fatalf("err = %v; want the plain status error", err)
@@ -157,7 +157,7 @@ func TestBillingRefusal400TeachesTheCapabilityRecordNothing(t *testing.T) {
 	var learned int
 	c.OnLearn = func(Learned) { learned++ }
 	before := len(c.Capabilities().Facts)
-	_, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
+	_, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Effort: "none"})
 	wantSpent(t, err, 400)
 	if learned != 0 || len(c.Capabilities().Facts) != before {
 		t.Errorf("learned = %d, facts %d -> %d; want no change", learned, before, len(c.Capabilities().Facts))
@@ -168,7 +168,7 @@ func TestFundsRefusalMessagesAPI400(t *testing.T) {
 	srv, hits := fundsServer(t, 400, anthropicCreditBody)
 	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
 	c.MessagesAPI = true
-	_, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	_, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
 	wantSpent(t, err, 400)
 	if n := hits.Load(); n != 1 {
 		t.Errorf("hits = %d; want 1", n)

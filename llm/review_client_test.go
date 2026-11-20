@@ -76,7 +76,7 @@ func TestChatWithOpts_ForwardsConstraintsAndIdentity(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := NewClient(ts.URL, "", "m")
-	_, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "x"}}, nil,
+	_, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "x"}}, nil,
 		&ChatOpts{ToolChoice: "required", Grammar: "root ::= \"a\"",
 			ResponseFormat: map[string]any{"type": "json_object"}, TraceID: "thread-7"})
 	if err != nil {
@@ -110,9 +110,9 @@ func TestRetry5xx_RetryAfterPastBudgetIsClampedNotRefused(t *testing.T) {
 	c := NewClient(ts.URL, "", "m")
 	c.RetryBudget = 300 * time.Millisecond
 	start := time.Now()
-	out, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
-	if err != nil || out != "ok" {
-		t.Fatalf("out=%q err=%v; want the clamped retry to succeed", out, err)
+	out, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	if err != nil || out.Content != "ok" {
+		t.Fatalf("out=%q err=%v; want the clamped retry to succeed", out.Content, err)
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("slept %s; the wait must be clamped to the budget", time.Since(start))

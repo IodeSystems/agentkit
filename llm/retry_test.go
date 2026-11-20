@@ -680,7 +680,7 @@ func TestRetry5xxAttemptsIsConfigurablePerClient(t *testing.T) {
 
 	c := NewClient(srv.URL, "k", "m")
 	c.Retry5xxAttempts = 10
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
 		t.Fatalf("a raised cap should ride out 7 failures: %v", err)
 	}
 	if hits != 8 {
@@ -702,7 +702,7 @@ func TestRetry5xxAttemptsDefaultsToFive(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "k", "m")
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err == nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err == nil {
 		t.Fatal("a permanently failing upstream must still stop")
 	}
 	if hits != retry5xxMaxAttempts {
@@ -725,7 +725,7 @@ func TestInputTooLargeIsNotRetried(t *testing.T) {
 
 	c := NewClient(srv.URL, "k", "m")
 	c.Retry5xxAttempts = 9
-	_, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	_, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
 	if err == nil {
 		t.Fatal("an over-large input must still be an error")
 	}
@@ -751,7 +751,7 @@ func TestFiveXXGiveUpIncludesTheServerMessage(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "k", "m")
-	_, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	_, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}

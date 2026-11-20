@@ -192,6 +192,27 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	}{alias: alias(m), Content: m.Parts})
 }
 
+// Citation is one citation the model attached to its reply, as the provider
+// sends it (document_index, citation_text, start_char_index, end_char_index).
+// A document_index names one of the document parts the request carried.
+type Citation struct {
+	DocumentIndex   int    `json:"document_index"`
+	CitationText    string `json:"citation_text"`
+	StartCharIndex  int    `json:"start_char_index"`
+	EndCharIndex    int    `json:"end_char_index"`
+}
+
+// ChatResult is a non-streaming chat completion. Content is the reply text
+// (empty when the model answered only with tool calls); ToolCalls are the
+// calls it made; Citations is the citation metadata the model attached — a
+// field SEPARATE from Content, so a caller reads the text and the citations
+// as distinct things. Citations is nil when the response carried none.
+type ChatResult struct {
+	Content   string
+	ToolCalls []ToolCall
+	Citations []Citation
+}
+
 // ToolCall represents a tool call request from the LLM.
 //
 // Arguments is a STRING holding JSON, per the OpenAI spec — and per that same
@@ -2010,7 +2031,7 @@ func statusErrorBody(status int, msg string) error {
 }
 
 // Chat sends a non-streaming chat completion request.
-func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) (string, []ToolCall, error) {
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) (*ChatResult, error) {
 	return c.ChatWithOpts(ctx, messages, tools, nil)
 }
 
@@ -2057,11 +2078,63 @@ func (c *Client) chatBodyBytes(ctx context.Context, messages []Message, tools []
 	}
 }
 
+// citationsFromRaw reads the citation blocks out of a Messages-API reply body.
+// Only the Anthropic shape carries them, and the shim's OpenAI translation has
+// no place for them — so they are read from the raw body before it is
+// translated, which is the only point where they exist. An OpenAI-shaped body
+// (no content blocks) yields none, as does a reply with no citations.
+func citationsFromRaw(raw []byte) []Citation {
+	var body struct {
+		Content []struct {
+			Type      string `json:"type"`
+			Citations []struct {
+				Type           string `json:"type"`
+				DocumentIndex  int    `json:"document_index"`
+				CitedText      string `json:"cited_text"`
+				StartCharIndex *int   `json:"start_char_index"`
+				EndCharIndex   *int   `json:"end_char_index"`
+			} `json:"citations"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil
+	}
+	var out []Citation
+	for _, b := range body.Content {
+		if b.Type != "text" {
+			continue
+		}
+		for _, ci := range b.Citations {
+			c := Citation{
+				DocumentIndex: ci.DocumentIndex,
+				CitationText:  ci.CitedText,
+				StartCharIndex: -1,
+				EndCharIndex:   -1,
+			}
+			if ci.StartCharIndex != nil {
+				c.StartCharIndex = *ci.StartCharIndex
+			}
+			if ci.EndCharIndex != nil {
+				c.EndCharIndex = *ci.EndCharIndex
+			}
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
-func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
+func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (*ChatResult, error) {
 	resp, sent, callStart, raw, err := c.chatBodyBytes(ctx, messages, tools, opts)
 	if err != nil {
-		return "", nil, err
+		return nil, err
+	}
+
+	// Citations live on the raw Messages-API body only: the shim's OpenAI
+	// translation has no field for them, so read them before translating.
+	var citations []Citation
+	if c.usesMessagesAPI() {
+		citations = citationsFromRaw(raw)
 	}
 
 	var result struct {
@@ -2078,11 +2151,11 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 	}
 	if c.usesMessagesAPI() {
 		if raw, err = shim.Response(raw, shim.StreamOptions{Prices: c.ClaudePrices}); err != nil {
-			return "", nil, fmt.Errorf("llm: messages reply: %w", err)
+			return nil, fmt.Errorf("llm: messages reply: %w", err)
 		}
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", nil, fmt.Errorf("llm: decode: %w", err)
+		return nil, fmt.Errorf("llm: decode: %w", err)
 	}
 	if c.OnUsage != nil {
 		meta := c.metaFrom(resp.Header)
@@ -2102,10 +2175,14 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		}
 	}
 	if len(result.Choices) == 0 {
-		return "", nil, nil
+		return &ChatResult{Citations: citations}, nil
 	}
 	c.observeToolChoice(sent, result.Choices[0].FinishReason, len(result.Choices[0].Message.ToolCalls))
-	return result.Choices[0].Message.Content, result.Choices[0].Message.ToolCalls, nil
+	return &ChatResult{
+		Content:   result.Choices[0].Message.Content,
+		ToolCalls: result.Choices[0].Message.ToolCalls,
+		Citations: citations,
+	}, nil
 }
 
 // readStream parses SSE events from the response body.

@@ -131,7 +131,7 @@ func TestServedModelAndRequestIDReachUsage(t *testing.T) {
 	c = NewClient(srv.URL, "", "swift")
 	var got *Usage
 	c.OnUsage = func(u Usage) { got = &u }
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	if got == nil || got.ServedModel != "swift-nvfp4" || got.RequestID != "tkt-42" {
@@ -182,7 +182,7 @@ func attributionOf(t *testing.T, url string) (stream, plain Usage) {
 	}
 	c = NewClient(url, "", "asked-for")
 	c.OnUsage = func(u Usage) { plain = u }
-	if _, _, err := c.Chat(context.Background(), msgs, nil); err != nil {
+	if _, err := c.Chat(context.Background(), msgs, nil); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	return stream, plain
@@ -287,7 +287,7 @@ func TestAnthropicMessagesAttribution(t *testing.T) {
 	c.MessagesAPI = true
 	var plain Usage
 	c.OnUsage = func(u Usage) { plain = u }
-	if _, _, err := c.Chat(context.Background(), msgs, nil); err != nil {
+	if _, err := c.Chat(context.Background(), msgs, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantAttribution(t, stream, plain, "claude-opus-5-5-20260101", "req_011C")

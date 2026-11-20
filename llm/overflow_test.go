@@ -32,7 +32,7 @@ func TestContextOverflow400IsTypedWithCounts(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			_, _, err := NewClient(srv.URL, "k", "m").Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+			_, err := NewClient(srv.URL, "k", "m").Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
 			var tl *InputTooLargeError
 			if !errors.As(err, &tl) {
 				t.Fatalf("want *InputTooLargeError, got %T: %v", err, err)
@@ -55,7 +55,7 @@ func TestOrdinary400IsNotAnOverflow(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"tools[0].function.name is required","type":"invalid_request_error"}}`))
 	}))
 	defer srv.Close()
-	_, _, err := NewClient(srv.URL, "k", "m").Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	_, err := NewClient(srv.URL, "k", "m").Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
 	var tl *InputTooLargeError
 	if err == nil || errors.As(err, &tl) {
 		t.Fatalf("a schema 400 is not an overflow: %v", err)

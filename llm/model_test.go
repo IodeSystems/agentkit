@@ -27,7 +27,7 @@ func TestModelFromNonStreamingBody(t *testing.T) {
 	c := NewClient(srv.URL, "", requested)
 	var got *Usage
 	c.OnUsage = func(u Usage) { got = &u }
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	if got == nil {

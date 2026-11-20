@@ -67,10 +67,11 @@ func TestNonStreamingAcceptsObjectArguments(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "", "m")
-	_, calls, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	res, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
 	if err != nil {
 		t.Fatalf("object arguments killed the whole response: %v", err)
 	}
+	calls := res.ToolCalls
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 calls, got %d", len(calls))
 	}

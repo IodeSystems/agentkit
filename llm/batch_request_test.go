@@ -29,14 +29,14 @@ func TestBatchPath_PostsToBatchEndpointWithWindow(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", "m")
-	out, _, err := c.ChatWithOpts(context.Background(),
+	out, err := c.ChatWithOpts(context.Background(),
 		[]Message{{Role: "user", Content: "x"}}, nil,
 		&ChatOpts{Batch: true, CompletionWindow: 24 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "ok" {
-		t.Errorf("out = %q; want ok", out)
+	if out.Content != "ok" {
+		t.Errorf("out = %q; want ok", out.Content)
 	}
 	if gotPath != "/v1/chat/completions/batch" {
 		t.Errorf("path = %q; want /v1/chat/completions/batch", gotPath)
@@ -65,7 +65,7 @@ func TestBatchPath_NoWindowOmitsField(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", "m")
-	_, _, err := c.ChatWithOpts(context.Background(),
+	_, err := c.ChatWithOpts(context.Background(),
 		[]Message{{Role: "user", Content: "x"}}, nil,
 		&ChatOpts{Batch: true})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestBatchPath_MessagesAPI_PostsToMessagesBatches(t *testing.T) {
 
 	c := NewClient(ts.URL, "", "m")
 	c.MessagesAPI = true
-	_, _, err := c.ChatWithOpts(context.Background(),
+	_, err := c.ChatWithOpts(context.Background(),
 		[]Message{{Role: "user", Content: "x"}}, nil,
 		&ChatOpts{Batch: true, CompletionWindow: 6 * time.Hour})
 	if err != nil {
@@ -127,13 +127,13 @@ func TestRealTimePath_BodyUnchanged(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", "m")
-	out, _, err := c.Chat(context.Background(),
+	out, err := c.Chat(context.Background(),
 		[]Message{{Role: "user", Content: "hello"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "ok" {
-		t.Errorf("out = %q; want ok", out)
+	if out.Content != "ok" {
+		t.Errorf("out = %q; want ok", out.Content)
 	}
 	// Standard path, not batch.
 	if gotPath != "/v1/chat/completions" {
@@ -178,9 +178,9 @@ func TestRealTimePath_BodyIdenticalToExplicitNonBatch(t *testing.T) {
 	msgs := []Message{{Role: "user", Content: "compare"}}
 
 	// Call 1: default (no opts).
-	_, _, _ = c.Chat(context.Background(), msgs, nil)
+	_, _ = c.Chat(context.Background(), msgs, nil)
 	// Call 2: explicit non-batch opts.
-	_, _, _ = c.ChatWithOpts(context.Background(), msgs, nil, &ChatOpts{})
+	_, _ = c.ChatWithOpts(context.Background(), msgs, nil, &ChatOpts{})
 
 	if len(body1) == 0 || len(body2) == 0 {
 		t.Fatal("server did not receive both requests")

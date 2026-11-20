@@ -43,11 +43,11 @@ func TestUserAndHeaderRideOnEveryChatRequest(t *testing.T) {
 	}
 	for range ch {
 	}
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	plain := NewClient(srv.URL, "", "m")
-	if _, _, err := plain.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := plain.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 

@@ -54,7 +54,7 @@ func TestCostFromLiteLLMHeaderNonStreaming(t *testing.T) {
 	c := NewClient(srv.URL, "k", "m")
 	var got []Usage
 	c.OnUsage = func(u Usage) { got = append(got, u) }
-	if _, _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {

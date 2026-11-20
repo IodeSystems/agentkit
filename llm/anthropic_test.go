@@ -183,12 +183,55 @@ func TestMessagesAPI_Chat(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
 	c.MessagesAPI = true
-	text, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
-	if err != nil || text != "ok" {
-		t.Fatalf("%q %v", text, err)
+	res, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
+	if err != nil || res.Content != "ok" {
+		t.Fatalf("%q %v", res.Content, err)
 	}
 	if got.Get("x-api-key") != "k" || got.Get("anthropic-version") == "" || got.Get("Authorization") != "" {
 		t.Errorf("headers %v", got)
+	}
+}
+
+// Citation metadata the model attached to a document answer surfaces on the
+// result as a field separate from the text: the caller reads the reply and the
+// citations as distinct things.
+func TestMessagesAPI_CitationsSurface(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"the east line runs here.","citations":[{"type":"citation","document_index":1,"cited_text":"east line","start_char_index":10,"end_char_index":20}]}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
+	c.MessagesAPI = true
+	res, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Content != "the east line runs here." {
+		t.Errorf("content %q", res.Content)
+	}
+	if len(res.Citations) != 1 {
+		t.Fatalf("citations %v", res.Citations)
+	}
+	got := res.Citations[0]
+	if got.DocumentIndex != 1 || got.CitationText != "east line" || got.StartCharIndex != 10 || got.EndCharIndex != 20 {
+		t.Errorf("citation %+v", got)
+	}
+}
+
+// A reply with no citations leaves the field nil, not an empty slice.
+func TestMessagesAPI_NoCitationsIsNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"m","model":"x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
+	c.MessagesAPI = true
+	res, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Citations != nil {
+		t.Errorf("citations %v, want nil", res.Citations)
 	}
 }
 
@@ -207,8 +250,8 @@ func TestMessagesAPI_Retries(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
 	c.MessagesAPI = true
-	if text, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil || text != "ok" || calls != 2 {
-		t.Errorf("%q %v after %d calls", text, err, calls)
+	if res, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil || res.Content != "ok" || calls != 2 {
+		t.Errorf("%q %v after %d calls", res.Content, err, calls)
 	}
 }
 
@@ -261,7 +304,7 @@ func TestMessagesAPI_Alias(t *testing.T) {
 	c := NewClient(srv.URL+"/v1", "k", "opus-latest")
 	c.MessagesAPI = true
 	for range 2 {
-		if _, _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil {
+		if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
