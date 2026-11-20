@@ -93,7 +93,7 @@ func (c *Client) resolveAlias(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", shim.APIVersion)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", err
 	}

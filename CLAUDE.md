@@ -202,6 +202,17 @@ plan/     living plan. plan.md = current state + active work + decisions;
   jitter ONLY while nothing was forwarded to the caller (`streamAttempt`'s
   `forwarded` flag; the failed attempt skips OnUsage/observeStream); it is kept
   as `*llm.StreamError` (`StreamChunk.StreamErr`, `chunk.Err()`).
+- **A silent link is ended by a watchdog, not by `http.Client.Timeout`.**
+  `Client.do` (stall.go) wraps every request: `FirstByteTimeout` (default 10m:
+  llama.cpp is silent while it processes a prompt) until the first body byte,
+  then `StallTimeout` (2m) per body Read. 0 = default, negative = off. The timer
+  resets at the io.Reader, BELOW the SSE parser, so `: keep-alive` comments count;
+  it runs only while a Read blocks, so a slow consumer is not a stall. Failure is
+  `*StallError`, transient: retried (`RetryStall`) inside `RetryBudget` before
+  anything was forwarded (`postWithRetry`, `pumpStream`, `chatBodyBytes`),
+  returned after (`StreamChunk.Stall`). A caller cancel wins and stays ctx.Err().
+  The Client owns its Transport (clone of default + HTTP/2 `SendPingTimeout` 30s,
+  `PingTimeout` 15s). There is no host-supplied http client field.
 - **Every retry sleep is jittered, additively.** `jittered()` adds a random
   `[0, retryJitterFraction)` of the sleep — never subtracts. corrallm hands
   every caller rejected in the same moment the IDENTICAL `Retry-After`, and an

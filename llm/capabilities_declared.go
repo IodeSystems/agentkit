@@ -95,7 +95,7 @@ func (c *Client) LoadDeclared(ctx context.Context) error {
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("llm: models: %w", err)
 	}

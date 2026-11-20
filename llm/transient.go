@@ -44,6 +44,10 @@ func TransientUpstream(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// A silent link, ended by the client's own watchdog.
+	if stallOf(err) != nil {
+		return true
+	}
 	// Connection-level faults, without string matching where the type is known.
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, syscall.EPIPE) {

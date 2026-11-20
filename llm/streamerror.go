@@ -161,6 +161,9 @@ func (c StreamChunk) Err() error {
 	if c.StreamErr != nil {
 		return c.StreamErr
 	}
+	if c.Stall != nil {
+		return c.Stall
+	}
 	if c.Error == "" {
 		return nil
 	}

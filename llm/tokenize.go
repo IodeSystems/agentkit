@@ -187,7 +187,7 @@ func (c *Client) countAt(ctx context.Context, r *tokenizeRoute, text string) (in
 	}
 	req.Header.Set("Content-Type", "application/json")
 	c.setProbeHeaders(req)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -251,7 +251,7 @@ func (c *Client) propsContext(ctx context.Context, url string) (int, error) {
 		return 0, err
 	}
 	c.setProbeHeaders(req)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -346,7 +346,7 @@ func (c *Client) countPromptAt(ctx context.Context, r *tokenizeRoute, system str
 	}
 	req.Header.Set("Content-Type", "application/json")
 	c.setProbeHeaders(req)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, err
 	}

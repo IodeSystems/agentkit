@@ -21,6 +21,9 @@ const (
 	// RetryStream — the provider answered 200, then reported a transient error
 	// inside the stream before sending any output; the request is resent.
 	RetryStream RetryKind = "stream"
+	// RetryStall — the request went silent (no first byte, or no bytes between
+	// chunks) and the watchdog ended it; see StallError. The request is resent.
+	RetryStall RetryKind = "stall"
 	// RetryRecovered — a later attempt succeeded. Fires once, so a UI that put up
 	// a "retrying" banner knows to take it down.
 	RetryRecovered RetryKind = "recovered"

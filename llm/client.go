@@ -311,7 +311,11 @@ type StreamChunk struct {
 	// the provider's message, so a consumer that reads only the string is
 	// unchanged.
 	StreamErr *StreamError
-	Usage     *Usage
+	// Stall is the typed form of Error when the response went silent AFTER
+	// output reached the caller (see StallError). Not retried: a resend would
+	// regenerate the reply. Nil otherwise.
+	Stall *StallError
+	Usage *Usage
 
 	// PartialToolCalls carries whatever tool-call arguments had accumulated
 	// when an Error chunk was produced. Providers stream tool arguments
@@ -572,6 +576,19 @@ type Client struct {
 	// Nothing can spin forever on an outcome that cannot change.
 	RetryBudget time.Duration
 
+	// FirstByteTimeout is the longest a request may wait, from sent until the
+	// first response byte (headers included), before it is ended with a
+	// *StallError and retried within RetryBudget. 0 = 10m: llama.cpp sends
+	// nothing while it processes a long prompt, so a short value kills requests
+	// that work. Negative = off. See stall.go.
+	FirstByteTimeout time.Duration
+
+	// StallTimeout is the longest gap between response bytes once the first one
+	// arrived. 0 = 2m. Negative = off. ANY bytes count, SSE comment lines
+	// included. Before output reached the caller the call is retried; after, the
+	// *StallError is returned. See stall.go.
+	StallTimeout time.Duration
+
 	// Retry5xxAttempts caps how many times a 5xx is retried. 0 → default (5).
 	//
 	// The default is tuned for a chat turn, where five failures means the
@@ -701,7 +718,7 @@ func NewClient(baseURL, apiKey, model string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		model:   model,
-		http:    &http.Client{},
+		http:    &http.Client{Transport: newTransport()},
 	}
 }
 
@@ -1047,7 +1064,7 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		if ticket != "" {
 			req.Header.Set("X-Corrallm-Request-Id", ticket)
 		}
-		resp, err := c.http.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			// Breaks a queue-timeout streak: "consecutive" means uninterrupted
 			// by any other kind of failure.
@@ -1090,7 +1107,11 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 				return nil, fmt.Errorf("llm: retry budget %s exhausted after %s of transport failures (last: %v)",
 					budget, time.Since(start).Round(time.Second), err)
 			}
-			c.emitRetry(RetryEvent{Kind: RetryTransport, Attempt: attempt + 1, Err: err,
+			kind := RetryTransport
+			if stallOf(err) != nil {
+				kind = RetryStall
+			}
+			c.emitRetry(RetryEvent{Kind: kind, Attempt: attempt + 1, Err: err,
 				Delay: sleep, Elapsed: time.Since(start), Budget: budget})
 			if attempt < retryLogEvery || attempt%retryLogEvery == 0 {
 				log.Printf("llm: cannot reach provider (attempt %d): %v; retrying in %s",
@@ -1768,19 +1789,28 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 	deadline := callStart.Add(budget)
 	backoff := retryInitialBackoff
 	var sleep time.Duration
-	gate := func(se *StreamError) bool {
-		if !se.Retryable() || ctx.Err() != nil {
+	gate := func(err error) bool {
+		var se *StreamError
+		retryable := false
+		var hint time.Duration
+		switch {
+		case errors.As(err, &se):
+			retryable, hint = se.Retryable(), se.RetryAfter
+		case stallOf(err) != nil:
+			retryable = true
+		}
+		if !retryable || ctx.Err() != nil {
 			return false
 		}
 		sleep = backoff
-		if se.RetryAfter > 0 {
-			sleep = se.RetryAfter
+		if hint > 0 {
+			sleep = hint
 		}
 		sleep = jittered(sleep)
 		if time.Now().Add(sleep).After(deadline) {
-			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Err: se, Elapsed: time.Since(callStart), Budget: budget,
-				Reason: fmt.Sprintf("gave up on a stream error after %s (retry budget %s): %v",
-					time.Since(callStart).Round(time.Second), budget, se)})
+			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Err: err, Elapsed: time.Since(callStart), Budget: budget,
+				Reason: fmt.Sprintf("gave up on a stream failure after %s (retry budget %s): %v",
+					time.Since(callStart).Round(time.Second), budget, err)})
 			return false
 		}
 		return true
@@ -1793,9 +1823,14 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 			}
 			return
 		}
-		c.emitRetry(RetryEvent{Kind: RetryStream, Attempt: attempt, Err: se, Body: se.Message,
-			Delay: sleep, Elapsed: time.Since(callStart), Budget: budget, ServerAsked: se.RetryAfter > 0})
-		log.Printf("llm: stream error before any output (attempt %d): %v; resending in %s", attempt, se, sleep)
+		ev := RetryEvent{Kind: RetryStall, Attempt: attempt, Err: se,
+			Delay: sleep, Elapsed: time.Since(callStart), Budget: budget}
+		var streamErr *StreamError
+		if errors.As(se, &streamErr) {
+			ev.Kind, ev.Body, ev.ServerAsked = RetryStream, streamErr.Message, streamErr.RetryAfter > 0
+		}
+		c.emitRetry(ev)
+		log.Printf("llm: stream failed before any output (attempt %d): %v; resending in %s", attempt, se, sleep)
 		if !sleepOrCancel(ctx, sleep) {
 			ch <- StreamChunk{Error: ctx.Err().Error()}
 			return
@@ -1903,13 +1938,55 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolDef) 
 	return c.ChatWithOpts(ctx, messages, tools, nil)
 }
 
+// chatBodyBytes sends a non-streaming chat request and reads the whole body. A
+// stall while reading (see StallError) happens before anything reached the
+// caller, so the request is resent, with the same jitter and bounds as the
+// other retries: Client.RetryBudget from the first attempt, and ctx.
+func (c *Client) chatBodyBytes(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (*http.Response, sentRequest, time.Time, []byte, error) {
+	first := time.Now()
+	budget := c.retryBudget()
+	backoff := retryInitialBackoff
+	for attempt := 1; ; attempt++ {
+		resp, sent, callStart, err := c.sendChat(ctx, messages, tools, opts, false)
+		if err != nil {
+			return nil, sentRequest{}, callStart, nil, err
+		}
+		raw, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err == nil {
+			if attempt > 1 {
+				c.emitRetry(RetryEvent{Kind: RetryRecovered, Attempt: attempt, Elapsed: time.Since(first), Budget: budget})
+			}
+			return resp, sent, callStart, raw, nil
+		}
+		if stallOf(err) == nil || ctx.Err() != nil {
+			return nil, sentRequest{}, callStart, nil, fmt.Errorf("llm: read: %w", err)
+		}
+		sleep := jittered(backoff)
+		if time.Since(first)+sleep > budget {
+			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Attempt: attempt, Err: err, Elapsed: time.Since(first), Budget: budget,
+				Reason: fmt.Sprintf("gave up on a stalled response after %s (retry budget %s): %v",
+					time.Since(first).Round(time.Second), budget, err)})
+			return nil, sentRequest{}, callStart, nil, fmt.Errorf("llm: read: %w", err)
+		}
+		c.emitRetry(RetryEvent{Kind: RetryStall, Attempt: attempt, Err: err, Delay: sleep, Elapsed: time.Since(first), Budget: budget})
+		log.Printf("llm: response stalled (attempt %d): %v; resending in %s", attempt, err, sleep)
+		if !sleepOrCancel(ctx, sleep) {
+			return nil, sentRequest{}, callStart, nil, ctx.Err()
+		}
+		backoff *= 2
+		if backoff > retryMaxBackoff {
+			backoff = retryMaxBackoff
+		}
+	}
+}
+
 // ChatWithOpts is Chat with sampling and constrained-decoding options.
 func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts) (string, []ToolCall, error) {
-	resp, sent, callStart, err := c.sendChat(ctx, messages, tools, opts, false)
+	resp, sent, callStart, raw, err := c.chatBodyBytes(ctx, messages, tools, opts)
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
 
 	var result struct {
 		Choices []struct {
@@ -1922,10 +1999,6 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		} `json:"choices"`
 		Model string `json:"model"`
 		Usage *Usage `json:"usage"`
-	}
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", nil, fmt.Errorf("llm: read: %w", err)
 	}
 	if c.usesMessagesAPI() {
 		if raw, err = shim.Response(raw, shim.StreamOptions{Prices: c.ClaudePrices}); err != nil {
@@ -1981,10 +2054,11 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 }
 
 // streamAttempt reads one response. It does not close ch. When gate is non-nil
-// and a provider error event arrives before ANY chunk was sent to ch and gate
-// says yes, it sends nothing, skips its end-of-stream bookkeeping and returns
-// the error so the caller can resend; every other path returns nil.
-func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest, gate func(*StreamError) bool) (retry *StreamError) {
+// and a provider error event (*StreamError) or a stall (*StallError) arrives
+// before ANY chunk was sent to ch and gate says yes, it sends nothing, skips its
+// end-of-stream bookkeeping and returns the error so the caller can resend;
+// every other path returns nil.
+func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest, gate func(error) bool) (retry error) {
 	defer body.Close()
 	// forwarded: something reached the caller, so a resend can no longer be
 	// invisible. Every send in this function goes through send.
@@ -2369,7 +2443,11 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		}
 	}
 	if readErr != nil {
-		send(StreamChunk{Error: readErr.Error()})
+		stall := stallOf(readErr)
+		if stall != nil && gate != nil && !forwarded && gate(stall) {
+			return stall
+		}
+		send(StreamChunk{Error: readErr.Error(), Stall: stall})
 	}
 	// The stream ended WITHOUT a finish_reason — a dropped connection, a server
 	// that gave up mid-generation, a truncated body. Anything still in the

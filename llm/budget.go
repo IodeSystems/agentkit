@@ -157,7 +157,7 @@ func (c *Client) fetchBudget(ctx context.Context, r budgetRoute) (b KeyBudget, d
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return KeyBudget{}, false, err
 	}
