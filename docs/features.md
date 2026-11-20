@@ -401,8 +401,33 @@ a target, the fold keeps the largest newest suffix whose rebuilt prompt (the
 caller's prefix, a summary at its cap, pinned entries, the suffix; no LOD) fits
 that percent of the target. The pristine tail is the minimum, the suffix is
 widened so no result loses its call, and when the band holds nothing more the
-fold is the default one. `CompactionInfo` reports `KeptCount` and `KeptTokens`;
-`TokensAfter` is the post-fold token count without LOD, what the next build sends.
+fold is the default one.
+
+**What a fold reports (`CompactionInfo`).** All after-numbers are measured on
+the store after the fold, from the render the next build sends, and are
+conversation tokens: the system prompt and tool definitions are not counted.
+
+| field | meaning |
+|---|---|
+| `TokensBefore` | the render that decided the fold, less the system prompt |
+| `TokensAfter` | what the next build sends, less the system prompt |
+| `SummaryTokens` | the marker this fold wrote |
+| `PinnedTokens` | pinned entries older than the kept part (a fold skips them) |
+| `KeptTokens`, `KeptCount` | everything else: normally the newest entries kept verbatim |
+
+`SummaryTokens + PinnedTokens + KeptTokens == TokensAfter`. The fold decision
+itself still counts the system prompt: `CompactionStart.TokensBefore` is that
+number, compared with `Target`.
+
+**Old results can be stubbed under target after a fold (`ShaperPolicy.FoldMidLOD`, opt-in).**
+Under target a build normally sends every entry verbatim, so a wide kept band
+refills the window with results that were already sent whole. With
+`FoldMidLOD`, once the context holds a compaction marker, a build under target
+stubs oversized entries older than the LOD boundary, stepped by `LODStep`: the
+prompt prefix changes once per step, not on every round. The pristine tail, the
+pins and the markers stay verbatim, and every call keeps its result. The fold
+sizes its kept band with the same render, so `FoldKeepPct` keeps more entries,
+and `TokensAfter` is that render. Off, the render is the old one.
 
 **A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
 `SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the

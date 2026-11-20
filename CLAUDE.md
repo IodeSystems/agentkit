@@ -157,11 +157,26 @@ plan/     living plan. plan.md = current state + active work + decisions;
   key. Every fold request's ctx is marked: `IsFold(ctx)`.
 - **A fold keeps the pristine tail, or more with `ShaperPolicy.FoldKeepPct`.**
   `foldKeep` (shaper.go) picks the largest newest suffix whose rebuilt prompt
-  (prefix from `tokensBefore` + `SummaryCap(SummaryMaxTokens)` + pinned + suffix,
-  rendered WITHOUT LOD) fits that percent of target, widened by
-  `keepCallsWithResults`; it falls back to the pristine tail when the band is no
-  wider or nothing new would fold. 0 is the old behavior exactly;
-  `CompactionInfo.TokensAfter` is the non-LOD render: what the next build sends.
+  (caller's system message + `SummaryCap(SummaryMaxTokens)` + pinned + suffix,
+  rendered as the next build under target renders it: `underTarget`) fits that
+  percent of target, widened by `keepCallsWithResults`; it falls back to the
+  pristine tail when the band is no wider or nothing new would fold. 0 is the
+  old behavior exactly.
+- **Fold accounting is on one basis.** Every after-number is measured on the
+  store AFTER `Store.Compact`, from the `underTarget` render: the snapshot the
+  fold read goes stale during the summary call (a second fold, a drop).
+  `SummaryTokens + PinnedTokens + KeptTokens == TokensAfter` exactly.
+  `CompactionInfo.TokensBefore`/`TokensAfter` exclude the system prompt and
+  tools; `CompactionStart.TokensBefore` includes the system prompt (it is
+  compared with `Target`, and decides the fold). `messageTokens` counts native
+  tool calls (name + arguments).
+- **`ShaperPolicy.FoldMidLOD` (off = old render).** Once the context holds a
+  `KindCompaction` entry, a build UNDER target stubs entries older than
+  `lodBoundary` (LODStep-stepped, the same as phase 1's first step), so the
+  cached prefix breaks once per step. Pins, markers, the pristine tail stay
+  verbatim; call/result pairs stay intact. With stubs the band's size drops at
+  each step (not monotone in k), so `foldKeep` searches the last step whose
+  first k fits, then within it. AlwaysLOD wins over it.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
