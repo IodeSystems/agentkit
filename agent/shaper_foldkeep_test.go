@@ -255,20 +255,24 @@ func TestFoldKeepPct_WidenedSuffixNeverOrphansAResult(t *testing.T) {
 
 // TokensAfter was measured with LOD forced, so a long tool result that LOD
 // shortens made it smaller than what the next build sent (dun: 90,127
-// reported, 97.8k sent). It must equal the next build's prompt tokens.
+// reported, 97.8k sent). It must equal the next build's prompt tokens, with
+// FoldMidLOD (the next build stubs its older part) and without.
 func TestTokensAfterEqualsNextBuildAfterFoldWithLongToolResult(t *testing.T) {
-	st := reportedSession(8000)  // above LODTruncateAboveChars
-	sh := reportedShaper(st, 55) // keeps entries beyond the pristine tail
-	sh.Policy.BudgetTokens = 100_000
-	_, infos := buildWithInfo(t, sh, "")
-	if len(infos) != 1 {
-		t.Fatalf("%d folds, want 1", len(infos))
-	}
-	next, err := sh.Build(context.Background(), "s", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := sh.tokens(next); got != infos[0].TokensAfter {
-		t.Fatalf("TokensAfter %d, next build sends %d", infos[0].TokensAfter, got)
+	for _, mid := range []bool{false, true} {
+		st := reportedSession(8000)  // above LODTruncateAboveChars
+		sh := reportedShaper(st, 55) // keeps entries beyond the pristine tail
+		sh.Policy.BudgetTokens = 100_000
+		sh.Policy.FoldMidLOD = mid
+		_, infos := buildWithInfo(t, sh, "")
+		if len(infos) != 1 {
+			t.Fatalf("mid %v: %d folds, want 1", mid, len(infos))
+		}
+		next, err := sh.Build(context.Background(), "s", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sh.tokens(next); got != infos[0].TokensAfter {
+			t.Fatalf("mid %v: TokensAfter %d, next build sends %d", mid, infos[0].TokensAfter, got)
+		}
 	}
 }

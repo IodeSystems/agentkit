@@ -137,7 +137,8 @@ type ShaperPolicy struct {
 	// FoldKeepPct makes a fold keep more than the pristine tail: the newest
 	// entries stay verbatim, as many as fit with the prompt after the fold
 	// (the caller's prefix, a summary at its cap, the pinned entries and the
-	// kept ones, rendered without LOD) within FoldKeepPct percent of the
+	// kept ones, rendered as the next build renders them: without LOD, or with
+	// FoldMidLOD's stubs) within FoldKeepPct percent of the
 	// target. Only the oldest entries are folded. WHY: a fold that keeps only
 	// the pristine tail leaves the window nearly empty, so the next fold comes
 	// soon and each one pays a summarizer round-trip. The pristine tail is the
@@ -146,6 +147,22 @@ type ShaperPolicy struct {
 	// call. 0 → the pristine tail only. A fold with no target (Compact) keeps
 	// the pristine tail.
 	FoldKeepPct int
+	// FoldMidLOD stubs old oversized entries UNDER target once the session has
+	// been folded. Off by default, and off is the old behavior exactly.
+	//
+	// Under target a build normally sends every entry verbatim, so the cached
+	// prefix only grows at the end. After a fold that keeps a wide band
+	// (FoldKeepPct), the band is full of results that were sent whole before
+	// the fold; with them verbatim the window fills again quickly and the next
+	// fold comes soon. With this set, a build of a context that holds a
+	// KindCompaction entry renders as phase 1 does: entries older than the LOD
+	// boundary get LOD stubs (content only; every call keeps its result), the
+	// pristine tail, the pins and the markers stay verbatim. The boundary is
+	// stepped by LODStep from the pristine tail edge, so the prefix changes
+	// once per step, not on every round as the tail moves. A fold sizes its
+	// kept band with the same render (FoldKeepPct keeps more entries), and
+	// CompactionInfo.TokensAfter is that render.
+	FoldMidLOD bool
 }
 
 // defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
@@ -398,8 +415,9 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// Phase 0: pristine tail, normally rendered WITHOUT LOD. If we're under
 		// target, DON'T touch the prefix — appending to the tail keeps the cached
 		// prefix intact. AlwaysLOD forces LOD truncation from this phase on, so
-		// oversized older entries are truncated every turn even under budget.
-		messages := sh.render(entries, pristineCount, system, sh.Policy.AlwaysLOD)
+		// oversized older entries are truncated every turn even under budget;
+		// FoldMidLOD does the same at a stepped boundary once a fold happened.
+		messages := sh.underTarget(entries, pristineCount, system)
 		before := sh.tokens(messages)
 		if before <= target {
 			return messages, nil
@@ -411,7 +429,7 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// grows with the history, so between steps the prefix is append-only.
 		olderEnd := len(entries) - pristineCount
 		step := sh.Policy.lodStep()
-		for b := olderEnd / step * step; ; b += step {
+		for b := sh.Policy.lodBoundary(olderEnd); ; b += step {
 			if b > olderEnd {
 				b = olderEnd
 			}
@@ -496,7 +514,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	}
 	sortEntries(entries)
 	pristineCount := classifyPristineCount(entries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
-	pristineCount = sh.foldKeep(entries, pristineCount, tokensBefore, target)
+	pristineCount = sh.foldKeep(entries, pristineCount, sysTokens, target)
 
 	olderEnd := len(entries) - pristineCount
 	if olderEnd <= 0 {
@@ -623,9 +641,9 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 // after (dun: "kept 54.4k, after 48.6k"). The post-compact store is what the
 // next build reads, so every number is measured there.
 //
-// WHY the non-LOD render: a fold lands under target, and a build under target
-// sends without LOD. Measuring with LOD forced reported fewer tokens than were
-// sent.
+// WHY the under-target render: a fold lands under target, and a build under
+// target sends without LOD (unless AlwaysLOD or FoldMidLOD stubs its older
+// part). Measuring with LOD forced reported fewer tokens than were sent.
 //
 // The parts are attributed per rendered message: the marker and the pinned
 // entries each render as their own message, and KeptTokens is the rest, so
@@ -633,7 +651,8 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 // user entry that renders folded into a tool result (FoldUserIntoToolResult)
 // has no message of its own; its tokens stay in KeptTokens.
 func (sh *Shaper) measureAfter(info *CompactionInfo, after []Entry, pinnedIDs map[string]bool) {
-	msgs := sh.render(after, len(after), "", false)
+	pc := classifyPristineCount(after, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+	msgs := sh.underTarget(after, pc, "")
 	info.TokensAfter = sh.tokens(msgs)
 	kept := len(after)
 	for _, e := range after {
@@ -667,33 +686,107 @@ func hasMessage(msgs []llm.Message, m llm.Message) bool {
 // foldKeep is how many of the newest entries a fold keeps verbatim: floor (the
 // pristine tail) without Policy.FoldKeepPct or a target, else the most whose
 // rebuilt prompt fits FoldKeepPct of target, never fewer than floor. The prefix
-// is what tokensBefore counted beside the entries (the system prompt); the
-// summary is reserved at its largest cap, so the band holds whatever size the
-// summary comes out. Rendered without LOD, as the next build under target is.
-func (sh *Shaper) foldKeep(entries []Entry, floor, tokensBefore, target int) int {
-	if sh.Policy.FoldKeepPct <= 0 || target <= 0 || tokensBefore <= 0 || floor >= len(entries) {
+// is the caller's system message (sysTokens); the summary is reserved at its
+// largest cap, so the band holds whatever size the summary comes out. The
+// rebuilt prompt is rendered as the next build under target renders it:
+// without LOD, or with FoldMidLOD's stubs (a marker will be in the context),
+// so with FoldMidLOD the band holds more entries.
+func (sh *Shaper) foldKeep(entries []Entry, floor, sysTokens, target int) int {
+	if sh.Policy.FoldKeepPct <= 0 || target <= 0 || floor >= len(entries) {
 		return floor
 	}
-	prefix := max(tokensBefore-sh.tokens(sh.render(entries, len(entries), "", false)), 0)
-	room := target*sh.Policy.FoldKeepPct/100 - prefix - SummaryCap(SummaryMaxTokens)
+	room := target*sh.Policy.FoldKeepPct/100 - sysTokens - SummaryCap(SummaryMaxTokens)
 	pinned := sh.pins(entries)
-	fits := func(k int) bool {
+	// midLOD: the next build stubs below a stepped boundary (underTarget), so the
+	// band is measured that way. AlwaysLOD wins over FoldMidLOD there, and the
+	// band ignores it, as it did before FoldMidLOD.
+	midLOD := sh.Policy.FoldMidLOD && !sh.Policy.AlwaysLOD
+	keptFor := func(k int) []Entry {
 		var kept []Entry
+		marked := false
 		for i, e := range entries {
+			if midLOD && !marked && i >= len(entries)-k {
+				// Where the marker will be: it counts toward the stepped
+				// boundary, and it switches FoldMidLOD on. Its content is in
+				// the SummaryCap reserve.
+				kept = append(kept, Entry{Kind: KindCompaction})
+				marked = true
+			}
 			if i >= len(entries)-k || pinned.has(i) {
 				kept = append(kept, e)
 			}
 		}
-		return sh.tokens(sh.render(kept, len(kept), "", false)) <= room
+		return kept
 	}
-	// The kept size only grows with k: the largest k that fits, by halving.
+	pristine := func(kept []Entry) int {
+		return classifyPristineCount(kept, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
+	}
+	fits := func(k int) bool {
+		kept := keptFor(k)
+		if !midLOD {
+			return sh.tokens(sh.render(kept, len(kept), "", false)) <= room
+		}
+		return sh.tokens(sh.underTarget(kept, pristine(kept), "")) <= room
+	}
+	// plateau is k's LOD step: the next build stubs plateau*LODStep entries.
+	// Without midLOD there is one plateau and nothing is stubbed.
+	step := sh.Policy.lodStep()
+	plateau := func(k int) int {
+		if !midLOD {
+			return 0
+		}
+		kept := keptFor(k)
+		return sh.Policy.lodBoundary(len(kept)-pristine(kept)) / step
+	}
+	// first is the smallest k at or above floor on plateau j or a later one.
+	first := func(j int) int {
+		lo, hi := floor, len(entries)-1
+		for lo < hi {
+			m := (lo + hi) / 2
+			if plateau(m) >= j {
+				hi = m
+			} else {
+				lo = m + 1
+			}
+		}
+		return lo
+	}
+	// With midLOD a k is judged by its widened kept part (keepCallsWithResults,
+	// below). A band edge whose widening overshoots falls back to the floor,
+	// and with stubs the edge sits on a cliff: one entry wider can be a
+	// verbatim result where the narrower one was a stub.
+	search := fits
+	if midLOD {
+		search = func(k int) bool { return fits(keepCallsWithResults(entries, k)) }
+	}
 	lo, hi := floor, len(entries)-1
 	if lo > hi || !fits(lo) {
 		return floor
 	}
+	// Within one plateau the kept size only grows with k. At the next plateau
+	// it drops: a step of entries becomes stubs. So the largest k that fits is
+	// on the last plateau whose first k fits (those first sizes grow with the
+	// plateau too), and then the largest k on it, both by halving.
+	if jf, jmax := plateau(floor), plateau(hi); jmax > jf {
+		a, b := jf, jmax
+		for a < b {
+			m := (a + b + 1) / 2
+			if search(first(m)) {
+				a = m
+			} else {
+				b = m - 1
+			}
+		}
+		if a > jf {
+			lo = first(a)
+		}
+		if a < jmax {
+			hi = first(a+1) - 1
+		}
+	}
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if fits(mid) {
+		if search(mid) {
 			lo = mid
 		} else {
 			hi = mid - 1
@@ -869,6 +962,36 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 		}
 		return content
 	}, sh.Policy.renderOptions())
+}
+
+// lodBoundary is the stepped LOD boundary for olderEnd entries older than the
+// pristine tail: olderEnd rounded down to a multiple of LODStep.
+func (p ShaperPolicy) lodBoundary(olderEnd int) int {
+	step := p.lodStep()
+	return olderEnd / step * step
+}
+
+// underTarget is the render a build sends when it is under target (phase 0).
+// Without AlwaysLOD or FoldMidLOD that is every entry verbatim. AlwaysLOD
+// stubs everything older than the pristine tail. FoldMidLOD, once the context
+// holds a marker, stubs what is older than the stepped boundary, as phase 1's
+// first step does. A fold measures TokensAfter with this, so the number is
+// what the next build sends.
+func (sh *Shaper) underTarget(entries []Entry, pristineCount int, system string) []llm.Message {
+	if sh.Policy.AlwaysLOD || !sh.Policy.FoldMidLOD || !hasMarker(entries) {
+		return sh.render(entries, pristineCount, system, sh.Policy.AlwaysLOD)
+	}
+	b := sh.Policy.lodBoundary(len(entries) - pristineCount)
+	return sh.render(entries, len(entries)-b, system, true)
+}
+
+func hasMarker(entries []Entry) bool {
+	for _, e := range entries {
+		if e.Kind == KindCompaction {
+			return true
+		}
+	}
+	return false
 }
 
 // renderOptions is the policy's share of the rendering knobs.
