@@ -440,7 +440,14 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 		// Phase 2: compaction. Fold the oldest contiguous prefix of "older"
 		// entries into a summary marker. If nothing summarizable remains, return
 		// what we have.
-		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, target, budget, sh.taskOr(system))
+		// The system prompt counts toward the fold decision (it is sent), but
+		// the fold reports conversation tokens only, so TokensBefore and
+		// TokensAfter are on one basis.
+		sysTokens := 0
+		if system != "" {
+			sysTokens = messageTokens(sh.Estimate, messages[0])
+		}
+		info, didCompact, err := sh.compactOldest(ctx, sessionID, before, sysTokens, target, budget, sh.taskOr(system))
 		if err != nil {
 			return nil, err
 		}
@@ -469,18 +476,17 @@ func (sh *Shaper) Build(ctx context.Context, sessionID, system string) (msgs []l
 // CompactionInfo — NOT an error — when there is nothing summarizable (only the
 // pristine tail remains, or every older entry is already a marker). This is the
 // single implementation shared by Build's Phase 2 and the public Compact.
-// TokensBefore/After mirror Build: a full (no-LOD) render before, an LOD render
-// of the post-compaction window after.
 // tokensBefore/target are what the CALLER measured, passed in rather than
 // recomputed: Build already rendered the window to decide a fold was needed, and
 // re-measuring here would report a different number than the one that triggered
-// it. CompactionStart and CompactionInfo both carry it. Zero from a caller that
-// has no measurement (the public Compact) means it is measured here, without
-// the system prompt.
+// it. CompactionStart carries it as measured; CompactionInfo carries it less
+// sysTokens (the caller's system message), on the same basis as TokensAfter.
+// Zero from a caller that has no measurement (the public Compact) means it is
+// measured here, without the system prompt.
 //
 // window is the budget the fold call itself must fit, in estimator units; 0
 // leaves the fold input unbounded (an unbudgeted Shaper).
-func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, target, window int, task string) (CompactionInfo, bool, error) {
+func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBefore, sysTokens, target, window int, task string) (CompactionInfo, bool, error) {
 	if sh.Estimate == nil {
 		sh.Estimate = Default()
 	}
@@ -524,7 +530,7 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	// two-hundred-and-fortieth of a 120k one.
 	folded := sh.tokens(sh.render(subsumed, 0, "", false))
 	if tokensBefore == 0 {
-		tokensBefore = before
+		tokensBefore, sysTokens = before, 0
 	}
 	whole := tokensBefore
 	sizeFor := sh.SummaryTokens
@@ -583,28 +589,79 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	// in the index, under the marker that replaced it.
 	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, fresh)
 
-	// Measure the new active window by re-rendering the post-compaction entries.
-	// A fold lands under target, and a build under target sends without LOD,
-	// so the non-LOD render is what the next build sends. Measuring with LOD
-	// forced reported fewer tokens than were sent.
-	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
-	after := 0
-	if aerr == nil {
-		sortEntries(afterEntries)
-		after = sh.tokens(sh.render(afterEntries, len(afterEntries), "", false))
-	}
-
-	return CompactionInfo{
+	info := CompactionInfo{
 		MarkerID:      marker.ID,
 		Summary:       summary,
 		SubsumedCount: len(fresh),
-		TokensBefore:  tokensBefore,
-		TokensAfter:   after,
-		KeptCount:     pristineCount,
-		KeptTokens:    sh.tokens(sh.render(entries[olderEnd:], pristineCount, "", false)),
+		TokensBefore:  max(tokensBefore-sysTokens, 0),
 		Duration:      time.Since(startedAt),
 		IndexErr:      indexErr,
-	}, true, nil
+	}
+	var pinnedIDs map[string]bool
+	for i := 0; i < olderEnd; i++ {
+		if pinned.has(i) {
+			if pinnedIDs == nil {
+				pinnedIDs = map[string]bool{}
+			}
+			pinnedIDs[entries[i].ID] = true
+		}
+	}
+	if afterEntries, err := sh.Store.Context(ctx, sessionID); err == nil {
+		sortEntries(afterEntries)
+		sh.measureAfter(&info, afterEntries, pinnedIDs)
+	}
+	return info, true, nil
+}
+
+// measureAfter fills the fold's after-numbers from the store AFTER
+// Store.Compact, all from one render: the one the next build sends.
+//
+// WHY one store: the entries loaded before the summary call are a snapshot.
+// The summary call is slow, and anything that removes entries while it runs (a
+// second fold, a host's drop) leaves that snapshot describing entries that are
+// no longer sent; a kept count measured on it was larger than the whole window
+// after (dun: "kept 54.4k, after 48.6k"). The post-compact store is what the
+// next build reads, so every number is measured there.
+//
+// WHY the non-LOD render: a fold lands under target, and a build under target
+// sends without LOD. Measuring with LOD forced reported fewer tokens than were
+// sent.
+//
+// The parts are attributed per rendered message: the marker and the pinned
+// entries each render as their own message, and KeptTokens is the rest, so
+// SummaryTokens + PinnedTokens + KeptTokens == TokensAfter exactly. A pinned
+// user entry that renders folded into a tool result (FoldUserIntoToolResult)
+// has no message of its own; its tokens stay in KeptTokens.
+func (sh *Shaper) measureAfter(info *CompactionInfo, after []Entry, pinnedIDs map[string]bool) {
+	msgs := sh.render(after, len(after), "", false)
+	info.TokensAfter = sh.tokens(msgs)
+	kept := len(after)
+	for _, e := range after {
+		switch {
+		case e.ID == info.MarkerID:
+			kept--
+			info.SummaryTokens += messageTokens(sh.Estimate, renderEntry(e, e.Content, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat))
+		case pinnedIDs[e.ID]:
+			kept--
+			m := renderEntry(e, e.Content, sh.Policy.VerbatimToolResults, sh.Policy.ToolFormat)
+			if hasMessage(msgs, m) {
+				info.PinnedTokens += messageTokens(sh.Estimate, m)
+			}
+		}
+	}
+	info.KeptCount = kept
+	info.KeptTokens = info.TokensAfter - info.SummaryTokens - info.PinnedTokens
+}
+
+// hasMessage reports whether m is one of msgs as rendered: a user entry
+// folded into a tool result has no message of its own.
+func hasMessage(msgs []llm.Message, m llm.Message) bool {
+	for _, x := range msgs {
+		if x.Role == m.Role && x.Content == m.Content && len(x.Parts) == len(m.Parts) {
+			return true
+		}
+	}
+	return false
 }
 
 // foldKeep is how many of the newest entries a fold keeps verbatim: floor (the
@@ -668,7 +725,7 @@ func (sh *Shaper) foldKeep(entries []Entry, floor, tokensBefore, target int) int
 func (sh *Shaper) Compact(ctx context.Context, sessionID string) (CompactionInfo, bool, error) {
 	// No measured trigger: this fold was asked for, not forced by a budget, so
 	// there is no "tokens before" that caused it and no target it is aiming at.
-	return sh.compactOldest(ctx, sessionID, 0, 0, sh.Policy.BudgetTokens, sh.taskOr(""))
+	return sh.compactOldest(ctx, sessionID, 0, 0, 0, sh.Policy.BudgetTokens, sh.taskOr(""))
 }
 
 // taskOr is the task a fold is judged against: the host's, else the system

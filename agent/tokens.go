@@ -90,13 +90,19 @@ const ImageTokenEstimate = 1600
 
 // messageTokens is the estimated cost of one message: its text, each part of a
 // multimodal message (partTokens: a flat ImageTokenEstimate per image, audio,
-// video and files by their bytes — mediatokens.go), and its role and name. A
-// message whose body is in Parts has an empty Content and must not count as
-// free.
+// video and files by their bytes — mediatokens.go), its role and name, and each
+// native tool call's function name and arguments. A message whose body is in
+// Parts or ToolCalls has an empty Content and must not count as free: an
+// assistant round that only calls tools was counted as its role alone, so
+// every estimate of a tool-heavy window was low, and low is the wrong
+// direction (see TokenEstimator).
 func messageTokens(est TokenEstimator, m llm.Message) int {
 	t := est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name)
 	for _, p := range m.Parts {
 		t += partTokens(est, p)
+	}
+	for _, tc := range m.ToolCalls {
+		t += est.Estimate(tc.Function.Name) + est.Estimate(tc.Function.Arguments)
 	}
 	return t
 }

@@ -161,15 +161,33 @@ type CompactionInfo struct {
 	MarkerID      string // the KindCompaction Entry's ID; names the new prefix (prompt-cache key)
 	Summary       string // the tight summary that replaced the folded prefix
 	SubsumedCount int    // how many entries were folded into the summary
-	TokensBefore  int    // estimated active-window tokens before this compaction
-	// TokensAfter is the estimated token count of what the next build sends,
-	// excluding the system prompt. A fold lands under target and a build under
-	// target sends without LOD, so this is the non-LOD render. It is also the
-	// number FoldKeepPct is sized against.
+	// TokensBefore is the estimated conversation tokens before this fold: the
+	// render that decided the fold, less the system prompt. Tool definitions
+	// are never counted. It is on the same basis as TokensAfter, so
+	// TokensBefore-TokensAfter is what the fold removed. (The fold DECISION
+	// includes the system prompt; CompactionStart.TokensBefore is that number.)
+	TokensBefore int
+	// TokensAfter is the estimated conversation tokens the next build sends:
+	// the store after the fold, rendered as a build under target renders it
+	// (without LOD), excluding the system prompt and tool definitions. It is
+	// also the number FoldKeepPct is sized against.
 	TokensAfter int
-	// KeptCount is how many of the newest entries the fold left verbatim (the
-	// pristine tail, or more under ShaperPolicy.FoldKeepPct), and KeptTokens
-	// their estimated tokens, rendered without LOD.
+	// SummaryTokens, PinnedTokens and KeptTokens split TokensAfter into its
+	// parts, measured on the same render, so
+	// SummaryTokens + PinnedTokens + KeptTokens == TokensAfter exactly.
+	//
+	// SummaryTokens is the marker this fold wrote, as the build renders it.
+	// PinnedTokens is the pinned entries (PinFirstUser, PinLatestUser) older
+	// than the kept part: a fold skips them, so they stay beside the marker.
+	// A pinned entry in the kept part counts as kept.
+	SummaryTokens int
+	PinnedTokens  int
+	// KeptCount is how many entries of the window after the fold are neither
+	// the marker nor a pinned entry outside the kept part: normally the newest
+	// entries the fold left verbatim (the pristine tail, or more under
+	// ShaperPolicy.FoldKeepPct). KeptTokens is their tokens. Both are measured
+	// on the store after the fold, not the snapshot the fold read: if a second
+	// fold ran during the summary call, what it left is what is counted.
 	KeptCount  int
 	KeptTokens int
 
@@ -195,7 +213,9 @@ type CompactionInfo struct {
 // stalls, and the reason arrives after the wait is over.
 type CompactionStart struct {
 	SessionID string
-	// TokensBefore is the active window that triggered the fold.
+	// TokensBefore is the render that triggered the fold, INCLUDING the system
+	// prompt: the number compared with Target. CompactionInfo.TokensBefore is
+	// the same render less the system prompt.
 	TokensBefore int
 	// Target is the size the shaper is folding down to. Together with
 	// TokensBefore it says how much has to go.
