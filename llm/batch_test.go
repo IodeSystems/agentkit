@@ -99,6 +99,27 @@ func TestUsage_BatchSurvivesJSONRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBatchRate_ABatchCallIsCheaperThanRealtime pins the "at its rate" half of
+// the spec: a batch Usage does not just name the call as batch, it is batch AT
+// ITS RATE — for a dialect with a published discount the batch rate is strictly
+// below the standard per-token rate, so the same tokens cost less. Fails if
+// BatchRate(DialectAnthropic) were raised to 1.0 (a batch flag with no discount).
+func TestBatchRate_ABatchCallIsCheaperThanRealtime(t *testing.T) {
+	std := 1.0 // the standard per-token rate, as the shim prices it
+	if BatchRate(DialectAnthropic) >= BatchRate(DialectAuto) {
+		t.Errorf("BatchRate(%q) = %v is not below the standard rate %v",
+			DialectAnthropic, BatchRate(DialectAnthropic), std)
+	}
+	// The same 150 tokens cost less in batch than in real-time.
+	tokens := 150
+	batchCost := float64(tokens) * BatchRate(DialectAnthropic)
+	realtimeCost := float64(tokens) * BatchRate(DialectAuto)
+	if batchCost >= realtimeCost {
+		t.Errorf("%d tokens: batch cost %v is not below real-time cost %v",
+			tokens, batchCost, realtimeCost)
+	}
+}
+
 // jsonContainsKey reports whether raw is a JSON object that has the named key
 // at the top level.
 func jsonContainsKey(t *testing.T, raw []byte, key string) bool {
