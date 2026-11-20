@@ -53,6 +53,55 @@ func Clip(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
+// noNodeListMax caps how many nodes NoNode names.
+const noNodeListMax = 20
+
+// NoNode is the message for an id that names no node: it says so and lists the
+// nodes that exist, from the graph the call already read. Without the list the
+// model's next move is a plan_show round trip just to learn the ids. Open nodes
+// (todo, doing, blocked) come first, each with a clipped title; closed nodes
+// (done, dropped) follow as bare ids, since nothing there can be acted on. The
+// order is plan_show's (Tree order, a repeat skipped). At most noNodeListMax
+// nodes are named; the rest are counted.
+func (g *Graph) NoNode(id string) string {
+	msg := "no node " + id + "."
+	if len(g.Nodes) == 0 {
+		return msg + " The plan has no nodes."
+	}
+	var open, closed []string
+	for _, r := range g.Tree() {
+		if r.Repeat {
+			continue
+		}
+		switch r.Node.Status {
+		case Done, Dropped:
+			closed = append(closed, r.Node.ID)
+		default:
+			open = append(open, r.Node.ID+" ("+Clip(r.Node.Title, 30)+")")
+		}
+	}
+	left, more := noNodeListMax, 0
+	take := func(s []string) []string {
+		if len(s) > left {
+			more += len(s) - left
+			s = s[:left]
+		}
+		left -= len(s)
+		return s
+	}
+	open, closed = take(open), take(closed)
+	if len(open) > 0 {
+		msg += " Open nodes: " + strings.Join(open, ", ") + "."
+	}
+	if len(closed) > 0 {
+		msg += " Closed: " + strings.Join(closed, ", ") + "."
+	}
+	if more > 0 {
+		msg += fmt.Sprintf(" +%d more.", more)
+	}
+	return msg
+}
+
 // Line is a node on one line.
 func (g *Graph) Line(n *Node) string {
 	s := fmt.Sprintf("%s [%s] %s", n.ID, n.Status, n.Title)

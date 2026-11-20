@@ -3,6 +3,7 @@ package taskgraph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -268,7 +269,7 @@ func (t *Tools) Dispatch(ctx context.Context, name, raw string) string {
 		}
 		n := g.Get(a.ID)
 		if n == nil {
-			return "ERROR: plan: no node " + a.ID + ". Call plan_show without id to list the nodes."
+			return "ERROR: plan: " + g.NoNode(a.ID)
 		}
 		return g.Detail(n)
 	case ToolAdd:
@@ -305,7 +306,7 @@ func (t *Tools) Dispatch(ctx context.Context, name, raw string) string {
 		var n *Node
 		if name != ToolAdd {
 			if g.Get(a.ID) == nil {
-				return fmt.Errorf("no node %s. Call plan_show to list the nodes", a.ID)
+				return errors.New(g.NoNode(a.ID))
 			}
 			if !may(g, a.ID) {
 				return fmt.Errorf("node %s is not yours to change", a.ID)

@@ -16,6 +16,7 @@
 package taskgraph
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -132,7 +133,7 @@ func (g *Graph) Add(n Node) (*Node, error) {
 		r := g.Get(n.Replaces)
 		switch {
 		case r == nil:
-			return nil, fmt.Errorf("replaces: no node %s", n.Replaces)
+			return nil, fmt.Errorf("replaces: %s", g.NoNode(n.Replaces))
 		case r.Status != Dropped:
 			return nil, fmt.Errorf("replaces: node %s is %s; drop it first (a node stands in only for a dropped one)", r.ID, r.Status)
 		}
@@ -149,7 +150,7 @@ func (g *Graph) Add(n Node) (*Node, error) {
 func (g *Graph) checkNeeds(id string, needs []string) error {
 	for _, d := range needs {
 		if g.Get(d) == nil {
-			return fmt.Errorf("needs: no node %s", d)
+			return fmt.Errorf("needs: %s", g.NoNode(d))
 		}
 		if id == "" {
 			continue
@@ -204,7 +205,7 @@ type Patch struct {
 func (g *Graph) Update(id string, p Patch) error {
 	n := g.Get(id)
 	if n == nil {
-		return fmt.Errorf("no node %s", id)
+		return errors.New(g.NoNode(id))
 	}
 	c := *n
 	if p.Title != nil {
@@ -251,7 +252,7 @@ func (g *Graph) Update(id string, p Patch) error {
 func (g *Graph) SetStatus(id string, to Status, why string) error {
 	n := g.Get(id)
 	if n == nil {
-		return fmt.Errorf("no node %s", id)
+		return errors.New(g.NoNode(id))
 	}
 	why = clean(why)
 	if n.Status == to {
@@ -342,7 +343,7 @@ func (g *Graph) replacement(id string) *Node {
 func (g *Graph) CanStart(id string) (bool, []string) {
 	n := g.Get(id)
 	if n == nil {
-		return false, []string{"no node " + id}
+		return false, []string{g.NoNode(id)}
 	}
 	if n.Status != Todo {
 		return false, []string{"it is " + string(n.Status)}
@@ -424,7 +425,7 @@ func (g *Graph) Subtree(id string) []*Node {
 func (g *Graph) Assign(id, owner string) error {
 	sub := g.Subtree(id)
 	if sub == nil {
-		return fmt.Errorf("no node %s", id)
+		return errors.New(g.NoNode(id))
 	}
 	for _, n := range sub {
 		if n.Owner != "" && n.Owner != owner {
