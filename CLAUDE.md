@@ -218,7 +218,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `forwarded` flag; the failed attempt skips OnUsage/observeStream); it is kept
   as `*llm.StreamError` (`StreamChunk.StreamErr`, `chunk.Err()`).
 - **A silent link is ended by a watchdog, not by `http.Client.Timeout`.**
-  `Client.do` (stall.go) wraps every request: `FirstByteTimeout` (default 10m:
+  `Client.do` (stall.go) wraps every request: `FirstByteTimeout` (default 15m:
   llama.cpp is silent while it processes a prompt) until the first body byte,
   then `StallTimeout` (2m) per body Read. 0 = default, negative = off. The timer
   resets at the io.Reader, BELOW the SSE parser, so `: keep-alive` comments count;

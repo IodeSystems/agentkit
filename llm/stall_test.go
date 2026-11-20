@@ -298,8 +298,8 @@ func TestStall_ChatBodyStallIsRetried(t *testing.T) {
 
 func TestStall_DefaultsAndOff(t *testing.T) {
 	c := NewClient("http://x", "", "m")
-	if c.firstByteTimeout() != 10*time.Minute || c.stallTimeout() != 2*time.Minute {
-		t.Errorf("defaults = %s, %s; want 10m, 2m", c.firstByteTimeout(), c.stallTimeout())
+	if c.firstByteTimeout() != 15*time.Minute || c.stallTimeout() != 2*time.Minute {
+		t.Errorf("defaults = %s, %s; want 15m, 2m", c.firstByteTimeout(), c.stallTimeout())
 	}
 	c.FirstByteTimeout, c.StallTimeout = -1, -time.Second
 	if c.firstByteTimeout() != 0 || c.stallTimeout() != 0 {

@@ -607,9 +607,10 @@ type Client struct {
 
 	// FirstByteTimeout is the longest a request may wait, from sent until the
 	// first response byte (headers included), before it is ended with a
-	// *StallError and retried within RetryBudget. 0 = 10m: llama.cpp sends
+	// *StallError and retried within RetryBudget. 0 = 15m: llama.cpp sends
 	// nothing while it processes a long prompt, so a short value kills requests
-	// that work. Negative = off. See stall.go.
+	// that work, and corrallm can hold a queued request up to 12m with no
+	// bytes. Negative = off. See stall.go.
 	FirstByteTimeout time.Duration
 
 	// StallTimeout is the longest gap between response bytes once the first one
