@@ -1121,6 +1121,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-20: agentkit v0.39.0: fold accounting on one basis, `SummaryTokens`/`PinnedTokens` (bae18ec); `FoldMidLOD` (71eaf5b, docs 139a449); `FirstByteTimeout` 15m (8049994+, aw4-91 found corrallm holds queued requests up to 12m); batch path + citations (9f47e91..281f83d, another session). dun-2a asked; Carl approved.
 - 2026-11-19: agentkit v0.38.0: `TokensAfter` without LOD, `TokensAfterFull` removed (b07910f); typed `StreamError` + pre-output retry (4756827); `Usage.Model` (2fbed55); finish_reason/native_finish_reason + `reasoning_details` (8eb66eb); mcpmgr roots (85c5b08); taskgraph `Graph.NoNode` (43c75db); `ErrEmptyReply` (cab0015); stall timeouts + transport (aad69ca); mandatory-reasoning fold tests (f9a4fbb). dun-bf asked; Carl approved.
 - 2026-11-18: agentkit v0.37.0: `ShaperPolicy.FoldKeepPct`, `CompactionInfo.KeptCount/KeptTokens/TokensAfterFull` (96cdd09; dun-bf proposed, dun sets 55).
 - 2026-11-18: agentkit v0.36.0: mid-turn user words render after the round's tool results; `RenderOptions`/`ShaperPolicy.FoldUserIntoToolResult`, `DefaultContextBuilderWith` (fac03c4; dun-bf asked).
