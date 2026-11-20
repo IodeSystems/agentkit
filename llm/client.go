@@ -468,6 +468,14 @@ type Usage struct {
 	// gateway stamps it on every call (LiteLLM's x-litellm-key-spend and
 	// x-litellm-key-max-budget). No reset time: for that, Client.KeyBudget.
 	KeyBudget KeyBudget `json:"key_budget,omitzero"`
+
+	// Batch is true when this completion came from the provider's batch
+	// endpoint (Claude: /v1/messages/batches), where tokens are priced at a
+	// fraction of the standard per-token rate. The fraction is dialect-specific:
+	// see BatchRate. Stamped by the client on the batch path; zero-valued
+	// (false) on the standard chat path, so a real-time Usage and a batch
+	// Usage are distinguishable by this field alone.
+	Batch bool `json:"batch,omitempty"`
 }
 
 // Timings is llama.cpp's per-request compute report. Milliseconds are floats on
