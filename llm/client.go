@@ -298,7 +298,13 @@ type StreamChunk struct {
 	Reasoning string
 	ToolCall  *ToolCall
 	Done      bool
-	Error     string
+	// FinishReason is the choice's finish_reason, verbatim, on the Done chunk
+	// of a round that sent one. NativeFinishReason is OpenRouter's
+	// native_finish_reason (e.g. "MALFORMED_FUNCTION_CALL"). Both empty
+	// otherwise. Unlike StopReason, they are the provider's words, not ours.
+	FinishReason       string
+	NativeFinishReason string
+	Error              string
 	// StreamErr is the parsed form of Error when the provider reported it as an
 	// error event inside the 200 stream (code, type, metadata). Nil for every
 	// other Error (read failure, truncation). Error stays set and starts with
@@ -400,6 +406,16 @@ type Usage struct {
 	// back to a proxy header. A caller resolving a configured alias to the
 	// model that served it reads this.
 	Model string `json:"model,omitempty"`
+
+	// FinishReason is the choice's finish_reason, verbatim ("stop", "length",
+	// "tool_calls", "content_filter", "error", or whatever the provider says).
+	// Empty when the response carried none. Stamped by the client, never read
+	// from the provider's usage object.
+	FinishReason string `json:"finish_reason,omitempty"`
+	// NativeFinishReason is OpenRouter's native_finish_reason, verbatim: the
+	// upstream provider's own word before OpenRouter normalizes it into
+	// FinishReason (e.g. "MALFORMED_FUNCTION_CALL"). Empty elsewhere.
+	NativeFinishReason string `json:"native_finish_reason,omitempty"`
 
 	// Timings is what the MODEL SERVER said it spent computing this round, when
 	// it says so: llama.cpp's non-standard top-level "timings" object, a sibling
@@ -1901,7 +1917,8 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 				Content   string     `json:"content"`
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
+			FinishReason       string `json:"finish_reason"`
+			NativeFinishReason string `json:"native_finish_reason"`
 		} `json:"choices"`
 		Model string `json:"model"`
 		Usage *Usage `json:"usage"`
@@ -1928,6 +1945,10 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 			u.LatencyMS = time.Since(callStart).Milliseconds()
 			meta.stamp(&u, usageCost(raw), result.Model)
 			u.Model = result.Model
+			if len(result.Choices) > 0 {
+				u.FinishReason = result.Choices[0].FinishReason
+				u.NativeFinishReason = result.Choices[0].NativeFinishReason
+			}
 			c.OnUsage(u)
 		}
 	}
@@ -1984,6 +2005,11 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// body-only value Usage.Model reports, distinct from streamModel's
 	// first-seen semantics.
 	var lastModel string
+	// lastFinish and lastNative are the finish_reason and OpenRouter's
+	// native_finish_reason as the stream sent them. Kept verbatim: the client
+	// itself acts only on "length" and "content_filter", but a host needs the
+	// rest to tell an empty reply from a refused or malformed one.
+	var lastFinish, lastNative string
 	defer func() {
 		if retry != nil || c.OnUsage == nil {
 			return
@@ -1994,6 +2020,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
 			meta.stamp(&u, nil, streamModel)
 			u.Model = lastModel
+			u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 			c.OnUsage(u)
 		}
 	}()
@@ -2014,6 +2041,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		u.Timings = timings
 		meta.stamp(u, usageCost([]byte(data)), streamModel)
 		u.Model = lastModel
+		u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 		lastUsage = u
 		obs.usage = true
 	}
@@ -2141,6 +2169,9 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 					// Two names for one thing. See StreamChunk.Reasoning.
 					ReasoningContent string `json:"reasoning_content"`
 					Reasoning        string `json:"reasoning"`
+					// OpenRouter's structured form of the same reasoning. Read
+					// only when both fields above are empty. See reasoningFromDetails.
+					ReasoningDetails []reasoningDetail `json:"reasoning_details"`
 					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id,omitempty"`
@@ -2156,6 +2187,8 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 					} `json:"tool_calls,omitempty"`
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
+				// OpenRouter: the upstream provider's own finish word.
+				NativeFinishReason string `json:"native_finish_reason"`
 			} `json:"choices"`
 			Usage *Usage `json:"usage"`
 			// Loop is set by a proxy that cut the stream for looping.
@@ -2197,14 +2230,29 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			continue
 		}
 		choice := event.Choices[0]
+		if choice.NativeFinishReason != "" {
+			lastNative = choice.NativeFinishReason
+		}
+		if choice.FinishReason != "" {
+			lastFinish = choice.FinishReason
+		}
 
 		// Reasoning is forwarded as it arrives, like content, and kept apart
 		// from it: it is not part of the reply and must not be replayed as one.
-		if r := choice.Delta.ReasoningContent + choice.Delta.Reasoning; r != "" {
+		r := choice.Delta.ReasoningContent + choice.Delta.Reasoning
+		fromDetails := false
+		if r == "" {
+			r = reasoningFromDetails(choice.Delta.ReasoningDetails)
+			fromDetails = r != ""
+		}
+		if r != "" {
 			if obs.reasoningField == "" {
 				obs.reasoningField = reasoningFieldReasoning
 				if choice.Delta.ReasoningContent != "" {
 					obs.reasoningField = reasoningFieldContent
+				}
+				if fromDetails {
+					obs.reasoningField = reasoningFieldDetails
 				}
 			}
 			send(StreamChunk{Reasoning: r})
@@ -2296,7 +2344,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			}
 			truncated := flushTools(choice.FinishReason)
 			obs.finish = choice.FinishReason
-			done := StreamChunk{Done: true}
+			done := StreamChunk{Done: true, FinishReason: lastFinish, NativeFinishReason: lastNative}
 			// "length" is the provider saying it ran out of room. Reported on
 			// the Done chunk rather than swallowed, because the caller is the
 			// only party that knows which ceiling was hit — the max_tokens it
@@ -2586,4 +2634,30 @@ func bodyIsTruncatedToolCall(body string) bool {
 			strings.Contains(b, "missing closing quote") ||
 			strings.Contains(b, "parse_error") ||
 			strings.Contains(b, "invalid string"))
+}
+
+// reasoningDetail is one element of OpenRouter's delta.reasoning_details.
+type reasoningDetail struct {
+	Type    string `json:"type"`
+	Text    string `json:"text"`    // reasoning.text
+	Summary string `json:"summary"` // reasoning.summary
+	// reasoning.encrypted carries an opaque "data" blob. It is ignored: sending
+	// it back on the next request is out of scope here.
+}
+
+// reasoningFromDetails joins the text and summary entries of a delta's
+// reasoning_details. The caller uses it ONLY when delta.reasoning and
+// delta.reasoning_content are empty: OpenRouter often sends the same text in
+// both, and reading both would double it.
+func reasoningFromDetails(ds []reasoningDetail) string {
+	var b strings.Builder
+	for _, d := range ds {
+		switch d.Type {
+		case "reasoning.text":
+			b.WriteString(d.Text)
+		case "reasoning.summary":
+			b.WriteString(d.Summary)
+		}
+	}
+	return b.String()
 }

@@ -329,6 +329,13 @@ type TurnResult struct {
 	Reply       string
 	Compactions []CompactionInfo // usually empty or one; more if a huge context folds in stages
 	Usage       TokenUsage
+	// FinishReason and NativeFinishReason are the provider's finish_reason and
+	// OpenRouter's native_finish_reason for the LAST chat round, verbatim
+	// (e.g. "stop", "MALFORMED_FUNCTION_CALL"). Empty when that round sent
+	// none. They are the raw words, not TurnEndReason: a host uses them to tell
+	// an empty reply that the model chose from one the provider cut or refused.
+	FinishReason       string
+	NativeFinishReason string
 }
 
 // TurnEndReason names WHY a Turn stopped.

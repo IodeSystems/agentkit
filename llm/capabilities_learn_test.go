@@ -395,6 +395,10 @@ func TestStreamUsageAndReasoningFieldObserved(t *testing.T) {
 			`{"choices":[{"delta":{"reasoning":"hm"}}]}`,
 			`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
 			`[DONE]`), "false", "reasoning"},
+		{"reasoning_details only", sse(
+			`{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"hm"}]}}]}`,
+			`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+			`[DONE]`), "false", "reasoning_details"},
 		{"cut stream says nothing about usage", sse(
 			`{"choices":[{"delta":{"content":"ok"}}]}`), "", ""},
 		{"error event says nothing about usage", sse(

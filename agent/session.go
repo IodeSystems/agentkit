@@ -52,6 +52,11 @@ type Session struct {
 	// reasoningOffRound makes the next chat round send reasoning off, on a copy
 	// of ChatOpts. Set by Turn per round; never persisted.
 	reasoningOffRound bool
+	// roundFinish and roundNative are the provider's finish_reason and
+	// native_finish_reason for the round streamChat last ran, verbatim. Reset
+	// at the start of every round; Turn copies them onto TurnResult right after
+	// the call, so a failed round still reports what the provider said.
+	roundFinish, roundNative string
 
 	// UnrunResult, if set, writes the tool result for a call the Turn never
 	// ran because ctx was canceled first. It gets the Turn's CANCELED ctx, so
@@ -465,6 +470,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 
 		s.reasoningOffRound = repairPending
 		resp, reasoning, toolCalls, usage, rep, cut, finish, e := s.streamChat(ctx, messages)
+		result.FinishReason, result.NativeFinishReason = s.roundFinish, s.roundNative
 		if e != nil {
 			var tooLarge *llm.InputTooLargeError
 			if errors.As(e, &tooLarge) {
@@ -1101,6 +1107,7 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		// call forever; that cause was the unbounded pair list, since bounded, and
 		// the grammar now terminates on its own.
 	}
+	s.roundFinish, s.roundNative = "", ""
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
 		return "", "", nil, nil, nil, nil, "", err
@@ -1113,6 +1120,12 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 			return content.String(), "", toolCalls, usage, nil, nil, finish, chunk.Err()
 		}
 		think.WriteString(chunk.Reasoning)
+		if chunk.FinishReason != "" {
+			s.roundFinish = chunk.FinishReason
+		}
+		if chunk.NativeFinishReason != "" {
+			s.roundNative = chunk.NativeFinishReason
+		}
 		if chunk.StopReason != "" {
 			finish = chunk.StopReason
 		}

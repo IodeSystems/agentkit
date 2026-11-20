@@ -59,7 +59,7 @@ const (
 	CapLimitsContext            = "limits.context"             // int tokens
 	CapLimitsOutput             = "limits.output"              // int tokens
 	CapStreamUsage              = "stream.usage"               // bool
-	CapStreamReasoningField     = "stream.reasoning_field"     // reasoning_content, reasoning, think_tags
+	CapStreamReasoningField     = "stream.reasoning_field"     // reasoning_content, reasoning, reasoning_details, think_tags
 	CapToolsChoiceForced        = "tools.choice_forced"        // bool
 	CapToolsParallel            = "tools.parallel"             // bool
 	CapToolsArgFidelity         = "tools.arg_fidelity"         // exact, lossy

@@ -66,7 +66,7 @@ Keys. The first slice implements the ones marked ★.
 | ★ `limits.context` | int tokens | `InputTooLargeError.ContextTokens`, declared `context_length`, `DiscoverContext` |
 | `limits.output` | int tokens | refusal ("max_tokens must be ≤ N"), declared (`modalities.text.maxTokens`, OpenRouter `top_provider.max_completion_tokens`) |
 | ★ `stream.usage` | bool | observed (a usage chunk arrived) |
-| ★ `stream.reasoning_field` | `reasoning_content`, `reasoning`, `think_tags` | observed (which delta field carried it) |
+| ★ `stream.reasoning_field` | `reasoning_content`, `reasoning`, `reasoning_details`, `think_tags` | observed (which delta field carried it) |
 | ★ `tools.choice_forced` | bool | observed (`tool_choice` required/named, and the reply had no call → false), probe |
 | `tools.parallel`, `tools.arg_fidelity` | bool, `exact`/`lossy` | observed, probe (`ProbeToolSurface` echo) |
 | `sampling.<param>` | `accepted`/`refused` (logit_bias, banned strings, DRY, `prompt_cache_key`, …) | refusal |

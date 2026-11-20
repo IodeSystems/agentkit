@@ -64,6 +64,7 @@ func effortRank(e string) int {
 const (
 	reasoningFieldContent   = "reasoning_content" // llama.cpp, DeepSeek
 	reasoningFieldReasoning = "reasoning"         // vLLM, OpenRouter
+	reasoningFieldDetails   = "reasoning_details" // OpenRouter, when it sends only the structured form
 	// "think_tags" (inline <think> in content) is a legal value, but nothing in
 	// this package detects inline tags today, so nothing learns it.
 )
