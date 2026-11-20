@@ -1919,7 +1919,7 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 		return true
 	}
 	for attempt := 1; ; attempt++ {
-		se := c.streamAttempt(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent, gate)
+		se := c.streamAttempt(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent, opts != nil && opts.Batch, gate)
 		if se == nil {
 			if attempt > 1 {
 				c.emitRetry(RetryEvent{Kind: RetryRecovered, Attempt: attempt, Elapsed: time.Since(callStart), Budget: budget})
@@ -2173,7 +2173,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 				u = *result.Usage
 			}
 			u.LatencyMS = time.Since(callStart).Milliseconds()
-			meta.stamp(&u, usageCost(raw), result.Model)
+			c.stampFor(meta, &u, usageCost(raw), result.Model, opts != nil && opts.Batch)
 			u.Model = result.Model
 			if len(result.Choices) > 0 {
 				u.FinishReason = result.Choices[0].FinishReason
@@ -2211,7 +2211,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 // (capabilities_learn.go); the zero value asks nothing.
 func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest) {
 	defer close(ch)
-	c.streamAttempt(ctx, body, ch, history, callStart, meta, sent, nil)
+	c.streamAttempt(ctx, body, ch, history, callStart, meta, sent, false, nil)
 }
 
 // streamAttempt reads one response. It does not close ch. When gate is non-nil
@@ -2219,7 +2219,7 @@ func (c *Client) readStream(ctx context.Context, body io.ReadCloser, ch chan<- S
 // before ANY chunk was sent to ch and gate says yes, it sends nothing, skips its
 // end-of-stream bookkeeping and returns the error so the caller can resend;
 // every other path returns nil.
-func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest, gate func(error) bool) (retry error) {
+func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh chan<- StreamChunk, history []Message, callStart time.Time, meta responseMeta, sent sentRequest, batch bool, gate func(error) bool) (retry error) {
 	defer body.Close()
 	// forwarded: something reached the caller, so a resend can no longer be
 	// invisible. Every send in this function goes through send.
@@ -2253,7 +2253,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			c.OnUsage(*lastUsage)
 		} else if meta.reported() {
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
-			meta.stamp(&u, nil, streamModel)
+			c.stampFor(meta, &u, nil, streamModel, batch)
 			u.Model = lastModel
 			u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 			c.OnUsage(u)
@@ -2274,7 +2274,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	stampUsage := func(u *Usage, timings *Timings, data string) {
 		u.LatencyMS = time.Since(callStart).Milliseconds()
 		u.Timings = timings
-		meta.stamp(u, usageCost([]byte(data)), streamModel)
+		c.stampFor(meta, u, usageCost([]byte(data)), streamModel, batch)
 		u.Model = lastModel
 		u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 		lastUsage = u

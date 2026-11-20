@@ -1,7 +1,11 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -130,4 +134,77 @@ func jsonContainsKey(t *testing.T, raw []byte, key string) bool {
 	}
 	_, ok := m[key]
 	return ok
+}
+
+// A batch completion is accounted at the batch rate: the shim's standard
+// cost (usage.cost in the body) is scaled by the dialect's BatchRate, and the
+// Usage is marked batch. A real-time completion for the same tokens is
+// byte-identical to the pre-batch value: cost unscaled, Batch false.
+func TestBatchCost_ScaledByDialectRate(t *testing.T) {
+	const stdCost = 0.02 // the standard per-completion cost in the body
+	body := fmt.Sprintf(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"model":"claude-opus-5-5","usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500,"cost":%g}}`, stdCost)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "k", "claude-opus-5-5")
+	var saw Usage
+	c.OnUsage = func(u Usage) { saw = u }
+
+	// Batch: cost is scaled by BatchRate(DialectAnthropic) = 0.5.
+	if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Batch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !saw.Batch {
+		t.Error("batch Usage.Batch = false, want true")
+	}
+	wantBatch := stdCost * BatchRate(DialectAnthropic)
+	if saw.Cost.Amount != wantBatch {
+		t.Errorf("batch cost = %v, want %v (0.5 x %v)", saw.Cost.Amount, wantBatch, stdCost)
+	}
+	if !saw.Cost.Reported {
+		t.Error("batch Usage.Cost.Reported = false, want true")
+	}
+
+	// Real-time: cost is the standard body cost, unscaled, Batch false.
+	saw = Usage{}
+	if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if saw.Batch {
+		t.Error("real-time Usage.Batch = true, want false")
+	}
+	if saw.Cost.Amount != stdCost {
+		t.Errorf("real-time cost = %v, want %v (unscaled)", saw.Cost.Amount, stdCost)
+	}
+	if !saw.Cost.Reported {
+		t.Error("real-time Usage.Cost.Reported = false, want true")
+	}
+}
+
+// A batch completion on a dialect with no published discount (BatchRate 1.0)
+// reports the standard cost unscaled, and is still marked batch.
+func TestBatchCost_NoDiscountDialect(t *testing.T) {
+	const stdCost = 0.03
+	body := fmt.Sprintf(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"model":"gpt-4","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cost":%g}}`, stdCost)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "k", "gpt-4")
+	var saw Usage
+	c.OnUsage = func(u Usage) { saw = u }
+
+	if _, err := c.ChatWithOpts(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, &ChatOpts{Batch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !saw.Batch {
+		t.Error("batch Usage.Batch = false, want true")
+	}
+	// No discount: cost is the standard body cost, unscaled.
+	if saw.Cost.Amount != stdCost {
+		t.Errorf("batch cost = %v, want %v (BatchRate 1.0, unscaled)", saw.Cost.Amount, stdCost)
+	}
 }

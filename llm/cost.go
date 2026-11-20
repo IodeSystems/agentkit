@@ -389,3 +389,23 @@ type bodyCost struct {
 	amount    float64
 	estimated bool
 }
+
+// stampFor is meta.stamp, with the batch completion accounted at the batch
+// rate. It stamps the response's header and body facts as before, and when the
+// call was batch it marks the Usage as batch and scales whatever cost was
+// reported by the dialect's batch rate. The shim owns the absolute standard
+// cost (usage.cost in the body, priced from its own model list); this owns only
+// the ratio, so a batch cost is what the call actually cost — 50% of the
+// standard rate on Claude — not the real-time price of the same tokens.
+//
+// The real-time path (batch=false) is byte-identical to meta.stamp: the
+// reported cost is untouched and Batch stays the zero value, so a real-time
+// Usage and a batch Usage for the same parts differ by exactly this field and
+// the scaled cost.
+func (c *Client) stampFor(meta responseMeta, u *Usage, body *bodyCost, model string, batch bool) {
+	meta.stamp(u, body, model)
+	u.Batch = batch
+	if batch && u.Cost.Reported {
+		u.Cost.Amount *= BatchRate(c.dialect())
+	}
+}
