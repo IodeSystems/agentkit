@@ -161,7 +161,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
   rendered WITHOUT LOD) fits that percent of target, widened by
   `keepCallsWithResults`; it falls back to the pristine tail when the band is no
   wider or nothing new would fold. 0 is the old behavior exactly;
-  `CompactionInfo.TokensAfter` stays LOD-rendered, `TokensAfterFull` is not.
+  `CompactionInfo.TokensAfter` is the non-LOD render: what the next build sends.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different

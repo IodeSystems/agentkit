@@ -584,15 +584,14 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	indexErr := PutSpan(ctx, sh.Index, SessionDocFold, "fold-"+marker.ID, "", summary, fresh)
 
 	// Measure the new active window by re-rendering the post-compaction entries.
-	// TokensAfter keeps its meaning (LOD, what a build under pressure sends);
-	// TokensAfterFull is without LOD, what the next build sends under target.
+	// A fold lands under target, and a build under target sends without LOD,
+	// so the non-LOD render is what the next build sends. Measuring with LOD
+	// forced reported fewer tokens than were sent.
 	afterEntries, aerr := sh.Store.Context(ctx, sessionID)
-	after, afterFull := 0, 0
+	after := 0
 	if aerr == nil {
 		sortEntries(afterEntries)
-		ap := classifyPristineCount(afterEntries, sh.Policy.PreserveLastMessages, sh.Policy.PreserveLastToolCalls)
-		after = sh.tokens(sh.render(afterEntries, ap, "", true))
-		afterFull = sh.tokens(sh.render(afterEntries, len(afterEntries), "", false))
+		after = sh.tokens(sh.render(afterEntries, len(afterEntries), "", false))
 	}
 
 	return CompactionInfo{
@@ -601,12 +600,10 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 		SubsumedCount: len(fresh),
 		TokensBefore:  tokensBefore,
 		TokensAfter:   after,
-
-		TokensAfterFull: afterFull,
-		KeptCount:       pristineCount,
-		KeptTokens:      sh.tokens(sh.render(entries[olderEnd:], pristineCount, "", false)),
-		Duration:        time.Since(startedAt),
-		IndexErr:        indexErr,
+		KeptCount:     pristineCount,
+		KeptTokens:    sh.tokens(sh.render(entries[olderEnd:], pristineCount, "", false)),
+		Duration:      time.Since(startedAt),
+		IndexErr:      indexErr,
 	}, true, nil
 }
 

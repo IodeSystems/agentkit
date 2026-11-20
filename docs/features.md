@@ -382,9 +382,8 @@ a target, the fold keeps the largest newest suffix whose rebuilt prompt (the
 caller's prefix, a summary at its cap, pinned entries, the suffix; no LOD) fits
 that percent of the target. The pristine tail is the minimum, the suffix is
 widened so no result loses its call, and when the band holds nothing more the
-fold is the default one. `CompactionInfo` reports `KeptCount`, `KeptTokens` and
-`TokensAfterFull` (post-fold tokens without LOD; `TokensAfter` stays the LOD
-count).
+fold is the default one. `CompactionInfo` reports `KeptCount` and `KeptTokens`;
+`TokensAfter` is the post-fold token count without LOD, what the next build sends.
 
 **A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
 `SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the

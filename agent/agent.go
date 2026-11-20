@@ -162,13 +162,11 @@ type CompactionInfo struct {
 	Summary       string // the tight summary that replaced the folded prefix
 	SubsumedCount int    // how many entries were folded into the summary
 	TokensBefore  int    // estimated active-window tokens before this compaction
-	TokensAfter   int    // estimated tokens of what the next build sends (LOD-rendered, as before)
-
-	// TokensAfterFull is the post-fold window rendered WITHOUT LOD: every kept
-	// entry whole. TokensAfter is what the next build would send under
-	// pressure; this is what it sends while under target, and the number
-	// FoldKeepPct is sized against.
-	TokensAfterFull int
+	// TokensAfter is the estimated token count of what the next build sends,
+	// excluding the system prompt. A fold lands under target and a build under
+	// target sends without LOD, so this is the non-LOD render. It is also the
+	// number FoldKeepPct is sized against.
+	TokensAfter int
 	// KeptCount is how many of the newest entries the fold left verbatim (the
 	// pristine tail, or more under ShaperPolicy.FoldKeepPct), and KeptTokens
 	// their estimated tokens, rendered without LOD.

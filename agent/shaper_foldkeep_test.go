@@ -83,8 +83,8 @@ func TestFoldKeepPct_ReportedCase(t *testing.T) {
 		}
 		ci := infos[0]
 		after := sh.tokens(msgs)
-		t.Logf("pct %d: target %d; folded %d entries: %d -> %d tokens (%d%% of target; info after %d, full %d), kept %d entries (%d tokens)",
-			pct, target, ci.SubsumedCount, ci.TokensBefore, after, after*100/target, ci.TokensAfter, ci.TokensAfterFull, ci.KeptCount, ci.KeptTokens)
+		t.Logf("pct %d: target %d; folded %d entries: %d -> %d tokens (%d%% of target; info after %d), kept %d entries (%d tokens)",
+			pct, target, ci.SubsumedCount, ci.TokensBefore, after, after*100/target, ci.TokensAfter, ci.KeptCount, ci.KeptTokens)
 		if ci.TokensBefore <= target {
 			t.Fatalf("before %d not over target %d", ci.TokensBefore, target)
 		}
@@ -250,5 +250,25 @@ func TestFoldKeepPct_WidenedSuffixNeverOrphansAResult(t *testing.T) {
 		if n := orphanResults(msgs); n != 0 {
 			t.Fatalf("pct %d: %d orphan tool result(s): %v", pct, n, roles(msgs))
 		}
+	}
+}
+
+// TokensAfter was measured with LOD forced, so a long tool result that LOD
+// shortens made it smaller than what the next build sent (dun: 90,127
+// reported, 97.8k sent). It must equal the next build's prompt tokens.
+func TestTokensAfterEqualsNextBuildAfterFoldWithLongToolResult(t *testing.T) {
+	st := reportedSession(8000)  // above LODTruncateAboveChars
+	sh := reportedShaper(st, 55) // keeps entries beyond the pristine tail
+	sh.Policy.BudgetTokens = 100_000
+	_, infos := buildWithInfo(t, sh, "")
+	if len(infos) != 1 {
+		t.Fatalf("%d folds, want 1", len(infos))
+	}
+	next, err := sh.Build(context.Background(), "s", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sh.tokens(next); got != infos[0].TokensAfter {
+		t.Fatalf("TokensAfter %d, next build sends %d", infos[0].TokensAfter, got)
 	}
 }
