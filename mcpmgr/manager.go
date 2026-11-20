@@ -51,6 +51,13 @@ type MCPConfig struct {
 	Timeout int      `json:"timeout"` // seconds, default 30
 	Scope   string   `json:"scope"`
 
+	// ClientCapabilities is the capabilities object sent in initialize, for
+	// what the host will answer: {"roots":{"listChanged":true}} with a
+	// RequestHandler that serves roots/list. Nil or empty sends {} as
+	// before. Declaring a capability without a handler for it makes the
+	// server's requests fail with -32601.
+	ClientCapabilities map[string]any `json:"clientCapabilities,omitempty"`
+
 	// URL selects the Streamable HTTP transport (http.go) instead of
 	// spawning Command. Headers go on every request — Authorization: Bearer
 	// <token> for a server that takes a static token.
@@ -163,6 +170,8 @@ type Manager struct {
 	// Nil is the safe default and stays the common case: a manager that
 	// registers no handler simply drops notifications, exactly as before.
 	onNotify func(Notification)
+	// onRequest answers server→client requests; see request.go.
+	onRequest RequestHandler
 }
 
 // Notification is one server→client message, flattened to what a consumer
@@ -419,7 +428,14 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	// blocking it would stall every response on this connection.
 	m.mu.RLock()
 	onNotify := m.onNotify
+	onRequest := m.onRequest
 	m.mu.RUnlock()
+	if onRequest != nil {
+		id := cfg.ID
+		mc.setRequestHandler(func(ctx context.Context, method string, params json.RawMessage) (any, error) {
+			return onRequest(ctx, id, method, params)
+		})
+	}
 	if onNotify != nil {
 		id := cfg.ID
 		mc.setNotificationHandler(func(method string, params map[string]any) {
@@ -448,7 +464,7 @@ func (m *Manager) spawn(ctx context.Context, cfg MCPConfig) (*MCPServer, error) 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	init, err := mc.initialize(handshakeCtx, clientName, clientVersion)
+	init, err := mc.initialize(handshakeCtx, clientName, clientVersion, cfg.ClientCapabilities)
 	if err != nil {
 		// Settle BEFORE close: close shuts the stderr pipe, and a drain that
 		// has not yet read the dying server's complaint then gets "file

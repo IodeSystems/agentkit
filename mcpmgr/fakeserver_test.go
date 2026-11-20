@@ -156,8 +156,27 @@ func fakeServerMain(scenario string) {
 			continue
 		}
 
+		// The "roots" scenario: a response from the client (no method, an id)
+		// to the roots/list request below. Echo it as a notification so the
+		// host-side test can read exactly what came back.
+		if msg.Method == "" && len(msg.ID) > 0 && scenario == "roots" {
+			var resp struct {
+				Result json.RawMessage `json:"result"`
+				Error  json.RawMessage `json:"error"`
+			}
+			json.Unmarshal([]byte(line), &resp)
+			conn.notify("test/reply", map[string]any{"id": string(msg.ID), "result": string(resp.Result), "error": string(resp.Error)})
+			continue
+		}
+
 		// A message with a method and no id is a notification from the client.
 		if len(msg.ID) == 0 || string(msg.ID) == "null" {
+			if msg.Method == "notifications/initialized" && scenario == "roots" {
+				conn.send(map[string]any{"jsonrpc": "2.0", "id": "r1", "method": "roots/list"})
+			}
+			if msg.Method == "notifications/roots/list_changed" {
+				conn.notify("test/got", map[string]any{"method": msg.Method})
+			}
 			if msg.Method == "notifications/initialized" && scenario == "notify" {
 				conn.notify("notifications/message", map[string]any{
 					"level": "info",
@@ -191,6 +210,7 @@ func fakeServerMain(scenario string) {
 				"serverInfo":      map[string]any{"name": "fake", "title": "Fake Server", "version": "1"},
 				"instructions":    "Use search for anything.",
 				"index":           map[string]any{"state": "building"}, // a server's own field
+				"clientCapsSeen":  rawCaps(msg.Params),
 			})
 
 		case "tools/list":
@@ -321,4 +341,13 @@ func fakeCallResult(name string, args map[string]any) map[string]any {
 			},
 		}
 	}
+}
+
+// rawCaps is the capabilities object the client sent in initialize.
+func rawCaps(params json.RawMessage) json.RawMessage {
+	var p struct {
+		Capabilities json.RawMessage `json:"capabilities"`
+	}
+	json.Unmarshal(params, &p)
+	return p.Capabilities
 }

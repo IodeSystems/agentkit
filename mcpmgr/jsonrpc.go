@@ -97,8 +97,14 @@ type stdioClient struct {
 	pending map[string]chan *rpcResponse
 	nextID  atomic.Int64
 
-	notifyMu sync.RWMutex
-	onNotify func(method string, params map[string]any)
+	notifyMu  sync.RWMutex
+	onNotify  func(method string, params map[string]any)
+	onRequest connRequestHandler
+
+	// life is canceled when the connection closes; it is the ctx every
+	// request handler gets.
+	life       context.Context
+	cancelLife context.CancelFunc
 
 	// done is closed when the connection is finished, by close() or by the
 	// read loop noticing the process died. Closing it unblocks every in-flight
@@ -110,12 +116,15 @@ type stdioClient struct {
 }
 
 func newStdioClient(command string, env, args []string) *stdioClient {
+	life, cancel := context.WithCancel(context.Background())
 	return &stdioClient{
-		command: command,
-		args:    args,
-		env:     env,
-		pending: make(map[string]chan *rpcResponse),
-		done:    make(chan struct{}),
+		life:       life,
+		cancelLife: cancel,
+		command:    command,
+		args:       args,
+		env:        env,
+		pending:    make(map[string]chan *rpcResponse),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -177,7 +186,7 @@ func (c *stdioClient) start() error {
 func (c *stdioClient) stderrPipe() io.ReadCloser { return c.stderr }
 
 func (c *stdioClient) closeDone() {
-	c.closeOnce.Do(func() { close(c.done) })
+	c.closeOnce.Do(func() { close(c.done); c.cancelLife() })
 }
 
 // readLoop consumes the server's stdout until it dies or we close it.
@@ -210,10 +219,22 @@ func (c *stdioClient) readLoop() {
 		case head.Method != "" && !hasID:
 			c.dispatchNotification(line)
 		case head.Method != "" && hasID:
-			// A server→client request (sampling, roots, elicitation). We
-			// implement none of them, but it must be ANSWERED: a server that
-			// blocks on the reply would otherwise wedge for good.
-			c.rejectRequest(head.ID, head.Method)
+			// A server→client request (sampling, roots, elicitation). It
+			// must be ANSWERED: a server that blocks on the reply would
+			// otherwise wedge for good. Off the read loop, so a slow
+			// handler cannot stall every response on this connection.
+			c.notifyMu.RLock()
+			h := c.onRequest
+			c.notifyMu.RUnlock()
+			if h == nil {
+				c.reply(head.ID, answer(c.life, nil, head.Method, nil))
+				continue
+			}
+			var req struct {
+				Params json.RawMessage `json:"params"`
+			}
+			_ = json.Unmarshal([]byte(line), &req)
+			go func() { c.reply(head.ID, answer(c.life, h, head.Method, req.Params)) }()
 		default:
 			c.deliverResponse(line)
 		}
@@ -237,15 +258,18 @@ func (c *stdioClient) dispatchNotification(line string) {
 	fn(n.Method, n.Params)
 }
 
-func (c *stdioClient) rejectRequest(id json.RawMessage, method string) {
-	_ = c.writeFrame(map[string]any{
-		"jsonrpc": jsonrpcVersion,
-		"id":      json.RawMessage(id),
-		"error": map[string]any{
-			"code":    -32601,
-			"message": "method not found: " + method + " (client implements no server-initiated requests)",
-		},
-	})
+// setRequestHandler registers the answerer for server→client requests.
+func (c *stdioClient) setRequestHandler(fn connRequestHandler) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	c.onRequest = fn
+}
+
+// reply writes a response; writeFrame's lock serializes it with other writes.
+func (c *stdioClient) reply(id json.RawMessage, body map[string]any) {
+	body["jsonrpc"] = jsonrpcVersion
+	body["id"] = id
+	_ = c.writeFrame(body)
 }
 
 func (c *stdioClient) deliverResponse(line string) {

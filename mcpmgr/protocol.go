@@ -65,6 +65,7 @@ type transport interface {
 	notify(ctx context.Context, method string, params any) error
 	close() error
 	setNotificationHandler(fn func(method string, params map[string]any))
+	setRequestHandler(fn connRequestHandler)
 }
 
 // mcpClient speaks MCP over a transport.
@@ -90,14 +91,18 @@ type initializeResult struct {
 // notifications/initialized the server is entitled to wait for before
 // answering anything else. Skipping that notification is a silent failure mode
 // — a strict server accepts the connection and then refuses every call.
-func (c mcpClient) initialize(ctx context.Context, clientName, clientVersion string) (*initializeResult, error) {
+func (c mcpClient) initialize(ctx context.Context, clientName, clientVersion string, capabilities map[string]any) (*initializeResult, error) {
+	if capabilities == nil {
+		capabilities = map[string]any{}
+	}
 	var raw json.RawMessage
 	err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": requestedProtocolVersion,
 		"clientInfo":      map[string]any{"name": clientName, "version": clientVersion},
-		// Present but empty: we implement no sampling, roots, or elicitation,
-		// and the field is not optional.
-		"capabilities": map[string]any{},
+		// Present even when empty (the field is not optional). The host
+		// declares what it will answer (MCPConfig.ClientCapabilities, e.g.
+		// roots); with none set it is {} and the server must not ask.
+		"capabilities": capabilities,
 	}, &raw)
 	if err != nil {
 		return nil, err

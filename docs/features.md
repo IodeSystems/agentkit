@@ -433,6 +433,15 @@ tool name to its owning server and calls `Manager.CallTool`. See
 `examples/agentkit-demo/mcp.go`. mcpmgr is independent of `agent` — use it
 wherever you build tool defs.
 
+**Roots and other server requests.** By default the client sends `capabilities:
+{}` and answers every server-initiated request -32601. To serve `roots/list`,
+set `MCPConfig.ClientCapabilities` (`{"roots":{"listChanged":true}}`) and
+`Manager.SetRequestHandler` (before `StartServer`; the handler gets the server
+id, runs in its own goroutine, and its ctx ends with the connection; return
+`*RequestError` for a specific JSON-RPC code, `ErrMethodNotFound` to decline).
+`Manager.Notify(serverID, "notifications/roots/list_changed", nil)` tells the
+server the list changed. Works on stdio and HTTP.
+
 ## 10. Reliable typed extraction — `structured`
 
 The features compose. To get *guaranteed* typed data out of a model, the

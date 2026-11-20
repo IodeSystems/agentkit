@@ -50,15 +50,27 @@ type httpClient struct {
 
 	nextID atomic.Int64
 
-	notifyMu sync.RWMutex
-	onNotify func(method string, params map[string]any)
+	notifyMu  sync.RWMutex
+	onNotify  func(method string, params map[string]any)
+	onRequest connRequestHandler
+
+	// life is canceled by close(); it is the ctx request handlers get.
+	life       context.Context
+	cancelLife context.CancelFunc
 
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
 func newHTTPClient(url string, headers map[string]string, auth *authHooks) *httpClient {
-	return &httpClient{url: url, headers: headers, auth: auth, hc: &http.Client{}, done: make(chan struct{})}
+	life, cancel := context.WithCancel(context.Background())
+	return &httpClient{url: url, headers: headers, auth: auth, hc: &http.Client{}, done: make(chan struct{}), life: life, cancelLife: cancel}
+}
+
+func (c *httpClient) setRequestHandler(fn connRequestHandler) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	c.onRequest = fn
 }
 
 func (c *httpClient) setNotificationHandler(fn func(method string, params map[string]any)) {
@@ -278,23 +290,29 @@ func (c *httpClient) handleEvent(ctx context.Context, data, id string) *rpcRespo
 		}
 		return nil
 	}
-	// A server→client request (sampling, roots, elicitation). This client
-	// implements none, but a server blocking on the reply must not wedge: the
-	// answer goes back as its own POST, exactly the -32601 stdio gives. The
-	// POST is on a separate connection, so it does not wait on this stream.
-	c.rejectRequest(ctx, msg.ID, msg.Method)
+	// A server→client request (sampling, roots, elicitation). A server
+	// blocking on the reply must not wedge: the answer goes back as its own
+	// POST (-32601 when no handler is set, as stdio does). The POST is on a
+	// separate connection, so it does not wait on this stream. A handler
+	// runs in its own goroutine under the connection's life ctx, not this
+	// request's: the stream may end before the handler does.
+	c.notifyMu.RLock()
+	h := c.onRequest
+	c.notifyMu.RUnlock()
+	if h == nil {
+		c.reply(ctx, msg.ID, answer(ctx, nil, msg.Method, nil))
+		return nil
+	}
+	params, _ := json.Marshal(msg.Params)
+	go func() { c.reply(c.life, msg.ID, answer(c.life, h, msg.Method, params)) }()
 	return nil
 }
 
-func (c *httpClient) rejectRequest(ctx context.Context, id json.RawMessage, method string) {
-	resp, err := c.post(ctx, map[string]any{
-		"jsonrpc": jsonrpcVersion,
-		"id":      id,
-		"error": map[string]any{
-			"code":    -32601,
-			"message": "method not found: " + method + " (client implements no server-initiated requests)",
-		},
-	})
+// reply POSTs a response to a server's request.
+func (c *httpClient) reply(ctx context.Context, id json.RawMessage, body map[string]any) {
+	body["jsonrpc"] = jsonrpcVersion
+	body["id"] = id
+	resp, err := c.post(ctx, body)
 	if err != nil {
 		return
 	}
@@ -316,6 +334,7 @@ func (c *httpClient) notify(ctx context.Context, method string, params any) erro
 func (c *httpClient) close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
+		c.cancelLife()
 		c.mu.Lock()
 		sid := c.sessionID
 		c.mu.Unlock()
