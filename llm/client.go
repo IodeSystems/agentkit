@@ -767,6 +767,21 @@ func (c *Client) chatURL() string {
 	return u + "/chat/completions"
 }
 
+// batchURL is the provider's batch-completion endpoint, the sibling of chatURL:
+// the same dialect, the batch path. OpenAI-compatible /v1/chat/completions/batch,
+// the Messages API /v1/messages/batches. Only used when ChatOpts.Batch is set;
+// the real-time path never calls it, so chatURL's bytes are untouched.
+func (c *Client) batchURL() string {
+	u := c.baseURL
+	if !strings.HasSuffix(u, "/v1") {
+		u += "/v1"
+	}
+	if c.usesMessagesAPI() {
+		return u + "/messages/batches"
+	}
+	return u + "/chat/completions/batch"
+}
+
 // embedURL returns the embeddings endpoint (sibling of chatURL).
 func (c *Client) embedURL() string {
 	u := c.baseURL
@@ -981,13 +996,61 @@ var retry5xxMaxAttempts = 5
 // ctx cancel, RetryBudget exhaustion, or repeated 5xx). Pushing this
 // into the harness would duplicate the loop in every role.
 func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, ident callIdent) (*http.Response, error) {
+	return c.postChatWithRetryBatch(ctx, payload, ident, batchMode{})
+}
+
+// batchMode is the per-call batch routing: which endpoint to post to and, on
+// the Messages API, the completion window the provider may take. Zero value =
+// the real-time path, untouched.
+type batchMode struct {
+	batch      bool
+	window     time.Duration
+}
+
+// postChatWithRetryBatch is postChatWithRetry with the batch routing decided.
+// On the real-time path (batchMode{}) it posts to chatURL with the exact same
+// payload, so a non-batch call is byte-identical to before.
+//
+// The completion window is attached here, AFTER shim.Request: the shim builds
+// its body from a fixed struct of known fields and would drop an unknown
+// completion_window field, so the window cannot ride in the OpenAI-shaped body
+// on the Messages-API path. On the OpenAI-compatible path the shim is not run,
+// so the same attach step is a no-op on the body bytes.
+func (c *Client) postChatWithRetryBatch(ctx context.Context, payload []byte, ident callIdent, bm batchMode) (*http.Response, error) {
+	url := c.chatURL()
+	if bm.batch {
+		url = c.batchURL()
+	}
 	if c.usesMessagesAPI() {
 		var err error
 		if payload, err = shim.Request(payload, shim.Options{}); err != nil {
 			return nil, fmt.Errorf("llm: messages request: %w", err)
 		}
 	}
-	return c.postWithRetry(ctx, c.chatURL(), payload, ident)
+	if bm.batch {
+		var err error
+		if payload, err = withCompletionWindow(payload, bm.window); err != nil {
+			return nil, fmt.Errorf("llm: batch window: %w", err)
+		}
+	}
+	return c.postWithRetry(ctx, url, payload, ident)
+}
+
+// withCompletionWindow returns payload with a top-level completion_window field
+// set to seconds. The field rides the wire shape (a number of seconds) the
+// batch endpoints read. window<=0 omits the field — the provider's default
+// window — so a batch call with no window is the batch endpoint with the
+// unmodified body. Returns the input unchanged in that case.
+func withCompletionWindow(payload []byte, window time.Duration) ([]byte, error) {
+	if window <= 0 {
+		return payload, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, fmt.Errorf("unmarshal to add completion_window: %w", err)
+	}
+	body["completion_window"] = int64(window.Seconds())
+	return json.Marshal(body)
 }
 
 // callIdent is who this call says it is: a thread (TraceID) and an attempt
@@ -1618,6 +1681,17 @@ type ChatOpts struct {
 	// anthropic-compat no thinking block). With Effort unset the explicit budget
 	// is sent exactly as before. The level still decides on/off.
 	Effort Effort
+
+	// Batch routes the completion to the provider's batch endpoint at the batch
+	// token price, instead of the real-time Chat endpoint. With Batch unset the
+	// request is byte-identical to today — same URL, same body, same Usage — so
+	// turning this on for one call changes nothing about the real-time path.
+	Batch bool
+	// CompletionWindow is the deadline the provider may take to finish a batch
+	// completion; it is sent as a top-level completion_window field. Only
+	// meaningful when Batch is set. Zero omits the field and leaves the
+	// provider's default window to the server.
+	CompletionWindow time.Duration
 }
 
 // applySampling copies pinned sampling params onto an outgoing request body.
@@ -1856,8 +1930,10 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 // make a call slow are exactly the parts a server-side number would omit.
 func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) (*http.Response, sentRequest, time.Time, error) {
 	var ident callIdent
+	var bm batchMode
 	if opts != nil {
 		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
+		bm = batchMode{batch: opts.Batch, window: opts.CompletionWindow}
 	}
 	callStart := time.Now()
 	body, trs := c.chatBody(ctx, messages, tools, opts, stream)
@@ -1867,7 +1943,7 @@ func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolD
 	}
 	for resent := false; ; resent = true {
 		c.reportTranslations(trs)
-		resp, err := c.postChatWithRetry(ctx, payload, ident)
+		resp, err := c.postChatWithRetryBatch(ctx, payload, ident, bm)
 		raw := isRawProbe(ctx)
 		if err != nil {
 			if !raw {
