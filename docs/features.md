@@ -159,7 +159,20 @@ reasoning, and runs one repair round with reasoning off (`Effort`
 model). One repair per Turn. If that round is empty too, the Turn
 ends `TurnReasoningCut` with `*agent.ReasoningCutError`. `Session.OnReasoningCut`
 reports the cut (`Repaired` false) and the recovery (`Repaired` true);
-`Session.NoReasoningCutRepair` restores the old behaviour.
+`Session.NoReasoningCutRepair` turns the repair off.
+
+**An empty round.** A round with no text, no tool call and no reasoning (seen:
+Gemini through OpenRouter, native finish `MALFORMED_FUNCTION_CALL`) used to end
+the Turn as `TurnReply` with `Reply` "" and a nil error. Now it gets the same
+single repair, shared with the reasoning cut (one per Turn in total): a
+notification tagged `agent.EmptyReplyTag`, then one round with the host's opts
+unchanged. If the next round is empty too, the Turn ends `TurnEmptyReply` with
+`*agent.EmptyReplyError`, which holds `FinishReason` and `NativeFinishReason`
+and matches `errors.Is(err, agent.ErrEmptyReply)`. An empty round with finish
+`length` is not this: it follows the overflow path. With
+`Session.NoReasoningCutRepair` set there is no repair round and an empty round
+returns the error at once. Hosts that treated `Reply == ""` with a nil error as
+"nothing to say" must now handle the error.
 
 **A turn-level loop:** the same call returning the same result, round after
 round. Every round is well-formed, so only the repetition across rounds shows

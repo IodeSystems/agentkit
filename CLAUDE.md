@@ -172,7 +172,13 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `ReasoningCutTag` notification with the reasoning tail, one round with a COPY
   of the opts set off (`reasoningOff`; `s.ChatOpts` is never mutated), no empty
   assistant entry persisted. A second empty round ends `TurnReasoningCut` +
-  `*ReasoningCutError`. `NoReasoningCutRepair` turns it off.
+  `*ReasoningCutError`. A round with NO reasoning either (nothing at all, not a
+  length cut) shares the same one-repair budget: `EmptyReplyTag` notice, one
+  round with the host's opts UNCHANGED, then `TurnEmptyReply` +
+  `*EmptyReplyError` (`errors.Is(err, ErrEmptyReply)`; carries finish_reason and
+  native_finish_reason). Never `TurnReply` with Reply "". An empty length cut
+  stays with the overflow path. `NoReasoningCutRepair` turns off both repairs;
+  an empty round then returns the error with no repair round.
 - **Loop guards are ON by default, at two levels.** `llm.RepetitionGuard`
   watches each stream (content AND tool-call arguments — the measured 30-minute
   loop was inside `arguments`) for a periodic suffix and CLOSES THE BODY; the

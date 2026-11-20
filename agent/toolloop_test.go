@@ -117,6 +117,7 @@ func TestOnToolCalls_InjectsForcedCall(t *testing.T) {
 	// Model returns a plain text reply with no tool calls.
 	runner := &scriptRunner{turns: [][]llm.StreamChunk{
 		{{Content: "done with the task"}},
+		{{Content: "done with the task, shipped"}},
 	}}
 
 	var dispatched []llm.ToolCall

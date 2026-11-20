@@ -371,8 +371,13 @@ const (
 	// TurnReasoningCut — a round produced reasoning and no answer and no tool
 	// call, and the one repair round did not recover it (or was already spent
 	// earlier in the Turn). Err is *ReasoningCutError. With
-	// Session.NoReasoningCutRepair such a round ends the Turn as TurnReply.
+	// Session.NoReasoningCutRepair such a round ends the Turn as TurnEmptyReply.
 	TurnReasoningCut TurnEndReason = "reasoning_cut"
+	// TurnEmptyReply — a round produced no text, no tool call and no reasoning,
+	// and the one repair round did not recover it (or was spent earlier in the
+	// Turn, or Session.NoReasoningCutRepair is set). Err is *EmptyReplyError.
+	// A length cut is not this: it follows the overflow path.
+	TurnEmptyReply TurnEndReason = "empty_reply"
 	// TurnToolLoop — the model made the same call(s) and got the same result(s)
 	// for 2*MaxRepeatedExchanges rounds, so the loop stopped paying for more.
 	TurnToolLoop TurnEndReason = "tool_loop"

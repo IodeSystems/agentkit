@@ -46,8 +46,11 @@ type Session struct {
 	// the repair fails there is no second call: the Turn ends with
 	// TurnReasoningCut and *ReasoningCutError.
 	OnReasoningCut func(ReasoningCut)
-	// NoReasoningCutRepair turns the repair off: an empty round ends the Turn
-	// as TurnReply, as before the repair existed.
+	// NoReasoningCutRepair turns the repair off, for both kinds of empty round
+	// (reasoning only, and nothing at all). A round with no text and no tool
+	// call then ends the Turn as TurnEmptyReply with *EmptyReplyError, with no
+	// repair round; a length cut still goes to the overflow path. See
+	// emptyreply.go.
 	NoReasoningCutRepair bool
 	// reasoningOffRound makes the next chat round send reasoning off, on a copy
 	// of ChatOpts. Set by Turn per round; never persisted.
@@ -371,6 +374,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	// repairPending: the round about to run is the reasoning-cut repair.
 	// repairedOnce: the one repair of this Turn was spent.
 	var repairPending, repairedOnce bool
+	var repairKind repairKindT // which kind the pending repair is; see emptyreply.go
 	maxRepTrips := s.MaxRepetitionRetries
 	if maxRepTrips == 0 {
 		maxRepTrips = 2
@@ -468,7 +472,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				result.Usage.Active, refused)
 		}
 
-		s.reasoningOffRound = repairPending
+		s.reasoningOffRound = repairPending && repairKind == repairReasoning
 		resp, reasoning, toolCalls, usage, rep, cut, finish, e := s.streamChat(ctx, messages)
 		result.FinishReason, result.NativeFinishReason = s.roundFinish, s.roundNative
 		if e != nil {
@@ -607,40 +611,74 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// killed for the sum.
 		repTrips = 0
 
-		// Reasoning-cut repair. BEFORE the overflow handling below: a length cut
-		// with empty content and reasoning is a reasoning cut, not a cut reply,
-		// and OnOverflow's prose retry would resend the same round. A length cut
-		// inside a tool call is not empty (cut.InToolCall) and stays there.
-		if !s.NoReasoningCutRepair {
-			empty := strings.TrimSpace(resp) == "" && len(toolCalls) == 0 && (cut == nil || !cut.InToolCall())
-			wasRepair := repairPending
-			repairPending = false
-			switch {
-			case wasRepair && !empty:
-				if s.OnReasoningCut != nil {
-					s.OnReasoningCut(ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish, Repaired: true})
-				}
-			case empty && (wasRepair || strings.TrimSpace(reasoning) != ""):
-				rc := ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish}
-				if !wasRepair && s.OnReasoningCut != nil {
-					s.OnReasoningCut(rc)
-				}
-				if wasRepair || repairedOnce {
-					endReason = TurnReasoningCut
-					return result, &ReasoningCutError{Tokens: rc.Tokens, Finish: rc.Finish}
-				}
-				repairedOnce, repairPending = true, true
-				if e := s.Store.Append(ctx, s.SessionID, Entry{
-					ID:        NewID(),
-					Kind:      KindNotification,
-					Tag:       ReasoningCutTag,
-					Content:   reasoningCutNotice(reasoning),
-					CreatedAt: now(),
-				}); e != nil {
-					return result, fmt.Errorf("agent: persist reasoning-cut notice: %w", e)
-				}
-				continue
+		// Empty-round repair: ONE repair per Turn, shared by the two kinds of
+		// empty round (no text, no tool call). BEFORE the overflow handling
+		// below: a length cut with empty content and reasoning is a reasoning
+		// cut, not a cut reply, and OnOverflow's prose retry would resend the
+		// same round. A length cut inside a tool call is not empty
+		// (cut.InToolCall) and stays there.
+		empty := strings.TrimSpace(resp) == "" && len(toolCalls) == 0 && (cut == nil || !cut.InToolCall())
+		wasRepair, wasKind := repairPending, repairKind
+		repairPending = false
+		reasoned := strings.TrimSpace(reasoning) != ""
+		switch {
+		case !empty:
+			if wasRepair && wasKind == repairReasoning && s.OnReasoningCut != nil {
+				s.OnReasoningCut(ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish, Repaired: true})
 			}
+		case wasRepair:
+			// The repair round was empty too.
+			if wasKind == repairReasoning {
+				endReason = TurnReasoningCut
+				return result, &ReasoningCutError{Tokens: eu.reasoningTokens(), Finish: finish}
+			}
+			endReason = TurnEmptyReply
+			return result, &EmptyReplyError{FinishReason: s.roundFinish, NativeFinishReason: s.roundNative}
+		case reasoned && !s.NoReasoningCutRepair:
+			rc := ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish}
+			if s.OnReasoningCut != nil {
+				s.OnReasoningCut(rc)
+			}
+			if repairedOnce {
+				endReason = TurnReasoningCut
+				return result, &ReasoningCutError{Tokens: rc.Tokens, Finish: rc.Finish}
+			}
+			repairedOnce, repairPending, repairKind = true, true, repairReasoning
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
+				ID:        NewID(),
+				Kind:      KindNotification,
+				Tag:       ReasoningCutTag,
+				Content:   reasoningCutNotice(reasoning),
+				CreatedAt: now(),
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist reasoning-cut notice: %w", e)
+			}
+			continue
+		case cut != nil:
+			// Empty because the provider ran out of room (finish length), with
+			// no reasoning to blame. Not an empty reply: the overflow path
+			// below owns it (OnOverflow, MaxOverflowRetries, TurnOverflow), and
+			// a repair note would ask a model with no room to answer in the
+			// room it just ran out of.
+		default:
+			// No text, no tool call, no reasoning, and not a length cut: the
+			// model said nothing (seen: Gemini through OpenRouter, native
+			// finish MALFORMED_FUNCTION_CALL). Never a TurnReply with Reply "".
+			if s.NoReasoningCutRepair || repairedOnce {
+				endReason = TurnEmptyReply
+				return result, &EmptyReplyError{FinishReason: s.roundFinish, NativeFinishReason: s.roundNative}
+			}
+			repairedOnce, repairPending, repairKind = true, true, repairEmpty
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
+				ID:        NewID(),
+				Kind:      KindNotification,
+				Tag:       EmptyReplyTag,
+				Content:   emptyReplyNotice(s.roundFinish),
+				CreatedAt: now(),
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist empty-reply notice: %w", e)
+			}
+			continue
 		}
 
 		// Host hook: transform the tool calls before they are persisted or

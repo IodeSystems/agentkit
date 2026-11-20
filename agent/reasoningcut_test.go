@@ -158,23 +158,13 @@ func TestRepairRoundSendsReasoningOffAndOnlyThatRound(t *testing.T) {
 	}
 }
 
-func TestNoReasoningCutRepairKeepsTodaysBehaviour(t *testing.T) {
+func TestNoReasoningCutRepairStillFailsAnEmptyRound(t *testing.T) {
 	store := &memStore{}
 	runner := &scriptRunner{turns: [][]llm.StreamChunk{reasoningOnly("think", "")}}
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, NoReasoningCutRepair: true,
 		OnReasoningCut: func(ReasoningCut) { t.Error("hook ran with the repair off") }}
-	res, err := s.Turn(context.Background())
-	if err != nil || res.Reply != "" || len(runner.seen) != 1 || len(cutNotices(store)) != 0 {
-		t.Errorf("reply=%q err=%v rounds=%d", res.Reply, err, len(runner.seen))
-	}
-}
-
-func TestEmptyReplyWithoutReasoningIsUntouched(t *testing.T) {
-	store := &memStore{}
-	runner := &scriptRunner{turns: [][]llm.StreamChunk{{{Content: "  "}}}}
-	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
-		OnReasoningCut: func(ReasoningCut) { t.Error("hook ran without reasoning") }}
-	if _, err := s.Turn(context.Background()); err != nil || len(runner.seen) != 1 {
+	_, err := s.Turn(context.Background())
+	if !errors.Is(err, ErrEmptyReply) || len(runner.seen) != 1 || len(cutNotices(store)) != 0 {
 		t.Errorf("err=%v rounds=%d", err, len(runner.seen))
 	}
 }
