@@ -33,7 +33,7 @@ import (
 
 const (
 	defaultFirstByteTimeout = 15 * time.Minute
-	defaultStallTimeout     = 2 * time.Minute
+	defaultStallTimeout     = 5 * time.Minute
 
 	// HTTP/2 health check for the client-owned transport: ping a connection that
 	// has been silent for http2PingAfter and close it if no answer arrives within

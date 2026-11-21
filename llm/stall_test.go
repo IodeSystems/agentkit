@@ -298,12 +298,34 @@ func TestStall_ChatBodyStallIsRetried(t *testing.T) {
 
 func TestStall_DefaultsAndOff(t *testing.T) {
 	c := NewClient("http://x", "", "m")
-	if c.firstByteTimeout() != 15*time.Minute || c.stallTimeout() != 2*time.Minute {
-		t.Errorf("defaults = %s, %s; want 15m, 2m", c.firstByteTimeout(), c.stallTimeout())
+	if c.firstByteTimeout() != 15*time.Minute || c.stallTimeout() != 5*time.Minute {
+		t.Errorf("defaults = %s, %s; want 15m, 5m", c.firstByteTimeout(), c.stallTimeout())
 	}
 	c.FirstByteTimeout, c.StallTimeout = -1, -time.Second
 	if c.firstByteTimeout() != 0 || c.stallTimeout() != 0 {
 		t.Error("negative must read as off")
+	}
+}
+
+// The default timeouts are sized so a legitimately queued call is never cut.
+// corrallm can hold a request in its queue up to 12m before answering 429
+// (internal/agent/sessionkey.go), so FirstByteTimeout must sit above that
+// floor, and a mid-stream silence longer than the queue-hold window must not
+// be mistaken for a dead link. A StallError is the link going away, so the
+// caller's transient classifier must read it as transient and retry.
+func TestStall_DefaultsSizedAboveQueueHold(t *testing.T) {
+	queueHold := 12 * time.Minute
+	c := NewClient("http://x", "", "m")
+	if c.firstByteTimeout() <= queueHold {
+		t.Errorf("FirstByteTimeout default = %s; must sit above the %s queue hold", c.firstByteTimeout(), queueHold)
+	}
+	if c.stallTimeout() != 5*time.Minute {
+		t.Errorf("StallTimeout default = %s; want 5m", c.stallTimeout())
+	}
+	for _, se := range []*StallError{{Phase: "first_byte", After: c.firstByteTimeout()}, {Phase: "between_chunks", After: c.stallTimeout()}} {
+		if !TransientUpstream(se) {
+			t.Errorf("TransientUpstream(%+v) = false; a stall is the link going away and must be transient", se)
+		}
 	}
 }
 
