@@ -128,6 +128,41 @@ func TestMessagesAPI_ToolCalls(t *testing.T) {
 }
 
 // max_tokens is finish_reason length, which a caller recovers from.
+// A strict tool carries strict true to the Claude wire: the OpenAI-shaped
+// body's function.strict is forwarded by the shim to the Messages API's
+// tool.strict, which a Sonnet 5.5 request needs.
+func TestMessagesAPI_StrictToolCarriesStrictTrue(t *testing.T) {
+	c, got := fakeMessages(t, evStart,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
+	strict := true
+	var td ToolDef
+	td.Type = "function"
+	td.Function.Name = "exec"
+	td.Function.Description = "run"
+	td.Function.Parameters = map[string]any{"type": "object"}
+	td.Function.Strict = &strict
+	ch, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "go"}}, []ToolDef{td}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	toolsArr, ok := (*got)["tools"].([]any)
+	if !ok || len(toolsArr) != 1 {
+		t.Fatalf("tools %v", (*got)["tools"])
+	}
+	tool := toolsArr[0].(map[string]any)
+	if tool["name"] != "exec" {
+		t.Fatalf("tool %v", tool)
+	}
+	if tool["strict"] != true {
+		t.Errorf("strict not carried to the Claude wire: %v", tool)
+	}
+	if _, present := tool["input_schema"]; !present {
+		t.Errorf("input_schema missing: %v", tool)
+	}
+}
+
 func TestMessagesAPI_MaxTokens(t *testing.T) {
 	c, _ := fakeMessages(t, evStart,
 		`{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":7}}`, evStop)

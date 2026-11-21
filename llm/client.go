@@ -302,6 +302,12 @@ type ToolDef struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Parameters  any    `json:"parameters"`
+		// Strict is the OpenAI strict-tools flag: the model must produce
+		// arguments that validate against Parameters. A pointer so "unset" is
+		// distinct from "false": an unset flag is not sent (the OpenAI body
+		// carries no strict field), and the Claude path forwards it to the
+		// Messages API's tool.strict, where a Sonnet 5.5 request needs it true.
+		Strict *bool `json:"strict,omitempty"`
 	} `json:"function"`
 }
 
