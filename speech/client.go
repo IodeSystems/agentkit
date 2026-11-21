@@ -106,7 +106,9 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("speech: dial %s: %w", u.Host, err)
 	}
-	defer conn.Close()
+	// The connection is not closed here: on success it is owned by
+	// the returned Stream, and on failure each error path closes it
+	// explicitly. A defer would close it on the success path too.
 
 	if u.Scheme == "wss" {
 		host := u.Host
@@ -122,6 +124,7 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 		}
 		tlsConn := tls.Client(conn, tlsCfg)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			conn.Close()
 			return nil, fmt.Errorf("speech: TLS handshake with %s: %w", u.Host, err)
 		}
 		conn = tlsConn
@@ -140,12 +143,14 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 	hdrs.WriteString("\r\n")
 
 	if _, err := conn.Write([]byte(reqLine + hdrs.String())); err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("speech: send upgrade request: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	statusCode, header, err := readHTTPResponse(br)
 	if err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("speech: read upgrade response: %w", err)
 	}
 
@@ -160,6 +165,7 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 				io.ReadFull(br, body)
 			}
 		}
+		conn.Close()
 		switch statusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return nil, fmt.Errorf("speech: authentication failure opening %s: %s: %s", path, http.StatusText(statusCode), strings.TrimSpace(string(body)))
@@ -169,6 +175,7 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 	}
 
 	if err := verifyUpgradeResponse(statusCode, header, key); err != nil {
+		conn.Close()
 		return nil, err
 	}
 
