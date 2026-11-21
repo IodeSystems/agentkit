@@ -168,10 +168,8 @@ func (c *Client) Open(ctx context.Context, path string) (*Stream, error) {
 		conn.Close()
 		switch statusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			conn.Close()
 			return nil, fmt.Errorf("speech: authentication failure opening %s: %s: %s", path, http.StatusText(statusCode), strings.TrimSpace(string(body)))
 		default:
-			conn.Close()
 			return nil, fmt.Errorf("speech: provider refused websocket upgrade for %s: %s: %s", path, http.StatusText(statusCode), strings.TrimSpace(string(body)))
 		}
 	}
