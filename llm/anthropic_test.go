@@ -127,7 +127,6 @@ func TestMessagesAPI_ToolCalls(t *testing.T) {
 	}
 }
 
-// max_tokens is finish_reason length, which a caller recovers from.
 // A strict tool carries strict true to the Claude wire: the OpenAI-shaped
 // body's function.strict is forwarded by the shim to the Messages API's
 // tool.strict, which a Sonnet 5.5 request needs.
@@ -163,6 +162,7 @@ func TestMessagesAPI_StrictToolCarriesStrictTrue(t *testing.T) {
 	}
 }
 
+// max_tokens is finish_reason length, which a caller recovers from.
 func TestMessagesAPI_MaxTokens(t *testing.T) {
 	c, _ := fakeMessages(t, evStart,
 		`{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":7}}`, evStop)
