@@ -98,6 +98,11 @@ func newTransport() http.RoundTripper {
 // the caller's, never a StallError. The response body must be closed, as
 // always; Close releases the attempt's context.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	// Every request, chat or probe, names its thread when the ctx knows it. A
+	// header the caller already set (ChatOpts.TraceID) is kept. See WithTraceID.
+	if id := traceIDFrom(req.Context()); id != "" && req.Header.Get("X-Trace-Id") == "" {
+		req.Header.Set("X-Trace-Id", id)
+	}
 	fb, st := c.firstByteTimeout(), c.stallTimeout()
 	if fb == 0 && st == 0 {
 		return c.http.Do(req)

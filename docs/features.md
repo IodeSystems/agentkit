@@ -48,6 +48,8 @@ for chunk := range ch {
 > priority on the fair-share proxy), not just auth. `TraceID` is correlation
 > only (an `X-Trace-Id` header for server logs).
 
+Correlation ids. `llm.WithTraceID(ctx, id)` sets the `X-Trace-Id` for calls that have no `ChatOpts` (embed, transcribe, `DiscoverContext`, probes); a chat call uses `ChatOpts.TraceID` first, then the ctx id. Every `Usage` carries `TraceID` (what was sent) and `ResponseID` (the reply body's `id`, first non-empty chunk id on a stream; the key for a provider's generation lookup). `ChatOpts.Headers` adds per-request headers (for example OpenRouter `x-openrouter-trace-<key>`); `Authorization`, `Content-Type` and `X-Api-Key` are ignored.
+
 ## 2. The tool-call loop — `tools`
 
 `Session.Turn` runs chat → tool_calls → dispatch → feed back → repeat. You

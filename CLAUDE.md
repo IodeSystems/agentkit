@@ -217,6 +217,10 @@ plan/     living plan. plan.md = current state + active work + decisions;
   jitter ONLY while nothing was forwarded to the caller (`streamAttempt`'s
   `forwarded` flag; the failed attempt skips OnUsage/observeStream); it is kept
   as `*llm.StreamError` (`StreamChunk.StreamErr`, `chunk.Err()`).
+  X-Trace-Id: `ChatOpts.TraceID`, else `WithTraceID(ctx)`; `Client.do` adds the
+  ctx id to any request without one (probes, embed, transcribe). `Usage.TraceID`
+  = what was sent, `Usage.ResponseID` = body `id`. `ChatOpts.Headers` never
+  overrides Authorization, Content-Type, X-Api-Key.
 - **A silent link is ended by a watchdog, not by `http.Client.Timeout`.**
   `Client.do` (stall.go) wraps every request: `FirstByteTimeout` (default 15m:
   llama.cpp is silent while it processes a prompt) until the first body byte,

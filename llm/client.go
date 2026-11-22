@@ -196,10 +196,10 @@ func (m Message) MarshalJSON() ([]byte, error) {
 // sends it (document_index, citation_text, start_char_index, end_char_index).
 // A document_index names one of the document parts the request carried.
 type Citation struct {
-	DocumentIndex   int    `json:"document_index"`
-	CitationText    string `json:"citation_text"`
-	StartCharIndex  int    `json:"start_char_index"`
-	EndCharIndex    int    `json:"end_char_index"`
+	DocumentIndex  int    `json:"document_index"`
+	CitationText   string `json:"citation_text"`
+	StartCharIndex int    `json:"start_char_index"`
+	EndCharIndex   int    `json:"end_char_index"`
 }
 
 // ChatResult is a non-streaming chat completion. Content is the reply text
@@ -430,6 +430,19 @@ type Usage struct {
 	// endpoint sends nothing.
 	ServedModel string `json:"served_model,omitempty"`
 	RequestID   string `json:"request_id,omitempty"`
+
+	// TraceID is the X-Trace-Id this request carried: ChatOpts.TraceID, else
+	// the id from WithTraceID(ctx). Stamped by the client, not read from the
+	// response, so a host that logs only Usage can join it to the thread that
+	// made the call. Empty when the request sent none.
+	TraceID string `json:"trace_id,omitempty"`
+
+	// ResponseID is the reply body's top-level "id", verbatim (OpenAI
+	// "chatcmpl-...", OpenRouter "gen-..."). On a stream it is the first
+	// non-empty id any chunk carried. Unlike RequestID it comes from the body,
+	// so it is the key a provider's generation lookup takes. Empty when the
+	// body has none.
+	ResponseID string `json:"response_id,omitempty"`
 
 	// Model is the model field of the response body, verbatim: the last
 	// streamed chunk that carried one, or the non-streaming body. Empty when
@@ -1039,8 +1052,8 @@ func (c *Client) postChatWithRetry(ctx context.Context, payload []byte, ident ca
 // the Messages API, the completion window the provider may take. Zero value =
 // the real-time path, untouched.
 type batchMode struct {
-	batch      bool
-	window     time.Duration
+	batch  bool
+	window time.Duration
 }
 
 // postChatWithRetryBatch is postChatWithRetry with the batch routing decided.
@@ -1096,6 +1109,30 @@ func withCompletionWindow(payload []byte, window time.Duration) ([]byte, error) 
 type callIdent struct {
 	traceID   string
 	requestID string
+	// headers are ChatOpts.Headers: set after the client's own headers, minus
+	// the keys in reservedHeaders.
+	headers http.Header
+}
+
+// reservedHeaders are the headers ChatOpts.Headers may not set: the ones that
+// carry the credential and the body type. A per-request header that replaced
+// them would send the key somewhere else or break the body.
+var reservedHeaders = map[string]bool{
+	"Authorization": true, "Content-Type": true,
+	"X-Api-Key": true, // the Messages API credential
+}
+
+// identFor is the ident for a chat call: opts first, then the ctx trace id for
+// a TraceID the opts leave empty.
+func identFor(ctx context.Context, opts *ChatOpts) callIdent {
+	ident := callIdent{}
+	if opts != nil {
+		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID, headers: opts.Headers}
+	}
+	if ident.traceID == "" {
+		ident.traceID = traceIDFrom(ctx)
+	}
+	return ident
 }
 
 // postWithRetry POSTs payload to url with the same auth headers and 429/5xx
@@ -1162,6 +1199,17 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		// away. A server that does not issue them never sees this header.
 		if ticket != "" {
 			req.Header.Set("X-Corrallm-Request-Id", ticket)
+		}
+		// Per-request headers go last so they can add to or replace the
+		// client's own, except the credential and body type.
+		for k, vs := range ident.headers {
+			if reservedHeaders[http.CanonicalHeaderKey(k)] {
+				continue
+			}
+			req.Header.Del(k)
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
 		}
 		resp, err := c.do(req)
 		if err != nil {
@@ -1609,6 +1657,12 @@ func sleepOrCancel(ctx context.Context, sleep time.Duration) bool {
 type ChatOpts struct {
 	ToolChoice string
 	TraceID    string
+	// Headers are extra request headers for this request only, such as
+	// OpenRouter's "x-openrouter-trace-<key>". They are applied after the
+	// client's own headers and replace a header of the same name. Authorization,
+	// Content-Type and X-Api-Key are ignored: a per-request value there would
+	// redirect the credential or break the body. Nil adds nothing.
+	Headers http.Header
 	// PromptCacheKey is sent as the OpenAI "prompt_cache_key" field: an opaque
 	// id (at most 256 characters) naming the conversation whose prompt prefix
 	// this request extends. OpenAI, Mistral, Together, Moonshot and xAI accept
@@ -1926,7 +1980,7 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 		return true
 	}
 	for attempt := 1; ; attempt++ {
-		se := c.streamAttempt(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFrom(resp.Header), sent, opts != nil && opts.Batch, gate)
+		se := c.streamAttempt(ctx, c.streamBody(resp.Body), ch, messages, callStart, c.metaFromCall(resp.Header, ctx, opts), sent, opts != nil && opts.Batch, gate)
 		if se == nil {
 			if attempt > 1 {
 				c.emitRetry(RetryEvent{Kind: RetryRecovered, Attempt: attempt, Elapsed: time.Since(callStart), Budget: budget})
@@ -1965,10 +2019,9 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 // includes retries, queueing, a cold model load and a resend — the parts that
 // make a call slow are exactly the parts a server-side number would omit.
 func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) (*http.Response, sentRequest, time.Time, error) {
-	var ident callIdent
+	ident := identFor(ctx, opts)
 	var bm batchMode
 	if opts != nil {
-		ident = callIdent{traceID: opts.TraceID, requestID: opts.RequestID}
 		bm = batchMode{batch: opts.Batch, window: opts.CompletionWindow}
 	}
 	callStart := time.Now()
@@ -2121,8 +2174,8 @@ func citationsFromRaw(raw []byte) []Citation {
 		}
 		for _, ci := range b.Citations {
 			c := Citation{
-				DocumentIndex: ci.DocumentIndex,
-				CitationText:  ci.CitedText,
+				DocumentIndex:  ci.DocumentIndex,
+				CitationText:   ci.CitedText,
 				StartCharIndex: -1,
 				EndCharIndex:   -1,
 			}
@@ -2161,6 +2214,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
 		} `json:"choices"`
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage *Usage `json:"usage"`
 	}
@@ -2173,7 +2227,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		return nil, fmt.Errorf("llm: decode: %w", err)
 	}
 	if c.OnUsage != nil {
-		meta := c.metaFrom(resp.Header)
+		meta := c.metaFromCall(resp.Header, ctx, opts)
 		if result.Usage != nil || meta.reported() {
 			u := Usage{}
 			if result.Usage != nil {
@@ -2182,6 +2236,7 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 			u.LatencyMS = time.Since(callStart).Milliseconds()
 			c.stampFor(meta, &u, usageCost(raw), result.Model, opts != nil && opts.Batch)
 			u.Model = result.Model
+			u.ResponseID = result.ID
 			if len(result.Choices) > 0 {
 				u.FinishReason = result.Choices[0].FinishReason
 				u.NativeFinishReason = result.Choices[0].NativeFinishReason
@@ -2247,6 +2302,8 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// body-only value Usage.Model reports, distinct from streamModel's
 	// first-seen semantics.
 	var lastModel string
+	// streamID is the first non-empty top-level "id" any chunk carried.
+	var streamID string
 	// lastFinish and lastNative are the finish_reason and OpenRouter's
 	// native_finish_reason as the stream sent them. Kept verbatim: the client
 	// itself acts only on "length" and "content_filter", but a host needs the
@@ -2262,6 +2319,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
 			c.stampFor(meta, &u, nil, streamModel, batch)
 			u.Model = lastModel
+			u.ResponseID = streamID
 			u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 			c.OnUsage(u)
 		}
@@ -2283,6 +2341,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		u.Timings = timings
 		c.stampFor(meta, u, usageCost([]byte(data)), streamModel, batch)
 		u.Model = lastModel
+		u.ResponseID = streamID
 		u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
 		lastUsage = u
 		obs.usage = true
@@ -2404,6 +2463,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		// Streaming-delta shape. Note `Index` on each tool_call entry —
 		// OpenAI uses it to thread fragments of the same call together.
 		var event struct {
+			ID      string `json:"id"`
 			Model   string `json:"model"`
 			Choices []struct {
 				Delta struct {
@@ -2455,6 +2515,9 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			obs.failed = true
 			send(StreamChunk{Error: se.Error(), StreamErr: se, PartialToolCalls: partialTools(toolBuf, toolOrder)})
 			return
+		}
+		if streamID == "" {
+			streamID = event.ID
 		}
 		if streamModel == "" {
 			streamModel = event.Model

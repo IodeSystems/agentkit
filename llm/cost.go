@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -293,6 +294,9 @@ type responseMeta struct {
 	// bodyCurrency is the currency a usage.cost in the body is in, when the
 	// response or the endpoint says which.
 	bodyCurrency string
+	// traceID is the X-Trace-Id the request carried; set by the caller, since
+	// no response header holds it.
+	traceID string
 }
 
 // requestIDHeaders are the headers that name one request, in precedence order.
@@ -304,6 +308,9 @@ var requestIDHeaders = []string{
 	"X-Request-Id",      // OpenAI and most OpenAI-compatible servers
 	"Request-Id",        // Anthropic
 	"X-Litellm-Call-Id", // LiteLLM
+	// OpenRouter: UNVERIFIED that it sends this header; kept as a last fallback.
+	// Usage.ResponseID (the body id) is the reliable OpenRouter key.
+	"X-Generation-Id",
 }
 
 // requestIDFrom is the first non-empty of requestIDHeaders.
@@ -314,6 +321,13 @@ func requestIDFrom(h http.Header) string {
 		}
 	}
 	return ""
+}
+
+// metaFromCall is metaFrom plus the trace id the chat request carried.
+func (c *Client) metaFromCall(h http.Header, ctx context.Context, opts *ChatOpts) responseMeta {
+	m := c.metaFrom(h)
+	m.traceID = identFor(ctx, opts).traceID
+	return m
 }
 
 func (c *Client) metaFrom(h http.Header) responseMeta {
@@ -348,6 +362,7 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 func (m responseMeta) stamp(u *Usage, body *bodyCost, bodyModel string) {
 	u.Server = m.timing
 	u.ServedModel, u.RequestID = m.served, m.requestID
+	u.TraceID = m.traceID
 	if u.ServedModel == "" {
 		u.ServedModel = strings.TrimSpace(bodyModel)
 	}
