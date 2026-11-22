@@ -185,3 +185,10 @@ and its sub-agents through one `taskgraph.Store` you provide. Each write returns
 dependents when its status moved); you deliver them, typically as
 `Session.Inject` of a `KindNotification` into each owner's session. What an
 owner is, who may change what, approval, and delegation stay yours.
+
+A node closed as done or dropped carries `ClosedAt` and `ClosedBy`, for host
+statistics (plan_show does not print them). `WithClosedBy(func(ctx) string)`
+fills `ClosedBy` from the tool call's ctx, so a model switch inside one session
+attributes each close to the model that made it; `Owner` is the actor and does
+not say that. A close through `Graph.SetStatus` sets `ClosedAt` only. A reopen
+clears both.

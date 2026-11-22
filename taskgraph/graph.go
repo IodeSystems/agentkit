@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Status is where a node stands.
@@ -72,7 +73,21 @@ type Node struct {
 	Why string `json:"why,omitempty"`
 	// Account is how DoneWhen was met.
 	Account string `json:"account,omitempty"`
+	// ClosedAt is when the node went to done or dropped; the zero time (left
+	// out of JSON) while it is anywhere else. SetStatus sets it, so a host's
+	// direct SetStatus gets a time but no ClosedBy. A reopen clears it.
+	ClosedAt time.Time `json:"closed_at,omitzero"`
+	// ClosedBy is who or what closed the node, as WithClosedBy says it from
+	// the tool call's ctx (a model name, for a host that counts closes per
+	// model). It is not Owner: Owner is the actor, which a model switch inside
+	// one session does not change. "" when no WithClosedBy is set, or when the
+	// host closed the node through Graph.SetStatus. A reopen clears it. It is
+	// for host statistics: plan_show does not print it.
+	ClosedBy string `json:"closed_by,omitempty"`
 }
+
+// now is the clock for ClosedAt; a test replaces it.
+var now = time.Now
 
 // Graph is the whole plan.
 type Graph struct {
@@ -280,6 +295,10 @@ func (g *Graph) SetStatus(id string, to Status, why string) error {
 	}
 	n.Status = to
 	n.Why = ""
+	n.ClosedAt, n.ClosedBy = time.Time{}, ""
+	if to == Done || to == Dropped {
+		n.ClosedAt = now().UTC()
+	}
 	switch to {
 	case Blocked, Dropped:
 		n.Why = why

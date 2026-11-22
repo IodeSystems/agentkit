@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iodesystems/agentkit/llm"
 )
@@ -340,4 +341,105 @@ func TestToolRefusesUnknownFieldsAndNamesTheReplacement(t *testing.T) {
 	if out = call(st, "", ToolAdd, map[string]any{"title": "parse", "done_when": "tests pass", "details": "d"}); !strings.Contains(out, "1 [todo] parse") {
 		t.Errorf("known fields only: %s", out)
 	}
+}
+
+func closedByTools(st Store, who string) *Tools {
+	return New(st, "", WithClosedBy(func(ctx context.Context) string { return who }))
+}
+
+func fixedClock(t *testing.T, at time.Time) {
+	t.Helper()
+	old := now
+	now = func() time.Time { return at }
+	t.Cleanup(func() { now = old })
+}
+
+func TestCloseDoneStampsClosedAtAndClosedByFromTheCallCtx(t *testing.T) {
+	at := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	fixedClock(t, at)
+	st := newMemStore(Graph{}, nil)
+	call(st, "", ToolAdd, map[string]any{"title": "a", "done_when": "x"})
+	call(st, "", ToolUpdate, map[string]any{"id": "1", "status": "doing"})
+	type key struct{}
+	tl := New(st, "", WithClosedBy(func(ctx context.Context) string { return ctx.Value(key{}).(string) }))
+	ctx := context.WithValue(context.Background(), key{}, "model-b")
+	b, _ := json.Marshal(map[string]any{"outcome": "done", "id": "1", "account": "ok"})
+	if out := tl.Dispatch(ctx, ToolClose, string(b)); strings.HasPrefix(out, "ERROR") {
+		t.Fatal(out)
+	}
+	n := viewGet(t, st, "1")
+	if !n.ClosedAt.Equal(at) || n.ClosedBy != "model-b" {
+		t.Errorf("got %v %q", n.ClosedAt, n.ClosedBy)
+	}
+}
+
+func TestCloseDropStampsClosedAtAndClosedBy(t *testing.T) {
+	at := time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC)
+	fixedClock(t, at)
+	st := newMemStore(Graph{}, nil)
+	call(st, "", ToolAdd, map[string]any{"title": "a", "done_when": "x"})
+	closedByTools(st, "m").Dispatch(context.Background(), ToolClose, `{"outcome":"drop","id":"1","reason":"moot"}`)
+	n := viewGet(t, st, "1")
+	if n.Status != Dropped || !n.ClosedAt.Equal(at) || n.ClosedBy != "m" {
+		t.Errorf("got %v %v %q", n.Status, n.ClosedAt, n.ClosedBy)
+	}
+}
+
+func TestBlockDoesNotStampAClose(t *testing.T) {
+	st := newMemStore(Graph{}, nil)
+	call(st, "", ToolAdd, map[string]any{"title": "a", "done_when": "x"})
+	closedByTools(st, "m").Dispatch(context.Background(), ToolClose, `{"outcome":"block","id":"1","reason":"wait"}`)
+	if n := viewGet(t, st, "1"); !n.ClosedAt.IsZero() || n.ClosedBy != "" {
+		t.Errorf("blocked node stamped: %v %q", n.ClosedAt, n.ClosedBy)
+	}
+}
+
+func TestReopenClearsClosedAtAndClosedBy(t *testing.T) {
+	st := newMemStore(Graph{}, nil)
+	call(st, "", ToolAdd, map[string]any{"title": "a", "done_when": "x"})
+	closedByTools(st, "m").Dispatch(context.Background(), ToolClose, `{"outcome":"drop","id":"1","reason":"moot"}`)
+	if out := call(st, "", ToolUpdate, map[string]any{"id": "1", "status": "todo"}); strings.HasPrefix(out, "ERROR") {
+		t.Fatal(out)
+	}
+	if n := viewGet(t, st, "1"); !n.ClosedAt.IsZero() || n.ClosedBy != "" {
+		t.Errorf("reopened node kept stamp: %v %q", n.ClosedAt, n.ClosedBy)
+	}
+}
+
+func TestCloseWithoutWithClosedByLeavesClosedByEmptyButSetsClosedAt(t *testing.T) {
+	st := newMemStore(Graph{}, nil)
+	call(st, "", ToolAdd, map[string]any{"title": "a", "done_when": "x"})
+	call(st, "", ToolClose, map[string]any{"outcome": "drop", "id": "1", "reason": "moot"})
+	n := viewGet(t, st, "1")
+	if n.ClosedBy != "" || n.ClosedAt.IsZero() {
+		t.Errorf("got %v %q", n.ClosedAt, n.ClosedBy)
+	}
+}
+
+func TestClosedFieldsRoundTripJSONAndZeroClosedAtIsOmitted(t *testing.T) {
+	at := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	b, _ := json.Marshal(Node{ID: "1", ClosedAt: at, ClosedBy: "m"})
+	var back Node
+	if err := json.Unmarshal(b, &back); err != nil || !back.ClosedAt.Equal(at) || back.ClosedBy != "m" {
+		t.Errorf("round trip: %v %+v", err, back)
+	}
+	b, _ = json.Marshal(Node{ID: "1"})
+	if strings.Contains(string(b), "closed_") {
+		t.Errorf("zero closed fields written: %s", b)
+	}
+}
+
+func TestDiffIgnoresClosedStampsAlone(t *testing.T) {
+	a := Graph{Nodes: []*Node{{ID: "1", Title: "a", Status: Done}}}
+	b := a.Clone()
+	b.Nodes[0].ClosedBy = "m"
+	if ch := Diff(a, b, ""); len(ch) != 0 {
+		t.Errorf("stamp-only change reported: %+v", ch)
+	}
+}
+
+func viewGet(t *testing.T, st Store, id string) *Node {
+	t.Helper()
+	g := view(t, st)
+	return g.Get(id)
 }

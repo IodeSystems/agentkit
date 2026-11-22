@@ -32,6 +32,17 @@ type options struct {
 	note      string
 	mayChange func(actor string, n *Node) bool
 	onChange  func(ctx context.Context, actor string, changes []Change)
+	closedBy  func(ctx context.Context) string
+}
+
+// WithClosedBy sets Node.ClosedBy on every node the tools close (plan_close
+// with done or drop): f is called at close time with the tool call's ctx, so
+// a host that switches model in the middle of a session attributes each close
+// to the model that made the call. Without it ClosedBy stays "". It does not
+// reach a node a host closes through Graph.SetStatus: that sets ClosedAt only.
+// plan_update cannot close a node, so it never calls f.
+func WithClosedBy(f func(ctx context.Context) string) Option {
+	return func(o *options) { o.closedBy = f }
 }
 
 // WithOnChange gives the host every write the tool made: the changes (see
@@ -346,6 +357,9 @@ func (t *Tools) Dispatch(ctx context.Context, name, raw string) string {
 				return err
 			}
 			n = g.Get(a.ID)
+			if o.closedBy != nil && (status == Done || status == Dropped) {
+				n.ClosedBy = o.closedBy(ctx)
+			}
 		}
 		out = g.Line(n)
 		if name == ToolClose && a.Outcome == "drop" {
