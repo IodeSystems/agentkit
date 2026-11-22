@@ -42,6 +42,12 @@ type StreamError struct {
 	// RetryAfter is the server's own wait hint (error.retry_after, or
 	// error.metadata.retry_after), clamped like an HTTP Retry-After. 0 = none.
 	RetryAfter time.Duration
+	// Reason is error.reason, the fair-share proxy's own classification
+	// (corrallm: "queue-timeout", "rejected", ...). Empty when absent.
+	Reason string
+	// Status is error.status, an HTTP-like status some proxies repeat inside
+	// the event. 0 when absent. Retryable falls back to it when Code is empty.
+	Status int
 }
 
 // streamErrMetaClip bounds the metadata shown in Error(): enough to see the
@@ -79,10 +85,11 @@ func (e *StreamError) Error() string {
 // fail the same way, and a wrong guess costs a whole regenerated reply.
 func (e *StreamError) Retryable() bool {
 	var n int
-	if _, err := fmt.Sscanf(e.Code, "%d", &n); err == nil {
-		if n == 429 || (n >= 500 && n <= 599) {
-			return true
-		}
+	if _, err := fmt.Sscanf(e.Code, "%d", &n); err != nil && e.Code == "" {
+		n = e.Status
+	}
+	if n == 429 || (n >= 500 && n <= 599) {
+		return true
 	}
 	text := strings.ToLower(e.Code + " " + e.Type + " " + e.Message)
 	for _, k := range []string{"overloaded", "rate limit", "rate_limit", "unavailable", "resource_exhausted"} {
@@ -115,12 +122,15 @@ func parseStreamError(raw json.RawMessage) *StreamError {
 		Param      json.RawMessage `json:"param"`
 		Metadata   json.RawMessage `json:"metadata"`
 		RetryAfter float64         `json:"retry_after"`
+		Reason     string          `json:"reason"`
+		Status     json.RawMessage `json:"status"`
 	}
 	if json.Unmarshal(raw, &o) != nil || o.Message == "" {
 		return nil
 	}
 	e := &StreamError{Message: o.Message, Code: scalarText(o.Code), Type: o.Type,
-		Param: scalarText(o.Param), Raw: string(raw)}
+		Param: scalarText(o.Param), Raw: string(raw), Reason: o.Reason}
+	_, _ = fmt.Sscanf(scalarText(o.Status), "%d", &e.Status)
 	if string(o.Metadata) != "null" {
 		e.Metadata = o.Metadata
 	}

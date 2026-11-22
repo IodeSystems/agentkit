@@ -985,6 +985,24 @@ func immediateRetryDelay() time.Duration {
 	return time.Duration(rand.Int64N(int64(immediateRetryJitterCeiling)))
 }
 
+// immediateQueueRetry is the one rule for a queue-timeout, whether the server
+// said it as an HTTP 429 (postTypedWithRetry) or as an error event inside a 200
+// stream (pumpStream): retry at once, at most maxQueueTimeoutStreak times in a
+// row. *streak counts the consecutive immediate retries and is the caller's.
+//
+// When it returns false the streak is reset, whether it was exhausted (fall
+// back to backoff for this one attempt, then let the NEXT run of queue-timeouts
+// earn its own immediate retries) or broken by another reason ("rejected" etc,
+// which always backs off). The caller sleeps delay when immediate is true.
+func immediateQueueRetry(reason string, streak *int) (immediate bool, delay time.Duration) {
+	if reason == backpressureReasonQueueTimeout && *streak < maxQueueTimeoutStreak {
+		*streak++
+		return true, immediateRetryDelay()
+	}
+	*streak = 0
+	return false, 0
+}
+
 // defaultRetryBudget bounds the TOTAL wall-clock a single postChatWithRetry
 // spends retrying (429 + 5xx) before it gives up with a clear error, when the
 // caller hasn't set Client.RetryBudget. 5m matches a "keep trying through a
@@ -1337,20 +1355,12 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 			// already full) and every other reason keep the normal schedule below:
 			// backing off matters when the server is telling every client it is
 			// saturated, not just this one that waited its turn.
-			immediate := bp.Reason == backpressureReasonQueueTimeout && queueTimeoutStreak < maxQueueTimeoutStreak
+			immediate, immDelay := immediateQueueRetry(bp.Reason, &queueTimeoutStreak)
 			serverAsked := asked
 			if immediate {
-				queueTimeoutStreak++
-				sleep = immediateRetryDelay()
+				sleep = immDelay
 				serverAsked = false
 			} else {
-				// Reset the streak whether it was exhausted (bp.Reason ==
-				// queue-timeout, count == maxQueueTimeoutStreak — fall back to
-				// backoff for this one attempt, then let the NEXT run of
-				// queue-timeouts earn its own maxQueueTimeoutStreak immediate
-				// retries) or broken by a different reason ("rejected" etc,
-				// which always backs off).
-				queueTimeoutStreak = 0
 				if asked {
 					sleep = bp.RetryAfter
 				}
@@ -1953,6 +1963,10 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 	deadline := callStart.Add(budget)
 	backoff := retryInitialBackoff
 	var sleep time.Duration
+	// queueTimeoutStreak and immediate: see immediateQueueRetry. Same rule and
+	// limit as the 429 path.
+	queueTimeoutStreak := 0
+	immediate := false
 	gate := func(err error) bool {
 		var se *StreamError
 		retryable := false
@@ -1966,11 +1980,21 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 		if !retryable || ctx.Err() != nil {
 			return false
 		}
-		sleep = backoff
-		if hint > 0 {
-			sleep = hint
+		reason := ""
+		if se != nil {
+			reason = se.Reason
 		}
-		sleep = jittered(sleep)
+		var immDelay time.Duration
+		immediate, immDelay = immediateQueueRetry(reason, &queueTimeoutStreak)
+		if immediate {
+			sleep = immDelay
+		} else {
+			sleep = backoff
+			if hint > 0 {
+				sleep = hint
+			}
+			sleep = jittered(sleep)
+		}
 		if time.Now().Add(sleep).After(deadline) {
 			c.emitRetry(RetryEvent{Kind: RetryGiveUp, Err: err, Elapsed: time.Since(callStart), Budget: budget,
 				Reason: fmt.Sprintf("gave up on a stream failure after %s (retry budget %s): %v",
@@ -1991,17 +2015,26 @@ func (c *Client) pumpStream(ctx context.Context, resp *http.Response, ch chan<- 
 			Delay: sleep, Elapsed: time.Since(callStart), Budget: budget}
 		var streamErr *StreamError
 		if errors.As(se, &streamErr) {
-			ev.Kind, ev.Body, ev.ServerAsked = RetryStream, streamErr.Message, streamErr.RetryAfter > 0
+			ev.Kind, ev.Body, ev.ServerAsked = RetryStream, streamErr.Message, streamErr.RetryAfter > 0 && !immediate
+		}
+		if immediate {
+			ev.Reason = fmt.Sprintf("provider queue-timeout — retrying immediately, no backoff (attempt %d, %d/%d immediate retries)",
+				attempt, queueTimeoutStreak, maxQueueTimeoutStreak)
+			log.Printf("llm: stream failed before any output (attempt %d): %v; retrying immediately (%d/%d)",
+				attempt, se, queueTimeoutStreak, maxQueueTimeoutStreak)
+		} else {
+			log.Printf("llm: stream failed before any output (attempt %d): %v; resending in %s", attempt, se, sleep)
 		}
 		c.emitRetry(ev)
-		log.Printf("llm: stream failed before any output (attempt %d): %v; resending in %s", attempt, se, sleep)
 		if !sleepOrCancel(ctx, sleep) {
 			ch <- StreamChunk{Error: ctx.Err().Error()}
 			return
 		}
-		backoff *= 2
-		if backoff > retryMaxBackoff {
-			backoff = retryMaxBackoff
+		if !immediate {
+			backoff *= 2
+			if backoff > retryMaxBackoff {
+				backoff = retryMaxBackoff
+			}
 		}
 		var err error
 		resp, _, _, err = c.sendChat(ctx, messages, tools, opts, true)
