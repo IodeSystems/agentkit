@@ -14,6 +14,17 @@ talks to `/v1/messages`. Callers keep `Message`, `ToolDef`, `ChatOpts`, `StreamC
 The body is built as for any provider and translated, so retries, headers and
 `readStream` are one code path. Other providers are unchanged.
 
+**No-prefill wire constraints (shim v0.5.0).** Models in `noForcedToolChoice`
+(claude-opus-5-5, claude-sonnet-5-5, claude-fable-5-1, claude-mythos-5-1) answer
+400 to two wire shapes the OpenAI form permits: a trailing assistant message, and a
+forced `tool_choice` (named tool or `required`). The shim repairs both transparently:
+`repair()` appends a `user` "Continue." turn after a trailing assistant message, and
+`unforced()` rewrites a forced `tool_choice` to `auto`. Callers see no error and no
+changed shape. Tests: `llm/anthropic_test.go`
+(`TestMessagesAPI_TrailingAssistantDoesNotReachSonnet55`,
+`TestMessagesAPI_ForcedToolChoiceBecomesAutoForSonnet55`,
+`TestMessagesAPI_RequiredToolChoiceBecomesAutoForSonnet55`).
+
 The direct path stays first-class (Carl, 2026-11-01): not every dun user runs corrallm,
 some use OpenRouter directly, and switching providers and cross-provider sub-agents
 must work. The choice is per client, so a child can be on Anthropic while its parent is

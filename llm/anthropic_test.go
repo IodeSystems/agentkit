@@ -405,3 +405,111 @@ func TestMessagesAPI_UserAfterToolResultSharesTheResultsTurn(t *testing.T) {
 		t.Fatalf("tool_result must lead, text follow: %v", blocks)
 	}
 }
+
+// A trailing assistant message does not reach the wire on a no-prefill model
+// (claude-sonnet-5-5). The shim's repair() appends a user "Continue." turn,
+// so the last message on the wire is always user.
+func TestMessagesAPI_TrailingAssistantDoesNotReachSonnet55(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\nevent: message_stop\ndata: %s\n\n", evStart, evStop)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL+"/v1", "k", "claude-sonnet-5-5")
+	c.MessagesAPI = true
+	msgChunks(t, c, []Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "I'll handle that."},
+	}, nil)
+	msgs, ok := got["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("messages %v", got["messages"])
+	}
+	last := msgs[len(msgs)-1].(map[string]any)
+	if last["role"] != "user" {
+		t.Fatalf("last wire message role = %v, want user (trailing assistant was not repaired)", last["role"])
+	}
+}
+
+// A forced tool_choice (named tool) becomes auto on claude-sonnet-5-5,
+// which answers a 400 to a forced choice. The shim's unforced() converts it.
+func TestMessagesAPI_ForcedToolChoiceBecomesAutoForSonnet55(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\nevent: message_stop\ndata: %s\n\n", evStart, evStop)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL+"/v1", "k", "claude-sonnet-5-5")
+	c.MessagesAPI = true
+	strict := true
+	var td ToolDef
+	td.Type = "function"
+	td.Function.Name = "exec"
+	td.Function.Description = "run"
+	td.Function.Parameters = map[string]any{"type": "object"}
+	td.Function.Strict = &strict
+	ch, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "go"}},
+		[]ToolDef{td}, &ChatOpts{ToolChoice: `{"type":"tool","function":{"name":"exec"}}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	tc, ok := got["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice %v", got["tool_choice"])
+	}
+	if tc["type"] != "auto" {
+		t.Errorf("tool_choice type = %v, want auto (forced choice on Sonnet 5.5)", tc["type"])
+	}
+}
+
+// The same for "required" (any): a forced any also becomes auto.
+func TestMessagesAPI_RequiredToolChoiceBecomesAutoForSonnet55(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\nevent: message_stop\ndata: %s\n\n", evStart, evStop)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL+"/v1", "k", "claude-sonnet-5-5")
+	c.MessagesAPI = true
+	strict := true
+	var td ToolDef
+	td.Type = "function"
+	td.Function.Name = "exec"
+	td.Function.Description = "run"
+	td.Function.Parameters = map[string]any{"type": "object"}
+	td.Function.Strict = &strict
+	ch, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "go"}},
+		[]ToolDef{td}, &ChatOpts{ToolChoice: "required"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	tc, ok := got["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice %v", got["tool_choice"])
+	}
+	if tc["type"] != "auto" {
+		t.Errorf("tool_choice type = %v, want auto (required on Sonnet 5.5)", tc["type"])
+	}
+}
