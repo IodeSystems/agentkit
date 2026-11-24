@@ -145,6 +145,11 @@ func TestParseStreamError_CodeNumberOrString(t *testing.T) {
 		{`{"message":"m","code":"invalid_api_key","type":"auth"}`, "invalid_api_key", false},
 		{`{"message":"Provider is overloaded"}`, "", true},
 		{`"plain string"`, "", false},
+		// corrallm adds `status` to every after-commit event; a string code
+		// that matches no keyword must not hide a 429/5xx status.
+		{`{"message":"m","code":"queue_full","status":429}`, "queue_full", true},
+		{`{"message":"m","code":"backend_down","status":503}`, "backend_down", true},
+		{`{"message":"m","code":"content_filter","type":"guardrail","status":400}`, "content_filter", false},
 	} {
 		se := parseStreamError([]byte(tc.raw))
 		if se == nil || se.Code != tc.code || se.Retryable() != tc.retry {

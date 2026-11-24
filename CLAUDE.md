@@ -218,7 +218,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `forwarded` flag; the failed attempt skips OnUsage/observeStream); it is kept
   as `*llm.StreamError` (`StreamChunk.StreamErr`, `chunk.Err()`).
   A stream error event with `reason` "queue-timeout" (corrallm, after a queued
-  request: `StreamError.Reason`, `Status` stands in for a missing `code`) takes
+  request: `StreamError.Reason`; `Status` stands in for a missing or non-numeric `code`) takes
   the SAME fast retry as the 429: `immediateQueueRetry`, one helper, one
   `maxQueueTimeoutStreak`; other reasons keep the `retry_after`/backoff sleep.
   X-Trace-Id: `ChatOpts.TraceID`, else `WithTraceID(ctx)`; `Client.do` adds the

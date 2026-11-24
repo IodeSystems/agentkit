@@ -78,14 +78,17 @@ func (e *StreamError) Error() string {
 }
 
 // Retryable reports whether the error looks transient. The matcher is small on
-// purpose: a numeric code of 429 or any 5xx, or "overloaded", "rate limit" /
+// purpose: a numeric code of 429 or any 5xx (when code is not a number, the
+// event's `status` stands in: corrallm always sends the HTTP status the event
+// replaces, and its contract says to treat the event as that status, whatever
+// string code an upstream body carried), or "overloaded", "rate limit" /
 // "rate_limit", "unavailable" or "resource_exhausted" in the code, type or
 // message. Anything else (400s, auth, content policy, an unknown message such
 // as a proxy's "JSON error injected") is NOT retried: the same bytes would
 // fail the same way, and a wrong guess costs a whole regenerated reply.
 func (e *StreamError) Retryable() bool {
 	var n int
-	if _, err := fmt.Sscanf(e.Code, "%d", &n); err != nil && e.Code == "" {
+	if _, err := fmt.Sscanf(e.Code, "%d", &n); err != nil {
 		n = e.Status
 	}
 	if n == 429 || (n >= 500 && n <= 599) {
