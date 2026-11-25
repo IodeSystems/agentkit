@@ -19,7 +19,16 @@ package agent
 // It does not spend the Turn's one empty-round repair. Resends back off
 // exponentially (1s doubling, each sleep capped at 5m, additive jitter) and are
 // bounded per Turn by Session.MaxProviderFailRetries (total, not consecutive).
-// When they run out, the round goes to the existing repairs unchanged.
+// A reason that repeats stops them sooner: after 2 resends in a row that came
+// back with the same native reason (case-insensitive), the third such round is
+// not resent. A fault that survives two resends unchanged is not transient, and
+// the full chain would only delay the repair by minutes. A different reason
+// starts the streak again; so does any round that is not a provider failure.
+// When resends stop, the round goes to the existing repairs unchanged.
+//
+// MALFORMED_FUNCTION_CALL is NOT resent while Session.MaxMalformedCallRepairs
+// is on: the model wrote a bad call, and the same request gets the same bad
+// call. It has its own repair (malformedcall.go).
 //
 // The predicate is an ALLOWLIST of clean native reasons, on purpose. A clean
 // reason missing from it costs a few resends of a round that was empty anyway;
@@ -67,6 +76,8 @@ const (
 	defaultProviderFailRetries = 10
 	providerFailBase           = time.Second
 	providerFailCap            = 5 * time.Minute
+	// maxProvFailStreak is how many resends in a row one native reason gets.
+	maxProvFailStreak = 2
 )
 
 // providerFailJitter is the additive jitter fraction, the same rule as llm's

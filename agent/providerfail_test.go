@@ -106,8 +106,10 @@ func TestVisibleTextWithMalformedResponseIsKeptAsReply(t *testing.T) {
 func TestProviderFailResendsBackOffThenFallToReasoningCutRepair(t *testing.T) {
 	store := &memStore{}
 	var turns [][]llm.StreamChunk
-	for range 11 {
-		turns = append(turns, failRound("think", "MALFORMED_RESPONSE"))
+	// Alternate the reason so the same-reason streak never stops the chain:
+	// this test is about the total cap and the backoff.
+	for i := range 11 {
+		turns = append(turns, failRound("think", []string{"MALFORMED_RESPONSE", "OTHER"}[i%2]))
 	}
 	turns = append(turns, []llm.StreamChunk{{Content: "repaired"}})
 	runner := &scriptRunner{turns: turns}
@@ -186,5 +188,59 @@ func TestNegativeMaxProviderFailRetriesKeepsOldBehavior(t *testing.T) {
 	}
 	if len(waits) != 0 || len(cutNotices(store)) != 1 {
 		t.Errorf("resends=%d cut notices=%d, want the reasoning-cut repair at once", len(waits), len(cutNotices(store)))
+	}
+}
+
+func TestRepeatedNativeReasonStopsAfterTwoResendsInARow(t *testing.T) {
+	store := &memStore{}
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		failRound("t", "MALFORMED_RESPONSE"),
+		failRound("t", "malformed_response"), // case does not make it a new reason
+		failRound("t", "MALFORMED_RESPONSE"),
+		{{Content: "repaired"}},
+	}}
+	var waits []time.Duration
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, sleep: recordSleep(&waits)}
+	res, err := s.Turn(context.Background())
+	if err != nil || res.Reply != "repaired" {
+		t.Fatalf("reply=%q err=%v", res.Reply, err)
+	}
+	if len(waits) != 2 || len(cutNotices(store)) != 1 || runner.opts[3].Effort != llm.EffortNone {
+		t.Errorf("resends=%d cut notices=%d, want 2 resends then the reasoning-cut repair",
+			len(waits), len(cutNotices(store)))
+	}
+}
+
+func TestRepairRoundWithTheStreakReasonIsNotResent(t *testing.T) {
+	// The streak stopped the resends; the repair round fails the same way.
+	// It is not resent again: the Turn ends with the repair's error.
+	store := &memStore{}
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		emptyRound("stop", "OTHER"), emptyRound("stop", "OTHER"), emptyRound("stop", "OTHER"),
+		emptyRound("stop", "OTHER"), {{Content: "never"}},
+	}}
+	var waits []time.Duration
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, sleep: recordSleep(&waits)}
+	_, err := s.Turn(context.Background())
+	if !errors.Is(err, ErrEmptyReply) || len(waits) != 2 || len(runner.seen) != 4 {
+		t.Errorf("err=%v resends=%d rounds=%d, want ErrEmptyReply after 2 resends and 1 repair",
+			err, len(waits), len(runner.seen))
+	}
+}
+
+func TestChangedNativeReasonResetsTheStreak(t *testing.T) {
+	store := &memStore{}
+	runner := &scriptRunner{turns: [][]llm.StreamChunk{
+		failRound("t", "MALFORMED_RESPONSE"), failRound("t", "MALFORMED_RESPONSE"),
+		failRound("t", "OTHER"), failRound("t", "OTHER"),
+		failRound("t", "MALFORMED_RESPONSE"),
+		{{Content: "ok"}},
+	}}
+	var waits []time.Duration
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, sleep: recordSleep(&waits)}
+	res, err := s.Turn(context.Background())
+	if err != nil || res.Reply != "ok" || len(waits) != 5 || len(cutNotices(store)) != 0 {
+		t.Errorf("reply=%q err=%v resends=%d cut notices=%d, want 5 resends and no repair",
+			res.Reply, err, len(waits), len(cutNotices(store)))
 	}
 }

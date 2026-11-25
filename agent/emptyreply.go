@@ -21,9 +21,11 @@ package agent
 // it: the host decides what to shed. A repair note there would ask a model that
 // ran out of room to answer in the same room.
 //
-// A native reason that is not a clean stop (MALFORMED_FUNCTION_CALL is one) is
+// A native reason that is not a clean stop (MALFORMED_RESPONSE is one) is
 // first resent unchanged, with backoff (providerfail.go); this repair runs only
-// once those resends are spent, or with Session.MaxProviderFailRetries < 0.
+// once those resends stop, or with Session.MaxProviderFailRetries < 0.
+// MALFORMED_FUNCTION_CALL has its own repair and never reaches this one unless
+// Session.MaxMalformedCallRepairs < 0 (malformedcall.go).
 //
 // As in the reasoning cut, no empty assistant entry is persisted:
 // llama.cpp refuses two consecutive assistant messages and some providers
@@ -44,7 +46,9 @@ var ErrEmptyReply = errors.New("agent: the model returned an empty reply")
 // EmptyReplyError is returned by Turn (TurnResult.Reason == TurnEmptyReply)
 // when a round had no text, no tool call and no reasoning, and the repair did
 // not recover it: the repair round was empty too, the repair was already spent
-// in this Turn, or Session.NoReasoningCutRepair is set.
+// in this Turn, or Session.NoReasoningCutRepair is set. Also returned when a
+// round is a malformed tool call (MALFORMED_FUNCTION_CALL) and the Turn's
+// malformed-call repairs are spent (malformedcall.go).
 type EmptyReplyError struct {
 	// FinishReason and NativeFinishReason are the empty round's provider
 	// finish_reason and native_finish_reason, verbatim ("" when not sent).

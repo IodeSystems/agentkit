@@ -56,7 +56,16 @@ type Session struct {
 	// the provider failed (empty, finish "stop", a native_finish_reason that is
 	// not a clean stop; see providerfail.go) is resent unchanged before it goes
 	// to the empty-round repairs above. 0 → 10; negative → off (no resend).
+	// The same native reason twice in a row stops the resends early: at most
+	// 2 resends in a row of one reason.
 	MaxProviderFailRetries int
+	// MaxMalformedCallRepairs caps, per Turn, the repairs of an empty round
+	// whose native_finish_reason is MALFORMED_FUNCTION_CALL (any finish): a
+	// MalformedCallTag notice and one more round, opts unchanged. Its own
+	// budget, apart from the shared repair above and the resends; when spent
+	// the Turn ends TurnEmptyReply. 0 → 3; negative → off (such a round is
+	// then a provider failure, as before). See malformedcall.go.
+	MaxMalformedCallRepairs int
 	// OnProviderFailRetry, if set, is told about each such resend BEFORE its
 	// backoff sleep, with the wait it is about to take.
 	OnProviderFailRetry func(ProviderFailRetry)
@@ -398,6 +407,14 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		maxProvFails = defaultProviderFailRetries
 	}
 	provFails := 0 // resends spent this Turn; see providerfail.go
+	// provStreak resends in a row of provNative, the same native reason
+	// (case-insensitive). Any round that is not a provider failure clears it.
+	provStreak, provNative := 0, ""
+	maxMalformed := s.MaxMalformedCallRepairs
+	if maxMalformed == 0 {
+		maxMalformed = defaultMalformedCallRepairs
+	}
+	malformedRepairs := 0 // see malformedcall.go
 	sleep := s.sleep
 	if sleep == nil {
 		sleep = sleepCtx
@@ -565,9 +582,20 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// the same request. BEFORE anything is persisted (whitespace text
 		// included) and before the repair state is touched, so the resend is
 		// byte-identical and a pending repair stays pending. Not a model round:
-		// i-- keeps it off MaxTurns, bounded by maxProvFails.
-		if rep == nil && cut == nil && strings.TrimSpace(resp) == "" && len(toolCalls) == 0 &&
-			maxProvFails > 0 && provFails < maxProvFails && providerFailed(s.roundFinish, s.roundNative) {
+		// i-- keeps it off MaxTurns, bounded by maxProvFails and by the streak:
+		// the same native reason after 2 resends in a row is not transient, so
+		// the round goes to the repairs. A malformed call is the model's error,
+		// not the provider's, and goes to its own repair (malformedcall.go).
+		provFailed := rep == nil && cut == nil && strings.TrimSpace(resp) == "" && len(toolCalls) == 0 &&
+			providerFailed(s.roundFinish, s.roundNative) && !(maxMalformed > 0 && malformedCall(s.roundNative))
+		if !provFailed {
+			provStreak, provNative = 0, ""
+		} else if strings.EqualFold(s.roundNative, provNative) {
+			provStreak++
+		} else {
+			provStreak, provNative = 1, s.roundNative
+		}
+		if provFailed && maxProvFails > 0 && provFails < maxProvFails && provStreak <= maxProvFailStreak {
 			provFails++
 			wait := providerFailDelay(provFails)
 			if s.OnProviderFailRetry != nil {
@@ -665,6 +693,26 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if wasRepair && wasKind == repairReasoning && s.OnReasoningCut != nil {
 				s.OnReasoningCut(ReasoningCut{Tokens: eu.reasoningTokens(), Finish: finish, Repaired: true})
 			}
+		case maxMalformed > 0 && malformedCall(s.roundNative):
+			// The model wrote a tool call the provider could not parse. Ahead of
+			// the shared repair, whatever finish carried it: the notice names
+			// the cause. A pending shared repair that came back malformed is
+			// consumed (repairedOnce stays spent).
+			if malformedRepairs >= maxMalformed {
+				endReason = TurnEmptyReply
+				return result, &EmptyReplyError{FinishReason: s.roundFinish, NativeFinishReason: s.roundNative}
+			}
+			malformedRepairs++
+			if e := s.Store.Append(ctx, s.SessionID, Entry{
+				ID:        NewID(),
+				Kind:      KindNotification,
+				Tag:       MalformedCallTag,
+				Content:   malformedCallNotice(s.roundNative),
+				CreatedAt: now(),
+			}); e != nil {
+				return result, fmt.Errorf("agent: persist malformed-call notice: %w", e)
+			}
+			continue
 		case wasRepair:
 			// The repair round was empty too.
 			if wasKind == repairReasoning {
@@ -702,9 +750,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		default:
 			// No text, no tool call, no reasoning, and not a length cut: the
 			// model said nothing (seen: Gemini through OpenRouter, native
-			// finish MALFORMED_FUNCTION_CALL; such a round reaches here only once
-			// its provider-failure resends are spent). Never a TurnReply with
-			// Reply "".
+			// finish MALFORMED_RESPONSE once its provider-failure resends are
+			// spent; MALFORMED_FUNCTION_CALL only with MaxMalformedCallRepairs
+			// off). Never a TurnReply with Reply "".
 			if s.NoReasoningCutRepair || repairedOnce {
 				endReason = TurnEmptyReply
 				return result, &EmptyReplyError{FinishReason: s.roundFinish, NativeFinishReason: s.roundNative}

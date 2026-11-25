@@ -200,6 +200,15 @@ plan/     living plan. plan.md = current state + active work + decisions;
   unpersisted and resent unchanged (a pending repair stays pending), 1s doubling
   to 5m + additive jitter, `MaxProviderFailRetries` per Turn total (0 → 10,
   negative off), `OnProviderFailRetry` before each sleep; then the repairs.
+  The same native reason (case-insensitive) after 2 resends in a row is not
+  resent (`maxProvFailStreak`); a different reason, or any round that is not a
+  provider failure, resets the streak. `MALFORMED_FUNCTION_CALL` is NOT resent:
+  the model wrote the bad call and the same request repeats it
+  (`malformedcall.go`). An empty round with that native reason, ANY finish
+  ("stop" or "error"), ahead of the shared repair: a `MalformedCallTag` notice
+  naming the fixes, one round with opts unchanged, `MaxMalformedCallRepairs`
+  per Turn on its OWN budget (0 → 3, negative → old resend path; NOT governed by
+  `NoReasoningCutRepair`). Spent → `TurnEmptyReply` + `*EmptyReplyError` at once.
 - **Loop guards are ON by default, at two levels.** `llm.RepetitionGuard`
   watches each stream (content AND tool-call arguments — the measured 30-minute
   loop was inside `arguments`) for a periodic suffix and CLOSES THE BODY; the

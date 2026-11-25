@@ -166,7 +166,8 @@ reports the cut (`Repaired` false) and the recovery (`Repaired` true);
 `Session.NoReasoningCutRepair` turns the repair off.
 
 **An empty round.** A round with no text, no tool call and no reasoning (seen:
-Gemini through OpenRouter, native finish `MALFORMED_FUNCTION_CALL`) used to end
+Gemini through OpenRouter; `MALFORMED_FUNCTION_CALL` now has its own repair,
+below) used to end
 the Turn as `TurnReply` with `Reply` "" and a nil error. Now it gets the same
 single repair, shared with the reasoning cut (one per Turn in total): a
 notification tagged `agent.EmptyReplyTag`, then one round with the host's opts
@@ -190,9 +191,25 @@ and the opts unchanged. Resends back off from 1s, doubling, each sleep capped at
 5 minutes, plus additive jitter; at most `Session.MaxProviderFailRetries` per
 Turn (0 means 10, negative turns it off). They do not count against `MaxTurns`
 or the one repair. `Session.OnProviderFailRetry` gets each resend (attempt,
-native reason, the wait) before the sleep. When the resends run out, the round
-goes to the repairs. A round with visible text is kept as the reply whatever its
-native reason says.
+native reason, the wait) before the sleep. A reason that repeats stops the
+resends sooner: after 2 resends in a row that came back with the same native
+reason (any case), the round is not resent again; a different reason starts the
+count again. When the resends stop, the round goes to the repairs. A round with
+visible text is kept as the reply whatever its native reason says.
+
+**A malformed tool call.** Gemini ends a round with native reason
+`MALFORMED_FUNCTION_CALL` (OpenRouter reports it with finish `stop` or `error`)
+when the model wrote a tool call the provider could not parse. Resending the
+same request gets the same bad call, so it is not resent. An empty round with
+this native reason, whatever the finish, gets a notification tagged
+`agent.MalformedCallTag` that names the cause and the usual fixes (call the
+tool by name with one JSON object, not `default_api.fn(...)`; escape newlines
+and quotes; keep long arguments short), then one round with the host's opts
+unchanged. At most `Session.MaxMalformedCallRepairs` per Turn (0 means 3,
+negative turns it off and the round is resent as above). This budget is apart
+from the one shared repair and from the resends, and `NoReasoningCutRepair`
+does not turn it off. When it is spent the Turn ends `TurnEmptyReply` with
+`*agent.EmptyReplyError` holding the native reason.
 
 **A turn-level loop:** the same call returning the same result, round after
 round. Every round is well-formed, so only the repetition across rounds shows

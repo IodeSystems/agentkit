@@ -28,10 +28,10 @@ func TestEmptyRoundWithoutReasoningIsRepairedOnce(t *testing.T) {
 		emptyRound("stop", "MALFORMED_FUNCTION_CALL"),
 		{{Content: "The answer."}},
 	}}
-	// Resends off: MALFORMED_FUNCTION_CALL is also a provider failure
-	// (providerfail.go), and this test is about the repair behind it.
+	// Resends and the malformed-call repair off: this test is about the
+	// shared repair behind them.
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, MaxProviderFailRetries: -1,
-		OnReasoningCut: func(ReasoningCut) { t.Error("reasoning-cut hook ran without reasoning") }}
+		MaxMalformedCallRepairs: -1, OnReasoningCut: func(ReasoningCut) { t.Error("reasoning-cut hook ran without reasoning") }}
 	res, err := s.Turn(context.Background())
 	if err != nil || res.Reply != "The answer." || len(runner.seen) != 2 {
 		t.Fatalf("reply=%q err=%v rounds=%d", res.Reply, err, len(runner.seen))
@@ -53,7 +53,7 @@ func TestTwoEmptyRoundsFailWithEmptyReplyError(t *testing.T) {
 	}}
 	var end TurnEnd
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, MaxProviderFailRetries: -1,
-		OnTurnEnd: func(e TurnEnd) { end = e }}
+		MaxMalformedCallRepairs: -1, OnTurnEnd: func(e TurnEnd) { end = e }}
 	_, err := s.Turn(context.Background())
 	var ee *EmptyReplyError
 	if !errors.As(err, &ee) || !errors.Is(err, ErrEmptyReply) {
