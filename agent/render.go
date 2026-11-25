@@ -49,17 +49,28 @@ func renderEntry(e Entry, content string, verbatimToolResults bool, format ToolF
 		// server's chat template already neutralizes them (see
 		// ShaperPolicy.VerbatimToolResults), escape control tokens here so file
 		// bytes cannot open a turn. Byte-identical for any content without `<|`.
+		//
+		// Media parts render only when content is the entry's own text, the
+		// same guard KindUser uses: a stub or summary means the shaper chose to
+		// drop the bytes, and re-attaching them would undo that. Checked before
+		// neutralizing, which changes content that holds `<|`.
+		withParts := len(e.Parts) > 0 && content == e.Content
 		if !verbatimToolResults {
 			content = NeutralizeSpecialTokens(content)
 		}
+		m := llm.Message{Role: "tool", Content: content, ToolCallID: id}
 		if format == ToolFormatHeredoc {
 			// No assistant tool_calls exist to correlate against, so a tool_call_id
 			// would dangle. The provider renders a bare tool role fine (Qwen wraps
 			// it in <tool_response>), and the model sees the result where it
 			// expects one.
-			return llm.Message{Role: "tool", Content: content}
+			m.ToolCallID = ""
 		}
-		return llm.Message{Role: "tool", Content: content, ToolCallID: id}
+		if withParts {
+			m.Content = ""
+			m.Parts = toolResultParts(content, e.Parts, verbatimToolResults)
+		}
+		return m
 	case KindCompaction:
 		return llm.Message{Role: "user", Content: "[compacted]\n" + content}
 	default:
@@ -72,6 +83,26 @@ func renderEntry(e Entry, content string, verbatimToolResults bool, format ToolF
 		}
 		return llm.Message{Role: "user", Content: fmt.Sprintf("[%s] %s", tag, content)}
 	}
+}
+
+// toolResultParts is a tool message's parts: the result's text (already
+// neutralized by the caller) first, then the entry's parts. A fresh slice, so
+// folding user words into it (FoldUserIntoToolResult) never writes through to
+// the stored entry. Text parts among the entry's parts are prompt like the
+// text, and are neutralized the same way. An empty text is left out: the
+// Messages API refuses an empty text block.
+func toolResultParts(text string, parts []llm.ContentPart, verbatim bool) []llm.ContentPart {
+	out := make([]llm.ContentPart, 0, len(parts)+1)
+	if text != "" {
+		out = append(out, llm.TextPart(text))
+	}
+	for _, p := range parts {
+		if p.Type == "text" && !verbatim {
+			p.Text = NeutralizeSpecialTokens(p.Text)
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // toToolCall reconstructs an llm.ToolCall from a persisted KindToolCall entry.
@@ -100,6 +131,22 @@ type RenderOptions struct {
 // (FoldUserIntoToolResult). The frame says whose words they are and that they
 // arrived while the tool ran, so the model does not read them as tool output.
 const userFrame = "\n\n[the user wrote, while this ran] "
+
+// foldIntoTool appends s to a tool message's text. A tool message with media
+// Parts has its text in its first text part (toolResultParts puts it there),
+// and Content is ignored beside Parts, so the words go into that part; with
+// no text part (an empty result) one is put first.
+func foldIntoTool(m *llm.Message, s string) {
+	if len(m.Parts) == 0 {
+		m.Content += s
+		return
+	}
+	if m.Parts[0].Type == "text" {
+		m.Parts[0].Text += s
+		return
+	}
+	m.Parts = append([]llm.ContentPart{llm.TextPart(s)}, m.Parts...)
+}
 
 // groupMessages renders sorted entries into OpenAI-format messages, collapsing
 // an assistant text + its following KindToolCall entries into ONE assistant
@@ -137,13 +184,13 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 	var buf []held
 	emit := func(i int, e Entry) {
 		content := contentOf(i, e)
-		// Parts stay a user message: a tool result carries text only, and
-		// folding would drop the attachment. (A stubbed Parts entry has lost
-		// them already and folds as text.)
+		// A user entry's Parts stay a user message: folding moves only words,
+		// and would drop the attachment. (A stubbed Parts entry has lost them
+		// already and folds as text.)
 		textOnly := len(e.Parts) == 0 || content != e.Content
 		if ro.FoldUserIntoToolResult && e.Kind == KindUser && textOnly &&
 			len(out) > 0 && out[len(out)-1].Role == "tool" {
-			out[len(out)-1].Content += userFrame + content
+			foldIntoTool(&out[len(out)-1], userFrame+content)
 			return
 		}
 		out = append(out, renderEntry(e, content, ro.VerbatimToolResults, ro.ToolFormat))

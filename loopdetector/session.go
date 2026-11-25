@@ -73,7 +73,7 @@ func (d *LoopDetector) Begin(history []llm.Message) *Session {
 	results := map[string]string{}
 	for _, m := range turn {
 		if m.Role == "tool" {
-			results[m.ToolCallID] = m.Content
+			results[m.ToolCallID] = toolResultKey(m)
 		}
 	}
 	t := s.track(llm.ChannelContent)
@@ -373,6 +373,25 @@ func firstRepeat(window []mark) string {
 		}
 	}
 	return ""
+}
+
+// toolResultKey is what a tool message returned, for comparing one result with
+// the next. A tool message with media keeps its body in Parts and Content is
+// empty: keyed on Content alone, every screenshot would look the same and a
+// poll whose image changes would count as a loop. Each part goes in by its JSON
+// encoding (fixed field order), so identical media still compares equal.
+func toolResultKey(m llm.Message) string {
+	if len(m.Parts) == 0 {
+		return m.Content
+	}
+	var b strings.Builder
+	b.WriteString(m.Content)
+	for _, p := range m.Parts {
+		j, _ := json.Marshal(p) // strings and pointers to structs of strings: cannot fail
+		b.WriteByte(0)
+		b.Write(j)
+	}
+	return b.String()
 }
 
 func hashString(s string) uint64 {

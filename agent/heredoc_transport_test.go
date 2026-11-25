@@ -36,9 +36,9 @@ func TestHeredocTransport_ParsesCallsFromContent(t *testing.T) {
 		SessionID: "s1", System: "sys", Store: store, Runner: runner,
 		Tools: []llm.ToolDef{wfTool()}, ToolFormat: ToolFormatHeredoc,
 		Now: func() int64 { return 100 },
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			got = tc
-			return "wrote it", nil
+			return llm.TextResult("wrote it"), nil
 		},
 	}
 	res, err := s.Turn(context.Background())
@@ -75,7 +75,7 @@ func TestHeredocTransport_SendsGrammarNotTools(t *testing.T) {
 		SessionID: "s1", System: "sys", Store: store, Runner: runner,
 		Tools: []llm.ToolDef{wfTool()}, ToolFormat: ToolFormatHeredoc,
 		Now:      func() int64 { return 100 },
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult(""), nil },
 	}
 	if _, err := s.Turn(context.Background()); err != nil {
 		t.Fatal(err)

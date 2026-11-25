@@ -24,8 +24,8 @@ func Example() {
 	var tools []llm.ToolDef
 	tools = append(tools, ts.Defs()...)
 
-	host := func(ctx context.Context, tc llm.ToolCall) (string, error) {
-		return "the host's own tools", nil
+	host := func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
+		return llm.TextResult("the host's own tools"), nil
 	}
 	dispatch := ts.Wrap(host)
 
@@ -34,7 +34,7 @@ func Example() {
 	tc.Function.Arguments = `{"path":"hello.txt"}`
 	out, _ := dispatch(context.Background(), tc)
 	fmt.Println(len(tools))
-	fmt.Println(out)
+	fmt.Println(out.Text)
 	// Output:
 	// 5
 	// hello.txt: 2 lines

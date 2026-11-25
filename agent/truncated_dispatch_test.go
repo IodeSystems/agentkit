@@ -44,9 +44,9 @@ func TestTurn_TruncatedToolCallIsAnsweredNotExecuted(t *testing.T) {
 		Store:     store,
 		Runner:    runner,
 		Now:       func() int64 { return 100 },
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			dispatched = append(dispatched, tc.Function.Name)
-			return "wrote it", nil
+			return llm.TextResult("wrote it"), nil
 		},
 	}
 
@@ -115,9 +115,9 @@ func TestTurn_ValidToolCallStillDispatches(t *testing.T) {
 	s := &Session{
 		SessionID: "s1", System: "sys", Store: store, Runner: runner,
 		Now: func() int64 { return 100 },
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			dispatched = append(dispatched, tc.Function.Arguments)
-			return "wrote it", nil
+			return llm.TextResult("wrote it"), nil
 		},
 	}
 	if _, err := s.Turn(context.Background()); err != nil {

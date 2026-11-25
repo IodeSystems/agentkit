@@ -110,7 +110,7 @@ func TestReasoningCutAndEmptyRepairShareOneBudget(t *testing.T) {
 		{{Content: "never"}},
 	}}
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 6,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil }}
 	_, err := s.Turn(context.Background())
 	if !errors.Is(err, ErrEmptyReply) || len(runner.seen) != 3 {
 		t.Errorf("err=%v rounds=%d, want ErrEmptyReply after 3 rounds", err, len(runner.seen))
@@ -125,7 +125,7 @@ func TestReasoningCutAndEmptyRepairShareOneBudget(t *testing.T) {
 		{{Content: "never"}},
 	}}
 	s = &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 6,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil }}
 	_, err = s.Turn(context.Background())
 	var rce *ReasoningCutError
 	if !errors.As(err, &rce) || len(runner.seen) != 3 {

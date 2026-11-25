@@ -88,6 +88,19 @@ type Session struct {
 	// only words the result: the call is not dispatched either way.
 	UnrunResult func(ctx context.Context, tc llm.ToolCall) string
 
+	// PrepareToolResult, if set, sees every dispatched call's result (text
+	// only too, and a dispatcher error already turned into its "ERROR: ..."
+	// text) AFTER dispatch and BEFORE it is persisted, and returns what is
+	// persisted. It is the host's say over media in the history: keep a part,
+	// replace it with a text description (a model or endpoint that cannot take
+	// that kind), or drop it. Here and not in a dispatcher wrapper because the
+	// host's answer depends on the session (its model, its endpoint), not on
+	// the tool, and every toolset would otherwise need the same wrapper. A
+	// returned error is recorded as an "ERROR: ..." text result, the way a
+	// dispatcher error is. Nil = the result unchanged. It does not see a call
+	// that was never dispatched (refused arguments, a cancel).
+	PrepareToolResult func(ctx context.Context, tc llm.ToolCall, r llm.ToolResult) (llm.ToolResult, error)
+
 	// OnAssistantToken, if set, receives streamed content chunks for
 	// SSE / live broadcast.
 	OnAssistantToken func(string)
@@ -898,7 +911,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		}
 
 		var sessionClosed bool
-		results := make([]string, 0, len(toolCalls))
+		results := make([]llm.ToolResult, 0, len(toolCalls))
 		// Every persisted KindToolCall MUST get a KindToolResult, even when the
 		// host cancels the turn mid-round. An assistant(tool_calls) message
 		// with no matching tool message is refused by strict endpoints (OpenAI,
@@ -913,7 +926,8 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// otherwise reject the very writes that keep the history valid. It is
 		// used for these persistence writes ONLY, never for dispatch.
 		// Synthetic results skip slot capture and EncodeToolResult: there are
-		// no tool bytes to transclude or re-encode. No per-result hook exists.
+		// no tool bytes to transclude or re-encode, and PrepareToolResult does not
+		// see them: it is for what a tool returned.
 		canceled := false
 		for _, tc := range toolCalls {
 			if ctx.Err() != nil {
@@ -926,7 +940,7 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 						unrun = txt
 					}
 				}
-				results = append(results, unrun)
+				results = append(results, llm.TextResult(unrun))
 				if e := s.Store.Append(context.WithoutCancel(ctx), s.SessionID, Entry{
 					ID:         NewID(),
 					Kind:       KindToolResult,
@@ -952,31 +966,39 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// is answered rather than executed. Answering it — instead of dropping
 			// it — is what lets the model recover: it sees its own call paired with
 			// a result that names the failure, and retries smaller.
-			var toolResult string
+			var toolResult llm.ToolResult
 			var e error
 			if args, refusal := checkArgs(tc.Function.Arguments); refusal != "" {
-				toolResult = refusal
+				toolResult = llm.TextResult(refusal)
 			} else {
 				// Dispatch the REPAIRED text, not what arrived, so the tool and
 				// the stored history see the same strict JSON. tc is a copy.
 				tc.Function.Arguments = args
 				toolResult, e = s.Dispatch(ctx, tc)
-			}
-			if e != nil {
-				if errors.Is(e, ErrSessionClosed) {
-					sessionClosed = true
-				} else {
-					toolResult = fmt.Sprintf("ERROR: %v", e)
+				if e != nil {
+					if errors.Is(e, ErrSessionClosed) {
+						sessionClosed = true
+					} else {
+						toolResult = llm.TextResult(fmt.Sprintf("ERROR: %v", e))
+					}
+				}
+				if s.PrepareToolResult != nil {
+					if r, pe := s.PrepareToolResult(ctx, tc, toolResult); pe != nil {
+						toolResult = llm.TextResult(fmt.Sprintf("ERROR: %v", pe))
+					} else {
+						toolResult = r
+					}
 				}
 			}
 			// Register this result's transclusion slots ({OUTPUT} + any
 			// <name>...</name> sections) from the RAW result, so a reply can
 			// surface the COMPLETE, human-readable bytes to the user via
 			// {OUTPUT}/{name} — independent of the model-side encoding /
-			// truncation below.
-			maps.Copy(s.slots, captureSlots(toolResult))
+			// truncation below. Text only: a slot is bytes for the user's
+			// reply, and a media part has no place in one.
+			maps.Copy(s.slots, captureSlots(toolResult.Text))
 			if s.EncodeToolResult != nil {
-				toolResult = s.EncodeToolResult(toolResult)
+				toolResult.Text = s.EncodeToolResult(toolResult.Text)
 			}
 			results = append(results, toolResult)
 			// Cancel may have hit while Dispatch ran; see the block above.
@@ -987,7 +1009,8 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			if e := s.Store.Append(appendCtx, s.SessionID, Entry{
 				ID:         NewID(),
 				Kind:       KindToolResult,
-				Content:    toolResult,
+				Content:    toolResult.Text,
+				Parts:      toolResult.Parts,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Function.Name,
 				CreatedAt:  now(),
@@ -1110,7 +1133,13 @@ func repetitionNotice(rep *llm.RepetitionInfo) string {
 // megabyte results does not hold a second copy of each one just to notice it is
 // stuck. Call IDs are excluded — they are fresh every round by construction and
 // would make every exchange look distinct.
-func exchangeSignature(calls []llm.ToolCall, results []string) uint64 {
+//
+// A result's media parts are part of what it returned: each is hashed by its
+// JSON encoding (fixed field order, so the same part hashes the same every
+// round). Text alone would call a screenshot poll whose image changes stuck;
+// polling that returns the identical image every round still matches, which is
+// the loop this exists to catch.
+func exchangeSignature(calls []llm.ToolCall, results []llm.ToolResult) uint64 {
 	h := fnv.New64a()
 	for i, tc := range calls {
 		h.Write([]byte(tc.Function.Name))
@@ -1118,7 +1147,12 @@ func exchangeSignature(calls []llm.ToolCall, results []string) uint64 {
 		h.Write([]byte(tc.Function.Arguments))
 		h.Write([]byte{0})
 		if i < len(results) {
-			h.Write([]byte(results[i]))
+			h.Write([]byte(results[i].Text))
+			for _, p := range results[i].Parts {
+				h.Write([]byte{1})
+				b, _ := json.Marshal(p) // strings and pointers to structs of strings: cannot fail
+				h.Write(b)
+			}
 		}
 		h.Write([]byte{0})
 	}

@@ -39,11 +39,11 @@ func ValidatingDispatcher(inner ToolDispatcher, v Validator) ToolDispatcher {
 	if v == nil {
 		return inner
 	}
-	return func(ctx context.Context, tc llm.ToolCall) (string, error) {
+	return func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		if err := v.ValidateArgs(tc.Function.Name, tc.Function.Arguments); err != nil {
-			return fmt.Sprintf(
+			return llm.TextResult(fmt.Sprintf(
 				"INVALID arguments for %s: %v. Fix the arguments and call %s again.",
-				tc.Function.Name, err, tc.Function.Name), nil
+				tc.Function.Name, err, tc.Function.Name)), nil
 		}
 		return inner(ctx, tc)
 	}

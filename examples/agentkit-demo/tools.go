@@ -42,12 +42,12 @@ var localTools = []llm.ToolDef{
 		})),
 }
 
-// dispatchLocal executes a local tool call and returns the string the model
-// sees as the result. Note the contract: errors meant for the MODEL (unknown
-// tool, bad args) are formatted INTO the result string, not returned as a Go
-// error — a returned error aborts the whole Turn. This keeps the loop alive so
-// the model can correct itself.
-func dispatchLocal(_ context.Context, tc llm.ToolCall) (string, error) {
+// dispatchLocal executes a local tool call and returns the tool result the
+// model sees. Note the contract: errors meant for the MODEL (unknown
+// tool, bad args) are formatted INTO the result's Text, not returned as a Go
+// error — a returned error is recorded as "ERROR: ..." with no say in its
+// wording. Either way the loop stays alive so the model can correct itself.
+func dispatchLocal(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 	switch tc.Function.Name {
 	case "get_weather":
 		var args struct {
@@ -55,25 +55,25 @@ func dispatchLocal(_ context.Context, tc llm.ToolCall) (string, error) {
 			Units string `json:"units"`
 		}
 		if err := json.Unmarshal([]byte(orEmpty(tc.Function.Arguments)), &args); err != nil {
-			return fmt.Sprintf("ERROR: bad arguments: %v", err), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: bad arguments: %v", err)), nil
 		}
 		units := strings.ToLower(args.Units)
 		temp := "18°C"
 		if units == "f" {
 			temp = "64°F"
 		}
-		return fmt.Sprintf("Weather in %s: %s, partly cloudy, wind 8 km/h.", args.City, temp), nil
+		return llm.TextResult(fmt.Sprintf("Weather in %s: %s, partly cloudy, wind 8 km/h.", args.City, temp)), nil
 	case "add":
 		var args struct {
 			A float64 `json:"a"`
 			B float64 `json:"b"`
 		}
 		if err := json.Unmarshal([]byte(orEmpty(tc.Function.Arguments)), &args); err != nil {
-			return fmt.Sprintf("ERROR: bad arguments: %v", err), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: bad arguments: %v", err)), nil
 		}
-		return fmt.Sprintf("%g", args.A+args.B), nil
+		return llm.TextResult(fmt.Sprintf("%g", args.A+args.B)), nil
 	default:
-		return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+		return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name)), nil
 	}
 }
 

@@ -74,8 +74,8 @@ func TestTurnEndDistinguishesTerminalToolFromReply(t *testing.T) {
 		Runner: &scriptRunner{turns: [][]llm.StreamChunk{{
 			{ToolCall: call("1", "ship")},
 		}}},
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
-			return "", ErrSessionClosed
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult(""), ErrSessionClosed
 		}}
 	_, ends := collect(s)
 
@@ -99,7 +99,7 @@ func TestTurnEndReportsMaxTurns(t *testing.T) {
 	poll := []llm.StreamChunk{{ToolCall: call("1", "poll")}}
 	s := &Session{SessionID: "s", Store: &memStore{}, MaxTurns: 2,
 		Runner:   &scriptRunner{turns: [][]llm.StreamChunk{poll, poll, poll}},
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "still going", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("still going"), nil }}
 	_, ends := collect(s)
 
 	if _, err := s.Turn(context.Background()); err == nil {
@@ -226,7 +226,7 @@ func TestTurnEndSumsServerOverheadAcrossRounds(t *testing.T) {
 			toolRound("1", "look", 4000, 500),
 			replyRound("done.", 3000, 0),
 		}},
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil }}
 	_, ends := collect(s)
 
 	if _, err := s.Turn(context.Background()); err != nil {

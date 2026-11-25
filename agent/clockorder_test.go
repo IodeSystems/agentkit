@@ -35,7 +35,7 @@ func TestAssistantEntriesUseTheSessionClock(t *testing.T) {
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 10,
 		Now:      func() int64 { tick++; return tick },
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil },
 	}
 	if _, err := s.Turn(context.Background()); err != nil {
 		t.Fatalf("Turn: %v", err)
@@ -83,7 +83,7 @@ func TestRenderedMessagesDoNotEndWithTwoAssistants(t *testing.T) {
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 10,
 		Now:      func() int64 { tick++; return tick },
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil },
 	}
 	if _, err := s.Turn(context.Background()); err != nil {
 		t.Fatalf("Turn: %v", err)

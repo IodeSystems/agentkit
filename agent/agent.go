@@ -65,8 +65,11 @@ type Entry struct {
 	// parts hold their bytes as base64: a Store keeps a reference and rebuilds
 	// Parts on load rather than persisting them.
 	//
-	// Only KindUser is rendered multimodally today; provider APIs accept image
-	// parts on user messages, not on tool results or assistant turns.
+	// KindUser and KindToolResult render multimodally. A tool result's Parts
+	// are the media its ToolResult carried (llm.ToolResult.Parts; Content is
+	// its Text); it renders as one tool message whose parts are a text part
+	// (Content) and then the media, and the llm client routes each media part
+	// to where the endpoint accepts it. Assistant turns stay text.
 	Parts      []llm.ContentPart
 	ToolCallID string // correlates KindToolCall / KindToolResult
 
@@ -135,14 +138,16 @@ type LLMRunner interface {
 	ChatStream(ctx context.Context, messages []llm.Message, tools []llm.ToolDef, opts *llm.ChatOpts) (<-chan llm.StreamChunk, error)
 }
 
-// ToolDispatcher executes a tool call and returns the string the model will
-// see as the tool result. Errors meant to reach the model (unknown tool,
-// bad args) should be formatted into the result. A returned non-nil error does
-// NOT abort the Turn: the loop records it as an "ERROR: ..." tool result and
-// continues, so the model can react to it. Returning ErrSessionClosed tells the
-// loop to stop after the result is persisted — used by terminal tools so the loop doesn't
+// ToolDispatcher executes a tool call and returns the result the model will
+// see: Text, and optionally media Parts (any llm.ContentPart kind), persisted
+// on the KindToolResult entry as Content and Parts. Errors meant to reach the
+// model (unknown tool, bad args) should be formatted into Text. A returned
+// non-nil error does NOT abort the Turn: the loop records it as an "ERROR: ..."
+// tool result (text only; the returned result is discarded) and continues, so
+// the model can react to it. Returning ErrSessionClosed tells the loop to stop
+// after the result is persisted — used by terminal tools so the loop doesn't
 // keep prompting an already-closed session under tool_choice=required.
-type ToolDispatcher func(ctx context.Context, tc llm.ToolCall) (string, error)
+type ToolDispatcher func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error)
 
 // ContextBuilder materializes the message list shown to the LLM from the
 // session's history. DefaultContextBuilder is the plain merge; a Shaper adds

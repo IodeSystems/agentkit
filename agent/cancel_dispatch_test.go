@@ -62,10 +62,10 @@ func runCancelTurn(t *testing.T, store Store, cancelIn func(cancel context.Cance
 		SessionID: "s1", System: "sys", Store: store, Runner: runner,
 		Now:       func() int64 { return 100 },
 		OnTurnEnd: func(e TurnEnd) { reason = e.Reason },
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			dispatched = append(dispatched, tc.ID)
 			cancelIn(cancel, len(dispatched))
-			return "real " + tc.ID, nil
+			return llm.TextResult("real " + tc.ID), nil
 		},
 	}
 	_, err = s.Turn(ctx)
@@ -135,9 +135,9 @@ func TestTurn_CancelBeforeFirstDispatchAnswersEveryCall(t *testing.T) {
 		SessionID: "s1", System: "sys", Store: store, Runner: runner,
 		Now:       func() int64 { return 100 },
 		OnTurnEnd: func(e TurnEnd) { reason = e.Reason },
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
 			dispatched++
-			return "x", nil
+			return llm.TextResult("x"), nil
 		},
 	}
 	_, err := s.Turn(ctx)
@@ -185,9 +185,9 @@ func TestTurn_UnrunResultWordsCallsTheTurnNeverRan(t *testing.T) {
 	s := &Session{
 		SessionID: "s1", System: "sys", Store: store, Runner: threeCalls(),
 		Now: func() int64 { return 100 },
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
 			cancel()
-			return "real c1", nil
+			return llm.TextResult("real c1"), nil
 		},
 		UnrunResult: func(ctx context.Context, tc llm.ToolCall) string {
 			seen = append(seen, tc.ID)

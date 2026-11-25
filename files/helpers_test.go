@@ -53,7 +53,7 @@ func call(t *testing.T, ts *Toolset, bare string, a map[string]any) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ts.Dispatch(context.Background(), ts.Name(bare), string(b))
+	return ts.Dispatch(context.Background(), ts.Name(bare), string(b)).Text
 }
 
 func mustOK(t *testing.T, out string) string {

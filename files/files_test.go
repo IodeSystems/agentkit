@@ -73,7 +73,7 @@ func TestReadOnlyRefusesWriters(t *testing.T) {
 	ts := mount(t, Config{Root: root, ReadOnly: true})
 	for _, n := range []string{"file_edit", "file_write", "file_delete", "file_move"} {
 		out := ts.Dispatch(context.Background(), n, `{"path":"a.txt","old":"hello","new":"bye","content":"x"}`)
-		mustErr(t, out, "unknown tool")
+		mustErr(t, out.Text, "unknown tool")
 	}
 	if readFile(t, filepath.Join(root, "a.txt")) != "hello\n" {
 		t.Fatal("read-only toolset changed a file")
@@ -85,9 +85,9 @@ func TestWrapRoutesOnlyItsOwn(t *testing.T) {
 	root := tree(t, map[string]string{"a.txt": "hello\n"})
 	ts := mount(t, Config{Root: root})
 	var passed []string
-	inner := func(_ context.Context, tc llm.ToolCall) (string, error) {
+	inner := func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		passed = append(passed, tc.Function.Name)
-		return "inner", nil
+		return llm.TextResult("inner"), nil
 	}
 	d := ts.Wrap(inner)
 	tc := func(name, args string) llm.ToolCall {
@@ -95,14 +95,14 @@ func TestWrapRoutesOnlyItsOwn(t *testing.T) {
 		c.Function.Name, c.Function.Arguments = name, args
 		return c
 	}
-	if out, _ := d(context.Background(), tc("exec", `{}`)); out != "inner" {
-		t.Fatalf("exec not passed through: %q", out)
+	if out, _ := d(context.Background(), tc("exec", `{}`)); out.Text != "inner" {
+		t.Fatalf("exec not passed through: %q", out.Text)
 	}
-	if out, _ := d(context.Background(), tc("file_read", `{"path":"a.txt"}`)); !strings.Contains(out, "1\thello") {
-		t.Fatalf("file_read not handled: %q", out)
+	if out, _ := d(context.Background(), tc("file_read", `{"path":"a.txt"}`)); !strings.Contains(out.Text, "1\thello") {
+		t.Fatalf("file_read not handled: %q", out.Text)
 	}
-	if out, _ := d(context.Background(), tc("file_read", `{"path":`)); !strings.HasPrefix(out, "ERROR") {
-		t.Fatalf("bad JSON not refused: %q", out)
+	if out, _ := d(context.Background(), tc("file_read", `{"path":`)); !strings.HasPrefix(out.Text, "ERROR") {
+		t.Fatalf("bad JSON not refused: %q", out.Text)
 	}
 	if !reflect.DeepEqual(passed, []string{"exec"}) {
 		t.Fatalf("inner saw %v", passed)
@@ -113,7 +113,7 @@ func TestFlexibleArgs(t *testing.T) {
 	root := tree(t, map[string]string{"a.txt": lines(10, func(i int) string { return fmt.Sprint("l", i) })})
 	ts := mount(t, Config{Root: root})
 	out := ts.Dispatch(context.Background(), "file_read", `{"path":"a.txt","offset":"3","limit":2.0}`)
-	contains(t, mustOK(t, out), "lines 3-4 of 10", "3\tl3", "4\tl4")
+	contains(t, mustOK(t, out.Text), "lines 3-4 of 10", "3\tl3", "4\tl4")
 }
 
 func TestEscapes(t *testing.T) {
@@ -277,5 +277,5 @@ func TestEditAcceptsOldNewAlias(t *testing.T) {
 	ts := mount(t, Config{Root: root})
 	ts.Dispatch(context.Background(), "file_read", `{"path":"a.txt"}`)
 	out := ts.Dispatch(context.Background(), "file_edit", `{"path":"a.txt","old":"two","new":"2"}`)
-	contains(t, mustOK(t, out), "edited")
+	contains(t, mustOK(t, out.Text), "edited")
 }

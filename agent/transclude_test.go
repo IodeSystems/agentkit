@@ -58,8 +58,8 @@ func TestTurn_TranscludesToolOutput(t *testing.T) {
 		Store:     store,
 		Runner:    runner,
 		Now:       func() int64 { return 1 },
-		Dispatch: func(_ context.Context, _ llm.ToolCall) (string, error) {
-			return "<report>a\nb\nc</report>", nil
+		Dispatch: func(_ context.Context, _ llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult("<report>a\nb\nc</report>"), nil
 		},
 	}
 	res, err := s.Turn(context.Background())
@@ -189,8 +189,8 @@ func TestTurn_TruncationKeepsOutputComplete(t *testing.T) {
 		Runner:             runner,
 		Now:                func() int64 { return 1 },
 		MaxToolResultChars: 80,
-		Dispatch: func(_ context.Context, _ llm.ToolCall) (string, error) {
-			return complete, nil
+		Dispatch: func(_ context.Context, _ llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult(complete), nil
 		},
 	}
 	res, err := s.Turn(context.Background())

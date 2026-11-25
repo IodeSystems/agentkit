@@ -78,7 +78,7 @@ func TestOverflowInToolCallDoesNotRerunTheRound(t *testing.T) {
 	}}
 	rounds := 0
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ran", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ran"), nil },
 		OnOverflow: func(_ context.Context, o Overflow) OverflowDecision {
 			rounds++
 			if !o.InToolCall() {

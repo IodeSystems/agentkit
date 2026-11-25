@@ -32,8 +32,8 @@ func TestIdenticalExchangeStopsTheTurn(t *testing.T) {
 	runner := &scriptRunner{turns: repeatingTurns(30)}
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 30,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
-			return "still running", nil
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult("still running"), nil
 		},
 	}
 
@@ -73,9 +73,9 @@ func TestPollingWithChangingResultsIsNotALoop(t *testing.T) {
 	n := 0
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 25,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
 			n++
-			return fmt.Sprintf("running, %d%% complete", n*5), nil
+			return llm.TextResult(fmt.Sprintf("running, %d%% complete", n*5)), nil
 		},
 	}
 
@@ -99,8 +99,8 @@ func TestRepeatedExchangeGuardIsDisablable(t *testing.T) {
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 12,
 		MaxRepeatedExchanges: -1,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
-			return "same", nil
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult("same"), nil
 		},
 	}
 
@@ -124,9 +124,9 @@ func TestOnToolCalls_InjectsForcedCall(t *testing.T) {
 	var injected bool
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			dispatched = append(dispatched, tc)
-			return fmt.Sprintf("tool %q executed", tc.Function.Name), nil
+			return llm.TextResult(fmt.Sprintf("tool %q executed", tc.Function.Name)), nil
 		},
 	}
 	s.OnToolCalls = func(tcs []llm.ToolCall) []llm.ToolCall {
@@ -199,9 +199,9 @@ func TestOnToolCalls_AddsToExistingCalls(t *testing.T) {
 	var injected2 bool
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			dispatched = append(dispatched, tc.Function.Name)
-			return "ok", nil
+			return llm.TextResult("ok"), nil
 		},
 	}
 	s.OnToolCalls = func(tcs []llm.ToolCall) []llm.ToolCall {
@@ -268,10 +268,10 @@ func TestAlternatingBetweenTwoCallsIsAlsoALoop(t *testing.T) {
 	runner := &scriptRunner{turns: alternatingTurns(40)}
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 40,
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			// Each state answers consistently, which is what makes it a loop
 			// rather than progress.
-			return "contents at " + tc.Function.Arguments, nil
+			return llm.TextResult("contents at " + tc.Function.Arguments), nil
 		},
 	}
 
@@ -308,9 +308,9 @@ func TestAlternatingCallsWithChangingResultsAreNotALoop(t *testing.T) {
 	n := 0
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 40,
-		Dispatch: func(_ context.Context, tc llm.ToolCall) (string, error) {
+		Dispatch: func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 			n++
-			return fmt.Sprintf("line %d", n), nil
+			return llm.TextResult(fmt.Sprintf("line %d", n)), nil
 		},
 	}
 	if _, err := s.Turn(context.Background()); err != nil &&
@@ -330,7 +330,9 @@ func TestToolLoopStopReportsItsOwnTurnEndReason(t *testing.T) {
 	var end TurnEnd
 	s := &Session{
 		SessionID: "s", Store: &memStore{}, Runner: &scriptRunner{turns: repeatingTurns(30)}, MaxTurns: 30,
-		Dispatch:  func(context.Context, llm.ToolCall) (string, error) { return "still running", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult("still running"), nil
+		},
 		OnTurnEnd: func(e TurnEnd) { end = e },
 	}
 	if _, err := s.Turn(context.Background()); err == nil {

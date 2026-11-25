@@ -91,7 +91,7 @@ func TestLengthCutInsideToolCallStillTakesTheOverflowPath(t *testing.T) {
 	}}
 	over, rc := 0, 0
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
-		Dispatch:       func(context.Context, llm.ToolCall) (string, error) { return "ran", nil },
+		Dispatch:       func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ran"), nil },
 		OnOverflow:     func(context.Context, Overflow) OverflowDecision { over++; return OverflowDecision{} },
 		OnReasoningCut: func(ReasoningCut) { rc++ }}
 	if _, err := s.Turn(context.Background()); err != nil {
@@ -136,7 +136,7 @@ func TestRepairRoundSendsReasoningOffAndOnlyThatRound(t *testing.T) {
 	budget := 2500
 	host := &llm.ChatOpts{ReasoningBudgetTokens: &budget, Effort: llm.EffortHigh}
 	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 6, ChatOpts: host,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil }}
 	if _, err := s.Turn(context.Background()); err != nil {
 		t.Fatal(err)
 	}

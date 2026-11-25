@@ -23,7 +23,7 @@ const (
 
 // Dispatcher is agent.ToolDispatcher's shape, restated so this package needs
 // only llm. A value of either type converts to the other.
-type Dispatcher = func(ctx context.Context, tc llm.ToolCall) (string, error)
+type Dispatcher = func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error)
 
 // Option shapes New for its host.
 type Option func(*options)
@@ -96,11 +96,11 @@ func (t *Tools) Has(name string) bool {
 
 // Wrap routes the plan tools' calls and passes every other call to inner.
 func (t *Tools) Wrap(inner Dispatcher) Dispatcher {
-	return func(ctx context.Context, tc llm.ToolCall) (string, error) {
+	return func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		if !t.Has(tc.Function.Name) {
 			return inner(ctx, tc)
 		}
-		return t.Dispatch(ctx, tc.Function.Name, tc.Function.Arguments), nil
+		return llm.TextResult(t.Dispatch(ctx, tc.Function.Name, tc.Function.Arguments)), nil
 	}
 }
 

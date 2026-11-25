@@ -36,8 +36,8 @@ func TestEncodeToolResult_TransformsStoredResult(t *testing.T) {
 		Store:     store,
 		Runner:    runner,
 		Now:       func() int64 { return 1 },
-		Dispatch: func(_ context.Context, _ llm.ToolCall) (string, error) {
-			return rawJSON, nil
+		Dispatch: func(_ context.Context, _ llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult(rawJSON), nil
 		},
 		EncodeToolResult: toolfmt.EncodeTightC,
 	}
@@ -82,8 +82,8 @@ func TestEncodeToolResult_NilPassthrough(t *testing.T) {
 		Store:     store,
 		Runner:    runner,
 		Now:       func() int64 { return 1 },
-		Dispatch: func(_ context.Context, _ llm.ToolCall) (string, error) {
-			return rawJSON, nil
+		Dispatch: func(_ context.Context, _ llm.ToolCall) (llm.ToolResult, error) {
+			return llm.TextResult(rawJSON), nil
 		},
 		// EncodeToolResult nil → passthrough.
 	}

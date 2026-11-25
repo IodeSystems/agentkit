@@ -73,10 +73,11 @@ type ShaperPolicy struct {
 	//
 	// When set, a TEXT user entry that would directly follow tool results (no
 	// assistant between) is appended to the last tool result's content as
-	// "\n\n[the user wrote, while this ran] <text>". Models that read
-	// functionResponse text poorly may ignore it; that is why it is not the
-	// default. A user entry carrying multimodal Parts stays a user message: a
-	// tool result is text only and folding would drop the attachment.
+	// "\n\n[the user wrote, while this ran] <text>" (into its text part when
+	// the tool result carries media Parts). Models that read functionResponse
+	// text poorly may ignore it; that is why it is not the default. A user
+	// entry carrying multimodal Parts stays a user message: folding moves only
+	// words and would drop the attachment.
 	FoldUserIntoToolResult bool
 
 	LODTruncateAboveChars int

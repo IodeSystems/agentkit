@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -127,11 +128,24 @@ func ExpandEntries(entries []Entry) []Entry {
 
 // truncateToolMessages caps every tool-role message's content to limit chars
 // (see truncateForModel). Mutates in place; the caller passes a fresh per-round
-// []llm.Message, so storage is untouched.
+// []llm.Message, so storage is untouched. A tool message with media Parts
+// keeps its text in text parts; each is capped, on a copy of the slice (a
+// custom ContextBuilder may hand back an entry's own Parts). Media parts are
+// not text and pass through.
 func truncateToolMessages(messages []llm.Message, limit int) {
 	for i := range messages {
-		if messages[i].Role == "tool" {
-			messages[i].Content = truncateForModel(messages[i].Content, limit)
+		m := &messages[i]
+		if m.Role != "tool" {
+			continue
+		}
+		m.Content = truncateForModel(m.Content, limit)
+		if len(m.Parts) > 0 {
+			m.Parts = slices.Clone(m.Parts)
+			for j := range m.Parts {
+				if m.Parts[j].Type == "text" {
+					m.Parts[j].Text = truncateForModel(m.Parts[j].Text, limit)
+				}
+			}
 		}
 	}
 }

@@ -440,6 +440,31 @@ func TestToolCallsWithTheSameResultAreALoopAcrossACycle(t *testing.T) {
 	}
 }
 
+// A tool message with media has an empty Content: keyed on Content, every
+// screenshot is the same result and a poll whose image changes is a loop.
+func TestMediaToolResultsCompareByTheirParts(t *testing.T) {
+	history := func(changing bool) []llm.Message {
+		var h []llm.Message
+		for i := range 12 {
+			tc := llm.ToolCall{ID: fmt.Sprint("s", i)}
+			tc.Function.Name, tc.Function.Arguments = "screenshot", `{}`
+			url := "data:image/png;base64,AAAA"
+			if changing {
+				url = fmt.Sprint("data:image/png;base64,", i)
+			}
+			h = append(h, llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tc}},
+				llm.Message{Role: "tool", ToolCallID: tc.ID, Parts: []llm.ContentPart{llm.ImagePart(url)}})
+		}
+		return h
+	}
+	if loops, _ := New(Config{}).Begin(history(true)).Loops(); loops != 0 {
+		t.Errorf("a screenshot that changes every round counted %d loops", loops)
+	}
+	if loops, kind := New(Config{}).Begin(history(false)).Loops(); loops < 3 || kind != KindTool {
+		t.Errorf("the same screenshot every round: Loops() = %d, %q", loops, kind)
+	}
+}
+
 func TestAToolCallWhoseResultChangesIsProgress(t *testing.T) {
 	s := New(Config{}).Begin(toolHistory(20, []string{"status"}, func(r, _ int) string { return fmt.Sprint("step ", r) }))
 	if loops, _ := s.Loops(); loops != 0 {

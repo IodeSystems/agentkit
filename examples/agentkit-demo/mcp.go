@@ -43,22 +43,22 @@ func mcpDispatcher(mgr *mcpmgr.Manager, tools []mcpmgr.MCPTool) agent.ToolDispat
 	for _, t := range tools {
 		serverOf[t.Name] = t.ServerID
 	}
-	return func(ctx context.Context, tc llm.ToolCall) (string, error) {
+	return func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		serverID, ok := serverOf[tc.Function.Name]
 		if !ok {
-			return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name)), nil
 		}
 		var args map[string]any
 		if s := strings.TrimSpace(tc.Function.Arguments); s != "" && s != "null" {
 			if err := json.Unmarshal([]byte(s), &args); err != nil {
-				return fmt.Sprintf("ERROR: bad arguments: %v", err), nil
+				return llm.TextResult(fmt.Sprintf("ERROR: bad arguments: %v", err)), nil
 			}
 		}
 		res, err := mgr.CallTool(ctx, serverID, tc.Function.Name, args)
 		if err != nil {
-			return fmt.Sprintf("ERROR: %v", err), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: %v", err)), nil
 		}
-		return res, nil
+		return llm.TextResult(res), nil
 	}
 }
 

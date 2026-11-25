@@ -102,8 +102,8 @@ func runSchema(ctx context.Context, cfg config) error {
 	// circuits with a fix instruction, keeping the session alive so the model
 	// retries. This is the same rejection pattern hosts hand-roll per tool,
 	// made generic from the tool's own JSON Schema.
-	real := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
-		return "OK: task created (" + tc.Function.Arguments + ")", nil
+	real := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
+		return llm.TextResult("OK: task created (" + tc.Function.Arguments + ")"), nil
 	})
 	disp := agent.ValidatingDispatcher(real, v)
 
@@ -118,7 +118,7 @@ func runSchema(ctx context.Context, cfg config) error {
 		call.Function.Name = "create_task"
 		call.Function.Arguments = args
 		res, _ := disp(ctx, call)
-		fmt.Printf("\n  args:   %s\n  result: %s\n", args, oneLine(res))
+		fmt.Printf("\n  args:   %s\n  result: %s\n", args, oneLine(res.Text))
 	}
 	fmt.Println("\nIn a live loop the fix instruction becomes the tool result, the model")
 	fmt.Println("corrects the call, and the turn continues — no host code per tool.")
@@ -144,9 +144,9 @@ func runStructured(ctx context.Context, cfg config) error {
 
 	var captured string
 	// Terminal dispatcher: capture the (already-validated) args and close.
-	terminal := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
+	terminal := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		captured = tc.Function.Arguments
-		return "recorded", agent.ErrSessionClosed
+		return llm.TextResult("recorded"), agent.ErrSessionClosed
 	})
 	disp := agent.ValidatingDispatcher(terminal, agent.NewSchemaValidator(tools))
 
@@ -278,18 +278,18 @@ func runLift(ctx context.Context, cfg config) error {
 	// shape. The dispatcher recognizes it (ParseLiftRequest), records the
 	// pending call, and substitutes PendingResult so the model wraps up. The
 	// SESSION STAYS ALIVE; the turn is NOT blocked on the job.
-	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
+	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		if tc.Function.Name != "run_job" {
-			return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name)), nil
 		}
 		wire := `{"pending": true, "correlation_id": "job-7", "ttl_s": 30}`
 		lr, ok := agent.ParseLiftRequest(wire)
 		if !ok {
-			return "started", nil
+			return llm.TextResult("started"), nil
 		}
 		pending[tc.ID] = lr.CorrelationID
 		fmt.Printf("\n  ↳ run_job(...) → LIFT (pending, correlation=%s, tool_call=%s)\n", lr.CorrelationID, tc.ID)
-		return agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds), nil
+		return llm.TextResult(agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds)), nil
 	})
 
 	clk := &clock{}
@@ -574,14 +574,14 @@ func runConverge(ctx context.Context, cfg config) error {
 	pending := map[string]string{} // tool_call_id → correlation_id
 
 	// run_export can't answer inline, so it lifts (parks the turn).
-	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (string, error) {
+	dispatch := agent.ToolDispatcher(func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		if tc.Function.Name != "run_export" {
-			return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil
+			return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name)), nil
 		}
 		lr, _ := agent.ParseLiftRequest(`{"pending":true,"correlation_id":"exp-9","ttl_s":30}`)
 		pending[tc.ID] = lr.CorrelationID
 		fmt.Printf("\n  ↳ run_export(...) → LIFT (pending, correlation=%s)\n", lr.CorrelationID)
-		return agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds), nil
+		return llm.TextResult(agent.PendingResult(lr.CorrelationID, tc.ID, lr.TTLSeconds)), nil
 	})
 
 	sess := &agent.Session{
@@ -645,10 +645,10 @@ func runConverge(ctx context.Context, cfg config) error {
 
 // verbose wraps a dispatcher to print each tool call + result.
 func verbose(inner agent.ToolDispatcher) agent.ToolDispatcher {
-	return func(ctx context.Context, tc llm.ToolCall) (string, error) {
+	return func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		fmt.Printf("\n  ↳ %s(%s)\n", tc.Function.Name, strings.TrimSpace(tc.Function.Arguments))
 		res, err := inner(ctx, tc)
-		fmt.Printf("    = %s\n  ", oneLine(res))
+		fmt.Printf("    = %s\n  ", oneLine(res.Text))
 		return res, err
 	}
 }

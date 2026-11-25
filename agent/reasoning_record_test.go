@@ -27,7 +27,7 @@ func TestTurnRecordsReasoningAndNeverReplaysIt(t *testing.T) {
 	}}
 	s := &Session{SessionID: "s", Store: store, MaxTurns: 5, Runner: runner,
 		Estimate: CharsByFour{},
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil }}
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil }}
 	var end TurnEnd
 	s.OnTurnEnd = func(e TurnEnd) { end = e }
 	if _, err := s.Turn(context.Background()); err != nil {

@@ -70,10 +70,16 @@ plan/     living plan. plan.md = current state + active work + decisions;
 
 - `agent.Store` — 4 methods: `ClaimPending`, `Append`, `Context`, `Compact`
   (+ the host's own inbox/publish helpers, not part of the interface).
-- `agent.ToolDispatcher` — `func(ctx, llm.ToolCall) (string, error)`. Errors
-  meant for the MODEL go INTO the result string; any other returned Go error is
+- `agent.ToolDispatcher` — `func(ctx, llm.ToolCall) (llm.ToolResult, error)`.
+  `ToolResult{Text, Parts}`: Parts are media (any `llm.ContentPart` kind),
+  persisted on the KindToolResult Entry as `Parts` (Content = Text; the Store
+  owns blob/ref handling) and rendered as one tool message, text part first.
+  Errors meant for the MODEL go INTO Text; any other returned Go error is
   recorded as an `ERROR: ...` tool result and the loop continues (it does not
   abort the Turn). Return `agent.ErrSessionClosed` from a terminal tool to stop the loop.
+  `Session.PrepareToolResult` (optional) sees every dispatched result before it
+  is persisted: keep, describe (media → text) or drop parts; its error is an
+  `ERROR: ...` result.
   It is a func type, so DECORATING it is the extension seam — `ValidatingDispatcher`
   is one, and dun's `withLiftedQueue` (fold buffered news into the in-flight
   tool's result) is another. Reach for a wrapper before a new primitive.

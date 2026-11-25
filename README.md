@@ -80,7 +80,7 @@ sess := &agent.Session{
     Store:     store,
     Runner:    client,                // *llm.Client satisfies agent.LLMRunner
     Tools:     myTools,               // []llm.ToolDef
-    Dispatch:  myDispatch,            // func(ctx, llm.ToolCall) (string, error)
+    Dispatch:  myDispatch,            // func(ctx, llm.ToolCall) (llm.ToolResult, error)
     OnAssistantToken: func(s string) { fmt.Print(s) },
 }
 

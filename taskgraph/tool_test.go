@@ -171,15 +171,17 @@ func TestToolActionFieldGivesTheHintAndWritesNothing(t *testing.T) {
 
 func TestToolWrapRoutesPlanCallsAndPassesTheRest(t *testing.T) {
 	tl := New(newMemStore(Graph{}, nil), "")
-	d := tl.Wrap(func(_ context.Context, tc llm.ToolCall) (string, error) { return "inner:" + tc.Function.Name, nil })
+	d := tl.Wrap(func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
+		return llm.TextResult("inner:" + tc.Function.Name), nil
+	})
 	var tc llm.ToolCall
 	tc.Function.Name = "other"
-	if out, _ := d(context.Background(), tc); out != "inner:other" {
-		t.Errorf("%s", out)
+	if out, _ := d(context.Background(), tc); out.Text != "inner:other" {
+		t.Errorf("%s", out.Text)
 	}
 	tc.Function.Name, tc.Function.Arguments = ToolShow, "{}"
-	if out, _ := d(context.Background(), tc); out != "plan: empty" {
-		t.Errorf("%s", out)
+	if out, _ := d(context.Background(), tc); out.Text != "plan: empty" {
+		t.Errorf("%s", out.Text)
 	}
 	if !tl.Has(ToolClose) || tl.Has("plan") {
 		t.Error("Has")

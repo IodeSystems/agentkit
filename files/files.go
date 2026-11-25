@@ -246,11 +246,11 @@ func (t *Toolset) Defs() []llm.ToolDef {
 
 // Dispatcher is agent.ToolDispatcher's shape, restated so this package needs
 // only llm. A value of either type converts to the other.
-type Dispatcher = func(ctx context.Context, tc llm.ToolCall) (string, error)
+type Dispatcher = func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error)
 
 // Wrap routes this toolset's calls and passes every other call to inner.
 func (t *Toolset) Wrap(inner Dispatcher) Dispatcher {
-	return func(ctx context.Context, tc llm.ToolCall) (string, error) {
+	return func(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		if !t.Handles(tc.Function.Name) {
 			return inner(ctx, tc)
 		}
@@ -259,24 +259,25 @@ func (t *Toolset) Wrap(inner Dispatcher) Dispatcher {
 }
 
 // Dispatch runs one call by its model-facing name with JSON arguments. The
-// result is always for the model: a refusal starts with "ERROR: ".
-func (t *Toolset) Dispatch(ctx context.Context, name, argsJSON string) string {
+// result is always for the model: a refusal's Text starts with "ERROR: ". It
+// is an llm.ToolResult, not a string, so a tool can return media parts.
+func (t *Toolset) Dispatch(ctx context.Context, name, argsJSON string) llm.ToolResult {
 	bare, ok := t.byName[name]
 	if !ok {
-		return fmt.Sprintf("ERROR: unknown tool %q", name)
+		return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", name))
 	}
 	var a args
 	if strings.TrimSpace(argsJSON) != "" {
 		if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
-			return fmt.Sprintf("ERROR: %s: arguments are not a JSON object: %v", name, err)
+			return llm.TextResult(fmt.Sprintf("ERROR: %s: arguments are not a JSON object: %v", name, err))
 		}
 		a.keys = argKeys([]byte(argsJSON))
 	}
 	out, err := t.run(ctx, bare, a)
 	if err != nil {
-		return "ERROR: " + err.Error()
+		return llm.TextResult("ERROR: " + err.Error())
 	}
-	return out
+	return llm.TextResult(out)
 }
 
 func (t *Toolset) run(ctx context.Context, bare string, a args) (string, error) {

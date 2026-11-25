@@ -139,9 +139,9 @@ func TestValidatingDispatcher_FixLoop(t *testing.T) {
 		"required": []string{"reply"},
 	})}
 	var dispatched int
-	inner := func(_ context.Context, tc llm.ToolCall) (string, error) {
+	inner := func(_ context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
 		dispatched++
-		return "ok", nil
+		return llm.TextResult("ok"), nil
 	}
 	d := ValidatingDispatcher(inner, NewSchemaValidator(tools))
 
@@ -155,15 +155,15 @@ func TestValidatingDispatcher_FixLoop(t *testing.T) {
 	if dispatched != 0 {
 		t.Fatal("inner dispatched despite invalid args")
 	}
-	if !strings.Contains(res, "INVALID") || !strings.Contains(res, "reply") {
-		t.Fatalf("fix instruction malformed: %s", res)
+	if !strings.Contains(res.Text, "INVALID") || !strings.Contains(res.Text, "reply") {
+		t.Fatalf("fix instruction malformed: %s", res.Text)
 	}
 
 	good := llm.ToolCall{}
 	good.Function.Name = "submit"
 	good.Function.Arguments = `{"reply":"hi"}`
-	if res, err := d(context.Background(), good); err != nil || res != "ok" || dispatched != 1 {
-		t.Fatalf("valid call not passed through: res=%q err=%v dispatched=%d", res, err, dispatched)
+	if res, err := d(context.Background(), good); err != nil || res.Text != "ok" || dispatched != 1 {
+		t.Fatalf("valid call not passed through: res=%q err=%v dispatched=%d", res.Text, err, dispatched)
 	}
 }
 

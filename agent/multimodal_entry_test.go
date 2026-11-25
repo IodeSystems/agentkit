@@ -67,21 +67,20 @@ func TestRenderEntry_SubstitutedContentDropsParts(t *testing.T) {
 	}
 }
 
-// Parts are only meaningful on user turns; provider APIs reject image parts on
-// tool results. A non-user entry must ignore them rather than emit an invalid
-// message.
-func TestRenderEntry_NonUserIgnoresParts(t *testing.T) {
+// Assistant turns are text: an assistant entry with Parts must ignore them
+// rather than emit a message the provider rejects. (Tool results with Parts
+// render multimodally: toolresult_parts_test.go.)
+func TestRenderEntry_AssistantIgnoresParts(t *testing.T) {
 	e := Entry{
-		Kind:       KindToolResult,
-		Content:    "tool said hi",
-		ToolCallID: "call-1",
-		Parts:      []llm.ContentPart{imgPart("data:image/png;base64,iVBORw==")},
+		Kind:    KindAssistant,
+		Content: "said hi",
+		Parts:   []llm.ContentPart{imgPart("data:image/png;base64,iVBORw==")},
 	}
 	m := renderEntry(e, e.Content, false, ToolFormatNative)
 	if len(m.Parts) != 0 {
-		t.Errorf("tool result rendered multimodally: %+v", m.Parts)
+		t.Errorf("assistant rendered multimodally: %+v", m.Parts)
 	}
-	if m.Role != "tool" || m.ToolCallID != "call-1" {
-		t.Errorf("tool result mangled: %+v", m)
+	if m.Role != "assistant" || m.Content != "said hi" {
+		t.Errorf("assistant mangled: %+v", m)
 	}
 }

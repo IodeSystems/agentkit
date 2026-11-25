@@ -17,7 +17,7 @@ func TestTurnResultCarriesLastRoundFinishReasons(t *testing.T) {
 	}}
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, MaxTurns: 10,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) { return "ok", nil },
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("ok"), nil },
 	}
 	res, err := s.Turn(context.Background())
 	if err != nil {

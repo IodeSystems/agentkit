@@ -127,7 +127,7 @@ func TestRender_FoldUserIntoToolResultMergesTextOnly(t *testing.T) {
 	}
 }
 
-// A tool result is text only: folding an attachment would drop it.
+// Folding moves only words: folding a user attachment would drop it.
 func TestRender_FoldKeepsAUserEntryWithPartsAsAUserMessage(t *testing.T) {
 	parts := []llm.ContentPart{llm.TextPart("look")}
 	msgs := renderEntries([]Entry{
@@ -160,9 +160,9 @@ func TestTurn_UserTypedDuringToolLandsAfterTheResultAndTurnContinues(t *testing.
 	now := func() int64 { clock++; return clock }
 	s := &Session{
 		SessionID: "s", Store: store, Runner: runner, Now: now,
-		Dispatch: func(context.Context, llm.ToolCall) (string, error) {
+		Dispatch: func(context.Context, llm.ToolCall) (llm.ToolResult, error) {
 			store.queue(Entry{ID: "u1", Kind: KindUser, Content: "also b", CreatedAt: now()})
-			return "out", nil
+			return llm.TextResult("out"), nil
 		},
 	}
 	if _, err := s.Turn(context.Background()); err != nil {

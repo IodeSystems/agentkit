@@ -58,19 +58,28 @@ Cost currency. `Usage.Cost.Currency` for a `usage.cost` in the body, first match
 supply `Tools []llm.ToolDef` and a `Dispatch`:
 
 ```go
-func dispatch(ctx context.Context, tc llm.ToolCall) (string, error) {
+func dispatch(ctx context.Context, tc llm.ToolCall) (llm.ToolResult, error) {
     switch tc.Function.Name {
     case "get_weather":
-        // parse tc.Function.Arguments (JSON), do the work, return a string
-        return result, nil
+        // parse tc.Function.Arguments (JSON), do the work, return the text
+        return llm.TextResult(result), nil
+    case "screenshot":
+        // media rides in Parts: any llm.ContentPart kind
+        return llm.ToolResult{Text: "the screen", Parts: []llm.ContentPart{llm.ImagePart(dataURI)}}, nil
     default:
-        return fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name), nil // note: not a Go error
+        return llm.TextResult(fmt.Sprintf("ERROR: unknown tool %q", tc.Function.Name)), nil // note: not a Go error
     }
 }
 ```
 
-Errors meant for the **model** (unknown tool, bad args) go into the result
-string so the loop stays alive and the model can recover. A returned Go error
+Errors meant for the **model** (unknown tool, bad args) go into the result's
+Text so the loop stays alive and the model can recover. A result's Parts are
+persisted on the tool-result Entry (`Entry.Parts`; the Store decides how media
+bytes are kept) and rendered as one tool message: a text part, then the media.
+An LOD stub or summary drops them. `Session.PrepareToolResult` sees every
+dispatched result before it is persisted, so a host can keep a part, replace it
+with a text description, or drop it (a model that cannot take that kind); an
+error from it is recorded as an `ERROR: ...` result. A returned Go error
 is recorded as an `ERROR: ...` result and the loop continues. A terminal tool returns `agent.ErrSessionClosed` to stop the
 loop after its result is persisted (used with `tool_choice=required` roles).
 
