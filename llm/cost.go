@@ -22,8 +22,12 @@ import (
 //     — headers go out before the cost is known — and the proxy puts it in the
 //     final usage chunk instead (usage.cost), when the operator turned on
 //     include_cost_in_streaming_usage.
-//   - OpenRouter always puts usage.cost (credits) in the usage object, on the
-//     final chunk of a stream.
+//   - OpenRouter always puts usage.cost in the usage object, on the final chunk
+//     of a stream. Its FAQ: "OpenRouter uses a credit system where the base
+//     currency is US dollars" (https://openrouter.ai/docs/faq), and its key API
+//     reports limit_usd/spend_usd, so the amount is USD.
+//   - corrallm puts usage.cost (USD, its cost_usd column) and usage.cost_currency
+//     on every reply that carries a cost.
 //   - OpenAI sends x-ratelimit-{limit,remaining,reset}-{requests,tokens}.
 //   - Anthropic sends anthropic-ratelimit-{requests,tokens,input-tokens,
 //     output-tokens}-{limit,remaining,reset}. LiteLLM forwards a provider's own
@@ -34,6 +38,18 @@ import (
 // zero-valued and Reported=false against an endpoint that says nothing, because
 // "costs nothing" and "did not say" are different facts.
 
+// Currency of a usage.cost in the body, first match wins (responseMeta.stamp):
+//
+//  1. usage.cost_estimated true -> CurrencyUSDEstimate. An estimate is never a
+//     reported amount, whatever currency label rides along.
+//  2. usage.cost_currency, non-empty: trimmed; "usd" in any case -> CurrencyUSD,
+//     anything else kept verbatim.
+//  3. usage.cost_source present (any value; only corrallm sends it) -> CurrencyUSD.
+//     Stopgap until corrallm sends cost_currency.
+//  4. LiteLLM response header -> CurrencyUSD.
+//  5. base URL contains openrouter.ai -> CurrencyUSD.
+//  6. "" (the source did not say).
+//
 // Currencies a cost or budget can be in. Empty means the source did not say.
 const (
 	CurrencyUSD = "USD"
@@ -41,9 +57,6 @@ const (
 	// figure the provider reported. A currency of its own, so that it is never
 	// summed into a reported amount and every total shows which it is.
 	CurrencyUSDEstimate = "USD estimate"
-	// CurrencyCredits is OpenRouter's unit for usage.cost and its key limits.
-	// Its docs do not state the exchange rate, so it is not relabelled USD.
-	CurrencyCredits = "credits"
 )
 
 // LiteLLM's per-response headers. Values are decimal strings; a header whose
@@ -59,9 +72,9 @@ type Cost struct {
 	// Amount in Currency. A reported 0 is a real zero (a cache hit, a free
 	// model).
 	Amount float64
-	// Currency is CurrencyUSD, CurrencyCredits, or "" when the source names
-	// none (usage.cost from an endpoint that is neither LiteLLM nor
-	// OpenRouter).
+	// Currency is CurrencyUSD, CurrencyUSDEstimate, another code the
+	// body named, or "" when the source names none (usage.cost from an endpoint
+	// that is none of the above).
 	Currency string
 	// Reported is true when the response carried a cost at all.
 	Reported bool
@@ -343,7 +356,7 @@ func (c *Client) metaFrom(h http.Header) responseMeta {
 	case isLiteLLM(h):
 		m.bodyCurrency = CurrencyUSD // LiteLLM prices from its own USD cost map
 	case strings.Contains(c.baseURL, "openrouter.ai"):
-		m.bodyCurrency = CurrencyCredits
+		m.bodyCurrency = CurrencyUSD // credits are dollars; see the FAQ cited above
 	}
 	return m
 }
@@ -368,10 +381,16 @@ func (m responseMeta) stamp(u *Usage, body *bodyCost, bodyModel string) {
 	}
 	u.Cost = m.cost
 	if body != nil && body.amount >= 0 {
-		u.Cost = Cost{Amount: body.amount, Currency: m.bodyCurrency, Reported: true}
-		if body.estimated {
-			u.Cost.Currency = CurrencyUSDEstimate
+		cur := m.bodyCurrency
+		switch {
+		case body.estimated:
+			cur = CurrencyUSDEstimate
+		case body.currency != "":
+			cur = body.currency
+		case body.hasSource:
+			cur = CurrencyUSD
 		}
+		u.Cost = Cost{Amount: body.amount, Currency: cur, Reported: true}
 	}
 	u.Limits = m.limits
 	u.KeyBudget = m.budget
@@ -389,20 +408,30 @@ func (m responseMeta) reported() bool {
 func usageCost(data []byte) *bodyCost {
 	var v struct {
 		Usage struct {
-			Cost      *float64 `json:"cost"`
-			Estimated bool     `json:"cost_estimated"`
+			Cost      *float64         `json:"cost"`
+			Estimated bool             `json:"cost_estimated"`
+			Currency  string           `json:"cost_currency"`
+			Source    *json.RawMessage `json:"cost_source"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(data, &v) != nil || v.Usage.Cost == nil {
 		return nil
 	}
-	return &bodyCost{amount: *v.Usage.Cost, estimated: v.Usage.Estimated}
+	cur := strings.TrimSpace(v.Usage.Currency)
+	if strings.EqualFold(cur, "usd") {
+		cur = CurrencyUSD
+	}
+	return &bodyCost{amount: *v.Usage.Cost, estimated: v.Usage.Estimated, currency: cur, hasSource: v.Usage.Source != nil}
 }
 
 // bodyCost is a usage.cost, and whether the sender says it worked it out.
 type bodyCost struct {
 	amount    float64
 	estimated bool
+	// currency is usage.cost_currency, normalized; "" when absent.
+	currency string
+	// hasSource is whether usage.cost_source was present (corrallm only).
+	hasSource bool
 }
 
 // stampFor is meta.stamp, with the batch completion accounted at the batch

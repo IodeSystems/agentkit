@@ -21,7 +21,8 @@ import (
 //     "budget_reset_at", ...}} in USD. A non-admin key may read its own row.
 //   - OpenRouter: GET /api/v1/key answers {"data": {"usage", "limit",
 //     "limit_remaining", "limit_reset", "usage_daily", ..., "effective_budget"}}.
-//     Key fields are credits; the budget objects are USD.
+//     Credits are dollars (https://openrouter.ai/docs/faq: "the base
+//     currency is US dollars"), so every field is USD.
 //
 // Anything else has no such endpoint that this client knows of, and gets
 // ErrBudgetUnsupported rather than a guess. Detection probes the documented
@@ -267,7 +268,7 @@ func parseOpenRouterKey(raw []byte) (KeyBudget, error) {
 		}
 		return b, nil
 	}
-	b := KeyBudget{Spend: *d.Usage, Currency: CurrencyCredits, Source: BudgetSourceOpenRouter, Reported: true}
+	b := KeyBudget{Spend: *d.Usage, Currency: CurrencyUSD, Source: BudgetSourceOpenRouter, Reported: true}
 	if d.LimitReset != nil {
 		b.Interval = *d.LimitReset
 		// The spend that counts against a resetting limit is the period's.

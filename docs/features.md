@@ -50,6 +50,8 @@ for chunk := range ch {
 
 Correlation ids. `llm.WithTraceID(ctx, id)` sets the `X-Trace-Id` for calls that have no `ChatOpts` (embed, transcribe, `DiscoverContext`, probes); a chat call uses `ChatOpts.TraceID` first, then the ctx id. Every `Usage` carries `TraceID` (what was sent) and `ResponseID` (the reply body's `id`, first non-empty chunk id on a stream; the key for a provider's generation lookup). `ChatOpts.Headers` adds per-request headers (for example OpenRouter `x-openrouter-trace-<key>`); `Authorization`, `Content-Type` and `X-Api-Key` are ignored.
 
+Cost currency. `Usage.Cost.Currency` for a `usage.cost` in the body, first match wins: `cost_estimated` true gives `"USD estimate"`; else `usage.cost_currency` (trimmed; `usd` in any case is `USD`, other codes kept as sent); else a `usage.cost_source` field (corrallm only; stopgap until it sends `cost_currency`) gives `USD`; else the LiteLLM header gives `USD`; else an `openrouter.ai` base URL gives `USD` (OpenRouter credits are dollars, per its FAQ); else `""`. OpenRouter key budgets are USD too.
+
 ## 2. The tool-call loop — `tools`
 
 `Session.Turn` runs chat → tool_calls → dispatch → feed back → repeat. You

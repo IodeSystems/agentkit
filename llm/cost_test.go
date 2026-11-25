@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -73,7 +74,7 @@ func TestCostFromLiteLLMHeaderNonStreaming(t *testing.T) {
 	}
 }
 
-// OpenRouter: usage.cost in the final stream chunk, in credits. Headers arrive
+// OpenRouter: usage.cost in the final stream chunk, in USD (credits are dollars). Headers arrive
 // before the stream; the cost arrives at its end.
 func TestCostFromOpenRouterBodyStreaming(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -86,12 +87,12 @@ func TestCostFromOpenRouterBodyStreaming(t *testing.T) {
 		t.Errorf("Cost = %+v, want 0.0123 with no currency", u.Cost)
 	}
 
-	// The same body from an OpenRouter base URL is in credits.
+	// The same body from an OpenRouter base URL is USD.
 	m := (&Client{baseURL: "https://openrouter.ai/api/v1"}).metaFrom(http.Header{})
 	var u2 Usage
 	cost := 0.5
 	m.stamp(&u2, &bodyCost{amount: cost}, "")
-	if u2.Cost.Currency != CurrencyCredits {
+	if u2.Cost.Currency != CurrencyUSD {
 		t.Errorf("openrouter currency = %q", u2.Cost.Currency)
 	}
 }
@@ -340,7 +341,7 @@ func TestKeyBudgetLiteLLMUnlimited(t *testing.T) {
 	}
 }
 
-// OpenRouter's GET /api/v1/key, key-level fields (credits).
+// OpenRouter's GET /api/v1/key, key-level fields (credits = USD).
 func TestKeyBudgetOpenRouter(t *testing.T) {
 	resetBudgetRoutes()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +358,7 @@ func TestKeyBudgetOpenRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b.Source != BudgetSourceOpenRouter || b.Spend != 4.5 || b.Limit != 20 || b.Remaining != 15.5 ||
-		b.Interval != "monthly" || b.Currency != CurrencyCredits {
+		b.Interval != "monthly" || b.Currency != CurrencyUSD {
 		t.Errorf("budget = %+v", b)
 	}
 }
@@ -435,5 +436,77 @@ func TestKeyBudgetTransportErrorNotCached(t *testing.T) {
 	}
 	if _, ok := budgetRoutes.Load(url + "\x00k"); ok {
 		t.Error("a transport failure was cached")
+	}
+}
+
+// costCurrencies serves one usage object over both transports and returns the
+// stamped Cost of each. headers and orURL select the weaker currency sources
+// (orURL puts "openrouter.ai" in the base URL path; the server stays local).
+func costCurrencies(t *testing.T, usageExtra string, headers map[string]string, orURL bool) (stream, plain Cost) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range headers {
+			w.Header().Set(k, v)
+		}
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Stream {
+			sseUsage(w, usageExtra)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4`+usageExtra+`}}`)
+	}))
+	defer srv.Close()
+	base := srv.URL
+	if orURL {
+		base += "/openrouter.ai"
+	}
+	c := NewClient(base, "k", "m")
+	stream = streamUsage(t, c).Cost
+	var got []Usage
+	c.OnUsage = func(u Usage) { got = append(got, u) }
+	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("OnUsage called %d times", len(got))
+	}
+	return stream, got[0].Cost
+}
+
+// cost_currency names the currency, ahead of the header and URL rules; "usd" in
+// any case is CurrencyUSD, anything else is kept as sent. An estimate stays an
+// estimate: it is never a reported amount.
+func TestBodyCostCurrencyPrecedence(t *testing.T) {
+	cases := []struct {
+		name    string
+		extra   string
+		headers map[string]string
+		orURL   bool
+		want    string
+	}{
+		{"USD", `,"cost":1,"cost_currency":"USD"`, nil, false, CurrencyUSD},
+		{"usd lower, padded", `,"cost":1,"cost_currency":" usd "`, nil, false, CurrencyUSD},
+		{"other kept", `,"cost":1,"cost_currency":" EUR "`, nil, false, "EUR"},
+		{"beats openrouter url", `,"cost":1,"cost_currency":"EUR"`, nil, true, "EUR"},
+		{"beats litellm header", `,"cost":1,"cost_currency":"EUR"`, map[string]string{"x-litellm-version": "1"}, false, "EUR"},
+		{"cost_source alone is USD", `,"cost":1,"cost_source":"table"`, nil, false, CurrencyUSD},
+		{"cost_currency beats cost_source", `,"cost":1,"cost_source":"x","cost_currency":"EUR"`, nil, false, "EUR"},
+		{"plain body cost", `,"cost":1`, nil, false, ""},
+		{"openrouter url", `,"cost":1`, nil, true, CurrencyUSD},
+		{"estimate wins", `,"cost":1,"cost_estimated":true,"cost_currency":"USD"`, nil, false, CurrencyUSDEstimate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p := costCurrencies(t, tc.extra, tc.headers, tc.orURL)
+			for name, c := range map[string]Cost{"stream": s, "plain": p} {
+				if !c.Reported || c.Amount != 1 || c.Currency != tc.want {
+					t.Errorf("%s Cost = %+v, want currency %q", name, c, tc.want)
+				}
+			}
+		})
 	}
 }

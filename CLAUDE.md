@@ -251,6 +251,10 @@ plan/     living plan. plan.md = current state + active work + decisions;
   returned after (`StreamChunk.Stall`). A caller cancel wins and stays ctx.Err().
   The Client owns its Transport (clone of default + HTTP/2 `SendPingTimeout` 30s,
   `PingTimeout` 15s). There is no host-supplied http client field.
+- **Body cost currency has one precedence list, in `llm/cost.go`.** estimated
+  (`USD estimate`) > `usage.cost_currency` > `usage.cost_source` present (corrallm
+  stopgap, USD) > LiteLLM header (USD) > `openrouter.ai` URL (USD: credits are
+  dollars, openrouter.ai/docs/faq) > "". `CurrencyCredits` no longer exists.
 - **Every retry sleep is jittered, additively.** `jittered()` adds a random
   `[0, retryJitterFraction)` of the sleep — never subtracts. corrallm hands
   every caller rejected in the same moment the IDENTICAL `Retry-After`, and an
