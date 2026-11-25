@@ -194,6 +194,12 @@ plan/     living plan. plan.md = current state + active work + decisions;
   native_finish_reason). Never `TurnReply` with Reply "". An empty length cut
   stays with the overflow path. `NoReasoningCutRepair` turns off both repairs;
   an empty round then returns the error with no repair round.
+  BEFORE both repairs (`providerfail.go`): an empty round (reasoning does not
+  count) with finish "stop" and a native reason off the clean-stop ALLOWLIST
+  (OpenRouter's MALFORMED_RESPONSE, Gemini OTHER) is a provider fault: discarded
+  unpersisted and resent unchanged (a pending repair stays pending), 1s doubling
+  to 5m + additive jitter, `MaxProviderFailRetries` per Turn total (0 → 10,
+  negative off), `OnProviderFailRetry` before each sleep; then the repairs.
 - **Loop guards are ON by default, at two levels.** `llm.RepetitionGuard`
   watches each stream (content AND tool-call arguments — the measured 30-minute
   loop was inside `arguments`) for a periodic suffix and CLOSES THE BODY; the

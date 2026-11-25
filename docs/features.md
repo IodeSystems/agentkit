@@ -178,6 +178,22 @@ and matches `errors.Is(err, agent.ErrEmptyReply)`. An empty round with finish
 returns the error at once. Hosts that treated `Reply == ""` with a nil error as
 "nothing to say" must now handle the error.
 
+**A provider failure dressed as a stop.** OpenRouter reports an upstream failure
+it does not recognize as finish `stop` and puts the real reason in
+`native_finish_reason` (seen: Gemini streams reasoning, then fails with
+`MALFORMED_RESPONSE`). An empty round (no visible text, no tool call; reasoning
+does not count) with finish `stop` and a native reason that is not a clean stop
+(`stop`, `end_turn`, `stop_sequence`, `eos`, `complete`, `completed`,
+`pause_turn`, `compaction`, `end_of_stream`, any case) is not sent to the
+repairs above: it is discarded and the same request is resent, with no notice
+and the opts unchanged. Resends back off from 1s, doubling, each sleep capped at
+5 minutes, plus additive jitter; at most `Session.MaxProviderFailRetries` per
+Turn (0 means 10, negative turns it off). They do not count against `MaxTurns`
+or the one repair. `Session.OnProviderFailRetry` gets each resend (attempt,
+native reason, the wait) before the sleep. When the resends run out, the round
+goes to the repairs. A round with visible text is kept as the reply whatever its
+native reason says.
+
 **A turn-level loop:** the same call returning the same result, round after
 round. Every round is well-formed, so only the repetition across rounds shows
 it. `MaxRepeatedExchanges` (default 5) warns the model at 5 identical

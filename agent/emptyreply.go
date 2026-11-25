@@ -21,6 +21,10 @@ package agent
 // it: the host decides what to shed. A repair note there would ask a model that
 // ran out of room to answer in the same room.
 //
+// A native reason that is not a clean stop (MALFORMED_FUNCTION_CALL is one) is
+// first resent unchanged, with backoff (providerfail.go); this repair runs only
+// once those resends are spent, or with Session.MaxProviderFailRetries < 0.
+//
 // As in the reasoning cut, no empty assistant entry is persisted:
 // llama.cpp refuses two consecutive assistant messages and some providers
 // refuse empty assistant content. The notification is the record.

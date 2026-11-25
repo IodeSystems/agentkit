@@ -28,7 +28,9 @@ func TestEmptyRoundWithoutReasoningIsRepairedOnce(t *testing.T) {
 		emptyRound("stop", "MALFORMED_FUNCTION_CALL"),
 		{{Content: "The answer."}},
 	}}
-	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
+	// Resends off: MALFORMED_FUNCTION_CALL is also a provider failure
+	// (providerfail.go), and this test is about the repair behind it.
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, MaxProviderFailRetries: -1,
 		OnReasoningCut: func(ReasoningCut) { t.Error("reasoning-cut hook ran without reasoning") }}
 	res, err := s.Turn(context.Background())
 	if err != nil || res.Reply != "The answer." || len(runner.seen) != 2 {
@@ -50,7 +52,7 @@ func TestTwoEmptyRoundsFailWithEmptyReplyError(t *testing.T) {
 		emptyRound("stop", "X"), emptyRound("stop", "MALFORMED_FUNCTION_CALL"), {{Content: "never"}},
 	}}
 	var end TurnEnd
-	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5,
+	s := &Session{SessionID: "s", Store: store, Runner: runner, MaxTurns: 5, MaxProviderFailRetries: -1,
 		OnTurnEnd: func(e TurnEnd) { end = e }}
 	_, err := s.Turn(context.Background())
 	var ee *EmptyReplyError

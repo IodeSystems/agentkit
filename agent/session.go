@@ -52,6 +52,16 @@ type Session struct {
 	// repair round; a length cut still goes to the overflow path. See
 	// emptyreply.go.
 	NoReasoningCutRepair bool
+	// MaxProviderFailRetries caps, per Turn in total, how many times a round
+	// the provider failed (empty, finish "stop", a native_finish_reason that is
+	// not a clean stop; see providerfail.go) is resent unchanged before it goes
+	// to the empty-round repairs above. 0 → 10; negative → off (no resend).
+	MaxProviderFailRetries int
+	// OnProviderFailRetry, if set, is told about each such resend BEFORE its
+	// backoff sleep, with the wait it is about to take.
+	OnProviderFailRetry func(ProviderFailRetry)
+	// sleep waits out a provider-failure backoff. Nil → sleepCtx. Tests set it.
+	sleep func(context.Context, time.Duration) error
 	// reasoningOffRound makes the next chat round send reasoning off, on a copy
 	// of ChatOpts. Set by Turn per round; never persisted.
 	reasoningOffRound bool
@@ -383,6 +393,15 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 	if maxRepeatRounds == 0 {
 		maxRepeatRounds = 5
 	}
+	maxProvFails := s.MaxProviderFailRetries
+	if maxProvFails == 0 {
+		maxProvFails = defaultProviderFailRetries
+	}
+	provFails := 0 // resends spent this Turn; see providerfail.go
+	sleep := s.sleep
+	if sleep == nil {
+		sleep = sleepCtx
+	}
 	now := s.Now
 	if now == nil {
 		now = func() int64 { return time.Now().UnixNano() }
@@ -542,6 +561,30 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			s.OnUsage(result.Usage)
 		}
 
+		// A provider failure dressed as a stop: discard the round and resend
+		// the same request. BEFORE anything is persisted (whitespace text
+		// included) and before the repair state is touched, so the resend is
+		// byte-identical and a pending repair stays pending. Not a model round:
+		// i-- keeps it off MaxTurns, bounded by maxProvFails.
+		if rep == nil && cut == nil && strings.TrimSpace(resp) == "" && len(toolCalls) == 0 &&
+			maxProvFails > 0 && provFails < maxProvFails && providerFailed(s.roundFinish, s.roundNative) {
+			provFails++
+			wait := providerFailDelay(provFails)
+			if s.OnProviderFailRetry != nil {
+				s.OnProviderFailRetry(ProviderFailRetry{
+					Attempt: provFails, Max: maxProvFails,
+					FinishReason: s.roundFinish, NativeFinishReason: s.roundNative,
+					Wait: wait,
+				})
+			}
+			if e := sleep(ctx, wait); e != nil {
+				// OnTurnEnd classifies this TurnCanceled from ctx.
+				return result, fmt.Errorf("agent: provider-failure backoff: %w", e)
+			}
+			i--
+			continue
+		}
+
 		if resp != "" {
 			// Persist the reply RAW (placeholders intact) so model replay stays
 			// token-lean; expand only for display in TurnResult.Reply. A reply
@@ -659,7 +702,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		default:
 			// No text, no tool call, no reasoning, and not a length cut: the
 			// model said nothing (seen: Gemini through OpenRouter, native
-			// finish MALFORMED_FUNCTION_CALL). Never a TurnReply with Reply "".
+			// finish MALFORMED_FUNCTION_CALL; such a round reaches here only once
+			// its provider-failure resends are spent). Never a TurnReply with
+			// Reply "".
 			if s.NoReasoningCutRepair || repairedOnce {
 				endReason = TurnEmptyReply
 				return result, &EmptyReplyError{FinishReason: s.roundFinish, NativeFinishReason: s.roundNative}
