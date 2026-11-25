@@ -103,6 +103,16 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if id := traceIDFrom(req.Context()); id != "" && req.Header.Get("X-Trace-Id") == "" {
 		req.Header.Set("X-Trace-Id", id)
 	}
+	// AGENTKIT_WIRE_DUMP: nil when off. It wraps the watched body, so a stall
+	// the watchdog reports is in the dump too. See wiredump.go.
+	if d := startWireDump(req); d != nil {
+		return d.response(c.doWatched(req))
+	}
+	return c.doWatched(req)
+}
+
+// doWatched is do after the headers are final: the watchdog part.
+func (c *Client) doWatched(req *http.Request) (*http.Response, error) {
 	fb, st := c.firstByteTimeout(), c.stallTimeout()
 	if fb == 0 && st == 0 {
 		return c.http.Do(req)

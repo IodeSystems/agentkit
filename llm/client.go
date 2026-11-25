@@ -1186,7 +1186,9 @@ func (c *Client) postTypedWithRetry(ctx context.Context, url, contentType string
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		// withWireAttempt names the attempt in an AGENTKIT_WIRE_DUMP file; it
+		// is ctx unchanged when the dump is off.
+		req, err := http.NewRequestWithContext(withWireAttempt(ctx, attempt+1), http.MethodPost, url, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("llm: request: %w", err)
 		}

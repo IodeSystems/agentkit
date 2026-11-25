@@ -524,6 +524,31 @@ tracing onto the two-method interface; `examples/agentkit-demo/trace.go` is a
 └ agent.Turn (16.9s)
 ```
 
+### Raw wire dump — `AGENTKIT_WIRE_DUMP`
+
+For a provider bug the parser hides (a malformed event, a comment line, a
+stream that ends oddly), set a directory and reproduce:
+
+```
+AGENTKIT_WIRE_DUMP=/tmp/agentkit-wire ./your-host
+```
+
+Every HTTP request the `llm.Client` makes writes one file there (created 0700,
+files 0600), named `<UTC time>-<seq>-<trace id>-a<attempt>.txt`; a retry is a
+new file with the next attempt number. Each file holds the request line,
+headers and body byte for byte, the response status and headers, every response
+line as received with a time offset (`: keep-alive`, `event:`, `data:`,
+`[DONE]`), and how the body ended (eof, read error such as a stall, or closed
+early). The variable is read per request, so a host can turn it on and off
+without a restart; unset or empty is off.
+
+Redacted: `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`,
+`Cookie`, `Set-Cookie`, any header or URL query parameter whose name contains
+`key`, `token` or `secret`, and a URL password. **The bodies are not redacted**:
+a dump holds the full prompt, the tools and every tool result. Treat it as
+sensitive. A failure to write the dump never fails the request; that dump just
+stops.
+
 ## 12. Putting it together — `converge`
 
 The features above are not independent — they **coalesce**. A lifted tool

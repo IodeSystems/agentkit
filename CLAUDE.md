@@ -253,6 +253,14 @@ plan/     living plan. plan.md = current state + active work + decisions;
   and BEFORE the deadline check (so the budget measures the real sleep). An
   outer retrier built on `RetryPolicy()` gets the unjittered numbers and should
   jitter them itself.
+- **`AGENTKIT_WIRE_DUMP=<dir>` captures raw wire bytes** (wiredump.go), read per
+  request in `Client.do`, so every request (chat, probes, embed, transcribe) is
+  covered. One text file per HTTP attempt (`<UTC>-<seq>-<trace>-a<N>.txt`): request
+  line + headers + body verbatim, status + headers, then every body line with a
+  relative time (comments, `[DONE]` included), then how it ended. Credential
+  headers and `?key=`-style query values are redacted; the BODY is not. The dump
+  wraps OUTSIDE `watchBody` so a stall is recorded. A write failure stops that
+  dump silently. Off = one Getenv per request, no body wrapper.
 
 ## Build / test guardrail (run after every change)
 
