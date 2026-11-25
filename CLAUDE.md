@@ -234,7 +234,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
 - **A silent link is ended by a watchdog, not by `http.Client.Timeout`.**
   `Client.do` (stall.go) wraps every request: `FirstByteTimeout` (default 15m:
   llama.cpp is silent while it processes a prompt) until the first body byte,
-  then `StallTimeout` (2m) per body Read. 0 = default, negative = off. The timer
+  then `StallTimeout` (5m) per body Read. 0 = default, negative = off. The timer
   resets at the io.Reader, BELOW the SSE parser, so `: keep-alive` comments count;
   it runs only while a Read blocks, so a slow consumer is not a stall. Failure is
   `*StallError`, transient: retried (`RetryStall`) inside `RetryBudget` before
