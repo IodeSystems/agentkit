@@ -1121,6 +1121,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-25: agentkit v0.41.1: malformed-call repair + same-reason resend stop (5eb3abf); wire dump `AGENTKIT_WIRE_DUMP` (6c02b08); OnUsage final finish reason (e650832). Carl saw MALFORMED_FUNCTION_CALL repeat on resend (via dun-2a); Carl approved.
 - 2026-11-25: agentkit v0.41.0: provider-failure resend, `MaxProviderFailRetries`/`OnProviderFailRetry` (f4ac2c2, dun-2a relayed Carl; rule from pi 9b911b4); stream error status decides retry for a string code (eaadc44, dun-2a found, corrallm-72 confirmed); no-prefill tests (0dbfca5, another session). Carl approved.
 - 2026-11-22: agentkit v0.40.0: trace and response ids (d3c05f8); queue-timeout stream parity (6ce5636, corrallm-72 asked); taskgraph close attribution (849b13c, dun-2a asked); other sessions ca4c45d..7ea2db7. Carl approved.
 - 2026-11-20: agentkit v0.39.0: fold accounting on one basis, `SummaryTokens`/`PinnedTokens` (bae18ec); `FoldMidLOD` (71eaf5b, docs 139a449); `FirstByteTimeout` 15m (8049994+, aw4-91 found corrallm holds queued requests up to 12m); batch path + citations (9f47e91..281f83d, another session). dun-2a asked; Carl approved.
