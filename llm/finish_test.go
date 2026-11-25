@@ -134,3 +134,28 @@ func TestReasoningDetailsNotDoubledWithReasoning(t *testing.T) {
 		t.Errorf("reasoning = %q, want %q (not doubled)", got, "think")
 	}
 }
+
+// A server that sends usage BEFORE the finish (llama.cpp-style per-chunk usage,
+// or usage on the last content chunk) left Usage.FinishReason empty: the usage
+// was stamped when it arrived, and the finish came later. OnUsage must report
+// the round's final finish words whatever the chunk order.
+func TestFinishReasonReachesOnUsageWhenUsageArrivesFirst(t *testing.T) {
+	for name, payloads := range map[string][]string{
+		"usage on a content chunk": {
+			`{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop","native_finish_reason":"STOP"}]}`,
+		},
+		"usage-only chunk first": {
+			`{"choices":[{"delta":{"content":"hi"}}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop","native_finish_reason":"STOP"}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, usage := runSSE(t, payloads...)
+			if usage == nil || usage.FinishReason != "stop" || usage.NativeFinishReason != "STOP" {
+				t.Errorf("OnUsage usage = %+v, want stop/STOP", usage)
+			}
+		})
+	}
+}

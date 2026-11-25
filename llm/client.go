@@ -2347,7 +2347,14 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			return
 		}
 		if lastUsage != nil {
-			c.OnUsage(*lastUsage)
+			// The finish words are the stream's LAST ones, not the ones seen
+			// when the usage chunk was stamped: a server that sends usage
+			// before (or beside) the finish chunk otherwise reports an empty
+			// FinishReason. A copy, because *lastUsage already went to the
+			// caller in a chunk.
+			u := *lastUsage
+			u.FinishReason, u.NativeFinishReason = lastFinish, lastNative
+			c.OnUsage(u)
 		} else if meta.reported() {
 			u := Usage{LatencyMS: time.Since(callStart).Milliseconds()}
 			c.stampFor(meta, &u, nil, streamModel, batch)
