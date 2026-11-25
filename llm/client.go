@@ -67,9 +67,16 @@ type Message struct {
 // given. The Claude Messages API path refuses audio, video and any file that is
 // not a PDF or text with an error wrapping ErrUnsupportedContent, before
 // anything is sent. Other servers answer an unsupported part with their own 400.
-// No kind is ever stripped on the way: a model that answers about media it never
-// saw is worse than a refusal, and the fallback (transcribe, describe, caption)
-// belongs to the host.
+// In a user message no kind is ever stripped on the way: a model that answers
+// about media it never saw is worse than a refusal, and the fallback
+// (transcribe, describe, caption) belongs to the host.
+//
+// A TOOL message is the one exception (toolmedia.go). Media there moves to a
+// user message after the run of tool messages where the endpoint takes it only
+// there, and is omitted where the endpoint takes it nowhere or the capability
+// record says the model does not. An omitted part is replaced by a label naming
+// it as not sent, so the model knows it did not see it — the rule's concern —
+// and one tool's output does not fail the whole request.
 type ContentPart struct {
 	Type       string      `json:"type"`
 	Text       string      `json:"text,omitempty"`
@@ -1848,9 +1855,17 @@ func (c *Client) applySamplingWith(body map[string]any, opts *ChatOpts, caps Cap
 // the caller reports those when it sends, so a body built only to compare
 // against another reports nothing.
 func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolDef, opts *ChatOpts, stream bool) (map[string]any, []Translation) {
+	// A raw probe resolves the level against the static table only: the probe
+	// is how the record gets made, and must not be shaped by it.
+	raw := isRawProbe(ctx)
+	caps := Capabilities{}
+	if !raw {
+		caps = c.Capabilities()
+	}
 	body := map[string]any{
-		"model":    c.wireModel(ctx),
-		"messages": messages,
+		"model": c.wireModel(ctx),
+		// Tool-message media goes where this endpoint takes it (toolmedia.go).
+		"messages": c.wireMessageList(messages, caps),
 		"stream":   stream,
 	}
 	if stream {
@@ -1889,13 +1904,6 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 	}
 	if opts != nil && opts.ResponseFormat != nil {
 		body["response_format"] = opts.ResponseFormat
-	}
-	// A raw probe resolves the level against the static table only: the probe
-	// is how the record gets made, and must not be shaped by it.
-	raw := isRawProbe(ctx)
-	caps := Capabilities{}
-	if !raw {
-		caps = c.Capabilities()
 	}
 	c.applySamplingWith(body, opts, caps)
 	if raw {
