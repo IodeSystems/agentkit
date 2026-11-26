@@ -80,7 +80,7 @@ const (
 // never set. An empty record changes nothing: a host with no record sends
 // exactly the bytes it sent before this file existed.
 func (c *Client) translate(body map[string]any, opts *ChatOpts) []Translation {
-	return c.translateWith(body, opts, c.Capabilities())
+	return c.translateWith(body, opts, c.capsFor(pinnedFromBody(body)))
 }
 
 // translateWith is translate against a record the caller already took, so one
@@ -219,9 +219,10 @@ func (c *Client) reportTranslations(trs []Translation) {
 // Not learn itself because a comma list is a read-modify-write: two requests
 // finishing together would each read the old list and the second write would
 // drop the first one's value.
-func (c *Client) update(key string, src Source, evidence string, next func(old string) (string, bool)) bool {
+func (c *Client) update(provider, key string, src Source, evidence string, next func(old string) (string, bool)) bool {
 	c.caps.mu.Lock()
-	old, had := c.caps.facts[key]
+	facts := c.caps.factsOf(provider)
+	old, had := facts[key]
 	if had && !replaces(src, old.Source) {
 		c.caps.mu.Unlock()
 		return false
@@ -232,17 +233,14 @@ func (c *Client) update(key string, src Source, evidence string, next func(old s
 		return false
 	}
 	f := Fact{Value: val, Source: src, Evidence: evidence, At: time.Now()}
-	if c.caps.facts == nil {
-		c.caps.facts = map[string]Fact{}
-	}
-	c.caps.facts[key] = f
+	facts[key] = f
 	changed := !had || old.Value != val || old.Source != src
 	c.caps.mu.Unlock()
 
 	if !changed || c.OnLearn == nil {
 		return changed
 	}
-	l := Learned{Endpoint: normalizeEndpoint(c.baseURL), Model: c.model, Key: key, Fact: f}
+	l := Learned{Endpoint: normalizeEndpoint(c.baseURL), Model: c.model, Provider: provider, Key: key, Fact: f}
 	if had {
 		p := old
 		l.Previous = &p
@@ -298,13 +296,14 @@ type factUpdate struct {
 	Evidence string
 }
 
-func (c *Client) apply(u factUpdate, src Source) bool {
+// apply writes u into provider's record (providerOf the response that taught it).
+func (c *Client) apply(provider string, u factUpdate, src Source) bool {
 	if !u.List {
-		return c.update(u.Key, src, u.Evidence, func(string) (string, bool) { return u.Value, true })
+		return c.update(provider, u.Key, src, u.Evidence, func(string) (string, bool) { return u.Value, true })
 	}
-	changed := c.update(u.Key, src, u.Evidence, func(old string) (string, bool) { return editList(old, u.Value, "") })
+	changed := c.update(provider, u.Key, src, u.Evidence, func(old string) (string, bool) { return editList(old, u.Value, "") })
 	if u.Opposite != "" {
-		if c.update(u.Opposite, src, u.Evidence, func(old string) (string, bool) { return editList(old, "", u.Value) }) {
+		if c.update(provider, u.Opposite, src, u.Evidence, func(old string) (string, bool) { return editList(old, "", u.Value) }) {
 			changed = true
 		}
 	}
@@ -318,6 +317,7 @@ func (c *Client) apply(u factUpdate, src Source) bool {
 type sentRequest struct {
 	effort      string // the effort on the wire (sentEffort); "" when none was sent
 	effortField string // the field it went in: reasoning_effort or reasoning.effort
+	provider    string // providerOf the response, set once it is read; the record facts go to
 	forced      string // tool_choice when it forces a call: "required" or "function:<name>"
 	raw         bool   // a probe request: observe nothing (see withRawProbe)
 }
@@ -386,14 +386,11 @@ func sentFrom(body map[string]any) sentRequest {
 // Usage.ReportedReasoningTokens can show it. Needed first: the reasoning-token
 // count at "none" against the count at the endpoint's default, on the same
 // prompt, per model — a threshold set from that measurement, not guessed.
-func (c *Client) observeAccepted(s sentRequest) {
-	if s.raw {
-		return
+func (c *Client) observeAccepted(s sentRequest) bool {
+	if s.raw || s.effort == "" {
+		return false
 	}
-	if s.effort == "" {
-		return
-	}
-	c.apply(factUpdate{
+	return c.apply(s.provider, factUpdate{
 		Key: CapReasoningEffortsAccepted, Value: s.effort, List: true, Opposite: CapReasoningEffortsRefused,
 		Evidence: "sent " + s.effortField + "=" + s.effort + " → 200",
 	}, SourceObserved)
@@ -418,38 +415,46 @@ func (c *Client) observeToolChoice(s sentRequest, finish string, calls int) {
 	if calls == 0 {
 		v, ev = "false", fmt.Sprintf("sent tool_choice=%s → finish_reason=%s with no tool call", s.forced, finish)
 	}
-	c.apply(factUpdate{Key: CapToolsChoiceForced, Value: v, Evidence: ev}, SourceObserved)
+	c.apply(s.provider, factUpdate{Key: CapToolsChoiceForced, Value: v, Evidence: ev}, SourceObserved)
 }
 
 // streamObservation is what one stream showed, collected by readStream.
 type streamObservation struct {
-	usage          bool   // a usage chunk arrived
-	done           bool   // the stream ended with [DONE]
-	failed         bool   // an error event, or a loop cut (ours or a proxy's)
-	reasoningField string // the delta field that first carried reasoning
-	finish         string // finish_reason, "" when none arrived
-	toolCalls      int    // calls flushed
+	// served and provider make the route (joinProvider): the X-Corrallm-Served
+	// header, replaced by a late ": x-corrallm-served:" comment; the first
+	// `provider` (or error.metadata.provider_name) a chunk carried.
+	served, provider string
+	usage            bool   // a usage chunk arrived
+	done             bool   // the stream ended with [DONE]
+	failed           bool   // an error event, or a loop cut (ours or a proxy's)
+	reasoningField   string // the delta field that first carried reasoning
+	finish           string // finish_reason, "" when none arrived
+	toolCalls        int    // calls flushed
 }
 
+// observeStream learns what a stream showed, the effort it was given included:
+// at the end, because the route that served it is known only from its chunks.
 func (c *Client) observeStream(s sentRequest, o streamObservation) {
 	if s.raw {
 		return
 	}
+	s.provider = joinProvider(o.served, o.provider)
+	c.observeAccepted(s)
 	switch {
 	case o.usage:
 		// A usage chunk on an errored stream is still a usage chunk.
-		c.apply(factUpdate{Key: CapStreamUsage, Value: "true",
+		c.apply(s.provider, factUpdate{Key: CapStreamUsage, Value: "true",
 			Evidence: "sent stream_options.include_usage → usage chunk"}, SourceObserved)
 	case o.done && !o.failed:
 		// Every stream asks for include_usage, and the spec puts the usage
 		// chunk just before [DONE]. A stream that reached [DONE] without one
 		// is the clear signal; one that ended any other way is not, since it
 		// may simply have stopped before the usage chunk.
-		c.apply(factUpdate{Key: CapStreamUsage, Value: "false",
+		c.apply(s.provider, factUpdate{Key: CapStreamUsage, Value: "false",
 			Evidence: "sent stream_options.include_usage → [DONE] with no usage chunk"}, SourceObserved)
 	}
 	if o.reasoningField != "" {
-		c.apply(factUpdate{Key: CapStreamReasoningField, Value: o.reasoningField,
+		c.apply(s.provider, factUpdate{Key: CapStreamReasoningField, Value: o.reasoningField,
 			Evidence: "streamed reasoning in delta." + o.reasoningField}, SourceObserved)
 	}
 	if !o.failed {
@@ -460,30 +465,35 @@ func (c *Client) observeStream(s sentRequest, o streamObservation) {
 // learnFromChatError records the window an overflow named. Chat paths only: an
 // embedding model's window is not the chat model's. Both the 4xx (statusError)
 // and the 5xx (postWithRetry) overflow arrive here as *InputTooLargeError.
-func (c *Client) learnFromChatError(err error) bool {
+// served is the X-Corrallm-Served header when the caller still has it; the
+// body's provider is read here.
+func (c *Client) learnFromChatError(err error, served string) bool {
 	var big *InputTooLargeError
 	if !errors.As(err, &big) || big.ContextTokens <= 0 {
 		return false
 	}
+	provider := joinProvider(served, bodyProvider([]byte(big.Body)))
 	ev := fmt.Sprintf("sent a prompt → %d %q", big.Status, clip(firstLineOfBody(big.Body), 120))
 	if big.PromptTokens > 0 {
 		ev = fmt.Sprintf("sent %d prompt tokens → %d %q", big.PromptTokens, big.Status, clip(firstLineOfBody(big.Body), 120))
 	}
-	return c.apply(factUpdate{Key: CapLimitsContext, Value: strconv.Itoa(big.ContextTokens), Evidence: ev}, SourceObserved)
+	return c.apply(provider, factUpdate{Key: CapLimitsContext, Value: strconv.Itoa(big.ContextTokens), Evidence: ev}, SourceObserved)
 }
 
 // chatRefusal turns a non-200 chat response into the same error statusError
-// returns, and learns from its body on the way. taught reports whether any
-// fact was added or changed.
+// returns, and learns from its body on the way, into the record of the route
+// that refused (providerOf). taught reports whether any fact was added or
+// changed.
 func (c *Client) chatRefusal(resp *http.Response, sent map[string]any) (taught bool, err error) {
 	status, msg := resp.StatusCode, readErrorBody(resp)
 	err = statusErrorBody(status, msg)
+	provider := providerOf(resp.Header, []byte(msg))
 	for _, u := range refusalFacts(status, msg, sent) {
-		if c.apply(u, SourceRefused) {
+		if c.apply(provider, u, SourceRefused) {
 			taught = true
 		}
 	}
-	if c.learnFromChatError(err) {
+	if c.learnFromChatError(err, resp.Header.Get(HeaderServed)) {
 		taught = true
 	}
 	return taught, err

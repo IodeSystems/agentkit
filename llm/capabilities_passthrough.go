@@ -44,36 +44,38 @@ func (c *Client) TranslateBody(body map[string]any) []Translation {
 // requests. A 429 or 5xx teaches nothing. LearnResponse never sends a request:
 // a resend is the proxy's decision (see Client.NoResendOnRefusal for the
 // Client's own).
+//
+// The facts go to the record of the route the body names (bodyProvider:
+// OpenRouter's `provider`, or error.metadata.provider_name); a proxy that has
+// the backend's headers uses LearnResponseFrom.
 func (c *Client) LearnResponse(sent map[string]any, status int, respBody []byte) bool {
+	return c.LearnResponseFrom(sent, status, nil, respBody)
+}
+
+// LearnResponseFrom is LearnResponse with the backend's response headers, so an
+// X-Corrallm-Served header names the route too (providerOf).
+func (c *Client) LearnResponseFrom(sent map[string]any, status int, h http.Header, respBody []byte) bool {
+	provider := providerOf(h, respBody)
 	if status >= 200 && status < 300 {
-		before := c.Capabilities()
-		c.observeAccepted(sentFrom(sent))
-		return !sameFacts(before.Facts, c.Capabilities().Facts)
+		s := sentFrom(sent)
+		s.provider = provider
+		return c.observeAccepted(s)
 	}
 	msg := strings.TrimSpace(string(respBody))
 	taught := false
 	for _, u := range refusalFacts(status, msg, sent) {
-		if c.apply(u, SourceRefused) {
+		if c.apply(provider, u, SourceRefused) {
 			taught = true
 		}
 	}
 	if (status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge) && bodyIsInputTooLarge(msg) {
-		if c.learnFromChatError(newInputTooLarge(status, msg)) {
+		served := ""
+		if h != nil {
+			served = h.Get(HeaderServed)
+		}
+		if c.learnFromChatError(newInputTooLarge(status, msg), served) {
 			taught = true
 		}
 	}
 	return taught
-}
-
-func sameFacts(a, b map[string]Fact) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, f := range a {
-		g, ok := b[k]
-		if !ok || g.Value != f.Value || g.Source != f.Source {
-			return false
-		}
-	}
-	return true
 }

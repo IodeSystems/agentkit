@@ -1791,6 +1791,13 @@ type ChatOpts struct {
 	// is sent exactly as before. The level still decides on/off.
 	Effort Effort
 
+	// Provider is OpenRouter's provider routing (`provider` on the body), sent
+	// as given; nil omits it. It also picks the capability record the request
+	// is shaped by: one route with no fallback (Only, or Order with
+	// AllowFallbacks false) uses that route's record; otherwise every route's
+	// record applies, narrowest wins (capabilities_provider.go).
+	Provider *ProviderRouting
+
 	// Batch routes the completion to the provider's batch endpoint at the batch
 	// token price, instead of the real-time Chat endpoint. With Batch unset the
 	// request is byte-identical to today — same URL, same body, same Usage — so
@@ -1860,7 +1867,11 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 	raw := isRawProbe(ctx)
 	caps := Capabilities{}
 	if !raw {
-		caps = c.Capabilities()
+		var pin []string
+		if opts != nil {
+			pin = opts.Provider.pinned()
+		}
+		caps = c.capsFor(pin)
 	}
 	body := map[string]any{
 		"model": c.wireModel(ctx),
@@ -1879,6 +1890,9 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 	}
 	if opts != nil && opts.PromptCacheKey != "" && !c.usesMessagesAPI() {
 		body["prompt_cache_key"] = opts.PromptCacheKey
+	}
+	if opts != nil && opts.Provider != nil && !c.usesMessagesAPI() {
+		body["provider"] = opts.Provider
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
@@ -2079,14 +2093,15 @@ func (c *Client) sendChat(ctx context.Context, messages []Message, tools []ToolD
 		raw := isRawProbe(ctx)
 		if err != nil {
 			if !raw {
-				c.learnFromChatError(err)
+				c.learnFromChatError(err, "")
 			}
 			return nil, sentRequest{}, callStart, err
 		}
 		if resp.StatusCode == http.StatusOK {
+			// The accepted effort is learned by the reader (ChatWithOpts,
+			// observeStream): the route that served it is in the body.
 			sent := sentFrom(body)
 			sent.raw = raw
-			c.observeAccepted(sent)
 			return resp, sent, callStart, nil
 		}
 		if raw {
@@ -2261,6 +2276,10 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		Model string `json:"model"`
 		Usage *Usage `json:"usage"`
 	}
+	// The route that served the reply, then the effort it took: an error after
+	// this point is about the body, not the request.
+	sent.provider = providerOf(resp.Header, raw)
+	c.observeAccepted(sent)
 	if c.usesMessagesAPI() {
 		if raw, err = shim.Response(raw, shim.StreamOptions{Prices: c.ClaudePrices}); err != nil {
 			return nil, fmt.Errorf("llm: messages reply: %w", err)
@@ -2377,7 +2396,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// obs is what this stream showed about the endpoint. Learned in a defer
 	// registered after the others so it runs BEFORE close(ch): a consumer that
 	// sees the channel close also sees the facts.
-	var obs streamObservation
+	obs := streamObservation{served: meta.served}
 	defer func() {
 		if retry == nil {
 			c.observeStream(sent, obs)
@@ -2498,6 +2517,11 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		// The SSE spec makes the space after the colon optional.
 		data, isData := strings.CutPrefix(line, "data:")
 		if !isData {
+			// corrallm's late header: the lane that served, known only after
+			// the response headers went out.
+			if s, ok := lateServed(line); ok {
+				obs.served = s
+			}
 			continue
 		}
 		data = strings.TrimPrefix(data, " ")
@@ -2549,11 +2573,19 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			// member of it; folded into Usage where Usage is stamped below.
 			Timings *Timings        `json:"timings"`
 			Error   json.RawMessage `json:"error"`
+			// Provider is OpenRouter's upstream that served the chunk.
+			Provider string `json:"provider"`
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			continue
 		}
+		if obs.provider == "" {
+			obs.provider = strings.TrimSpace(event.Provider)
+		}
 		if se := parseStreamError(event.Error); se != nil {
+			if obs.provider == "" {
+				obs.provider = metadataProvider(se.Metadata)
+			}
 			// Nothing sent yet and the gate agrees it is transient: let the
 			// caller resend. See pumpStream.
 			if gate != nil && !forwarded && gate(se) {

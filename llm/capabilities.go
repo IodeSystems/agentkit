@@ -83,26 +83,50 @@ type Fact struct {
 	At       time.Time // when it was learned
 }
 
-// Capabilities is what one (endpoint, model) is known to do.
+// Capabilities is what one (endpoint, model, provider) is known to do.
+//
+// Provider is the route that served the responses the facts came from
+// (providerOf): corrallm's X-Corrallm-Served model, OpenRouter's upstream
+// provider, both joined "served/provider", or "" for a direct endpoint. A
+// gateway routes one model to several upstreams that differ (one takes effort
+// max, another refuses it), so a fact is kept with the route that showed it.
+// "" also holds what is true of the endpoint as a whole: declared (/models)
+// and probed facts, and a refusal that named no route.
 type Capabilities struct {
 	Endpoint string          // normalized base URL: scheme+host+path, no trailing slash
 	Model    string          // the model name the Client was given, not a resolved alias
+	Provider string          // the route; "" = direct endpoint, or endpoint-wide
 	Facts    map[string]Fact // keyed by the Cap* constants
 }
 
-// Learned is what OnLearn receives: one fact that was added or changed.
+// Learned is what OnLearn receives: one fact that was added or changed, in the
+// record of Provider.
 type Learned struct {
-	Endpoint, Model, Key string
-	Fact                 Fact
-	Previous             *Fact // nil when the key had no fact before
+	Endpoint, Model, Provider, Key string
+	Fact                           Fact
+	Previous                       *Fact // nil when the key had no fact before
 }
 
-// capRecord is the Client's in-memory record. Its own mutex, not a Client-wide
-// one: learning happens on the request goroutine while the host snapshots from
-// another, and neither may wait on the HTTP path.
+// capRecord is the Client's in-memory record: one fact map per provider, ""
+// included. Its own mutex, not a Client-wide one: learning happens on the
+// request goroutine while the host snapshots from another, and neither may wait
+// on the HTTP path.
 type capRecord struct {
 	mu    sync.Mutex
-	facts map[string]Fact
+	facts map[string]map[string]Fact // provider → key → fact
+}
+
+// factsOf is provider's map, created on first write. Caller holds mu.
+func (r *capRecord) factsOf(provider string) map[string]Fact {
+	if r.facts == nil {
+		r.facts = map[string]map[string]Fact{}
+	}
+	m := r.facts[provider]
+	if m == nil {
+		m = map[string]Fact{}
+		r.facts[provider] = m
+	}
+	return m
 }
 
 // normalizeEndpoint reduces a base URL to scheme+host+path with no trailing
@@ -126,25 +150,62 @@ func copyFacts(in map[string]Fact) map[string]Fact {
 	return out
 }
 
-// SetCapabilities seeds the record from the host's store. Call it before first
-// use. The seeded facts keep the sources they were stored with, so a stored
-// "refused" still beats a fresh "declared" after a restart. It replaces the
-// whole record; c.Endpoint and c.Model of the argument are ignored, because the
-// record always describes this Client's own endpoint and model. OnLearn is not
-// called: the host already holds what it just passed in.
+// SetCapabilities seeds the record of in.Provider from the host's store. Call
+// it before first use, once per stored provider record. The seeded facts keep
+// the sources they were stored with, so a stored "refused" still beats a fresh
+// "declared" after a restart. It replaces that provider's record and leaves the
+// others; in.Endpoint and in.Model are ignored, because the record always
+// describes this Client's own endpoint and model. OnLearn is not called: the
+// host already holds what it just passed in.
 func (c *Client) SetCapabilities(in Capabilities) {
 	c.caps.mu.Lock()
 	defer c.caps.mu.Unlock()
-	c.caps.facts = copyFacts(in.Facts)
+	if c.caps.facts == nil {
+		c.caps.facts = map[string]map[string]Fact{}
+	}
+	c.caps.facts[in.Provider] = copyFacts(in.Facts)
 }
 
-// Capabilities returns a snapshot copy of the record, for display and for
-// storing. Changing the result does not change the Client.
+// Capabilities is the record a request with no provider pin uses: every
+// provider's record merged, narrowest wins (mergeNarrowest), so a refusal or a
+// limit learned on ANY route of this endpoint+model applies. Provider is "".
+// A direct endpoint has only the "" record, and gets it unchanged. A snapshot:
+// changing the result does not change the Client.
+//
+// To STORE the record, keep what OnLearn reports (it names the provider), or
+// snapshot ProviderCapabilities: a merged view seeded back as "" would pin every
+// route's refusals onto the endpoint.
 func (c *Client) Capabilities() Capabilities {
+	return c.capsFor(nil)
+}
+
+// ProviderCapabilities is each provider's record as learned, "" first then by
+// provider: what a host stores, and seeds back one by one with SetCapabilities.
+func (c *Client) ProviderCapabilities() []Capabilities {
 	c.caps.mu.Lock()
-	facts := copyFacts(c.caps.facts)
+	out := make([]Capabilities, 0, len(c.caps.facts))
+	for p, facts := range c.caps.facts {
+		out = append(out, Capabilities{Endpoint: normalizeEndpoint(c.baseURL), Model: c.model, Provider: p, Facts: copyFacts(facts)})
+	}
 	c.caps.mu.Unlock()
-	return Capabilities{Endpoint: normalizeEndpoint(c.baseURL), Model: c.model, Facts: facts}
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
+}
+
+// capsFor is the record a request uses. pin nil: every provider, merged. pin
+// set (ProviderRouting.pinned): the "" record plus the records of the pinned
+// providers only, merged; a route the request cannot take does not narrow it.
+func (c *Client) capsFor(pin []string) Capabilities {
+	c.caps.mu.Lock()
+	var recs []map[string]Fact
+	for p, facts := range c.caps.facts {
+		if pin == nil || p == "" || providerMatches(p, pin) {
+			recs = append(recs, facts)
+		}
+	}
+	merged := mergeNarrowest(recs)
+	c.caps.mu.Unlock()
+	return Capabilities{Endpoint: normalizeEndpoint(c.baseURL), Model: c.model, Facts: merged}
 }
 
 // learn applies one fact under the precedence rule and reports it.
@@ -159,6 +220,9 @@ func (c *Client) Capabilities() Capabilities {
 // changed. Same value and source with newer evidence is stored quietly, so a
 // snapshot carries the latest At without the host hearing about every request.
 // A fact with source host is not learned: only SetCapabilities pins.
+//
+// learn writes the endpoint-wide ("") record: probes and /models describe the
+// endpoint, not a route. Traffic learns per route through apply.
 func (c *Client) learn(key string, f Fact) {
 	if f.Source == SourceHost || f.Source == "" {
 		return
@@ -167,15 +231,13 @@ func (c *Client) learn(key string, f Fact) {
 		f.At = time.Now()
 	}
 	c.caps.mu.Lock()
-	old, had := c.caps.facts[key]
+	facts := c.caps.factsOf("")
+	old, had := facts[key]
 	if had && !replaces(f.Source, old.Source) {
 		c.caps.mu.Unlock()
 		return
 	}
-	if c.caps.facts == nil {
-		c.caps.facts = map[string]Fact{}
-	}
-	c.caps.facts[key] = f
+	facts[key] = f
 	changed := !had || old.Value != f.Value || old.Source != f.Source
 	c.caps.mu.Unlock()
 
