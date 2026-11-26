@@ -88,10 +88,11 @@ There is a trap: a fact learned from one bad response would otherwise persist fo
 ## API
 
 ```go
-func (c *Client) SetCapabilities(Capabilities)       // seed from the host's store; call before first use
-func (c *Client) Capabilities() Capabilities         // snapshot (copy), for /model and for storing
+func (c *Client) SetCapabilities(Capabilities)       // seed in.Provider's record from the host's store; call before first use
+func (c *Client) Capabilities() Capabilities         // the unpinned view: every provider merged, narrowest wins (display)
+func (c *Client) ProviderCapabilities() []Capabilities // each provider's record as learned (storing)
 OnLearn func(Learned)                                // Client field, like OnRetry/OnUsage
-type Learned struct { Endpoint, Model, Key string; Fact Fact; Previous *Fact }
+type Learned struct { Endpoint, Model, Provider, Key string; Fact Fact; Previous *Fact }
 func (c *Client) LoadDeclared(ctx) error             // one GET {base}/models, opt-in
 func ProbeCapabilities(ctx, c) (Capabilities, error) // explicit; dun's /model probe
 ```
@@ -108,6 +109,16 @@ func ProbeCapabilities(ctx, c) (Capabilities, error) // explicit; dun's /model p
   - the window from `DiscoverContext` where the endpoint has a boundary
 
   It reports each result as a `probed` fact through `OnLearn`, and returns the whole record. It is the only path that spends requests for learning.
+
+## Provider records (Carl, 2026-11-26)
+
+The record is keyed endpoint+model+PROVIDER. A gateway serves one model id from several routes that differ (OpenRouter's upstreams, corrallm's failover lanes). Code: `llm/capabilities_provider.go`.
+
+- **Route** (`providerOf`): `X-Corrallm-Served` header (on SSE, a late `: x-corrallm-served: …` comment replaces it), then OpenRouter's body top-level `provider` (reply body, stream chunks), else `error.metadata.provider_name`. Joined `served/provider` when both; `""` for a direct endpoint.
+- **Shape**: one Client still holds one endpoint+model. Inside, `capRecord.facts` is `provider → key → Fact`. `""` is the endpoint-wide record: declared (/models), probed, and any fact from a response that named no route. Traffic facts go to the route's record (`apply(provider, …)`); a stream's accepted effort is learned at the stream's end, a reply's after its body is read, because the route is in the body.
+- **Which record a request uses** (`capsFor`): `ChatOpts.Provider` (`ProviderRouting{Order, Only, AllowFallbacks}`, sent as OpenRouter's `provider` object) pins when it names routes with no fallback (`Only`, or `Order` + `allow_fallbacks:false`): `""` + those routes' records. Otherwise every record. Several records merge narrowest (`mergeNarrowest`): a host fact wins; refused lists union, accepted = union minus refused; `limits.*` smallest, `budget_min` largest; `sampling.*` refused if any; `thinking_only` true if any; `arg_fidelity` lossy if any; other booleans false if any; the rest newest. Route names match without case, on the key's last segment (UNVERIFIED that OpenRouter's request slugs equal its response names lowercased).
+- **Passthrough**: `TranslateBody` reads the pin from the body's own `provider`; `LearnResponseFrom(sent, status, headers, body)` takes the backend's headers.
+- **Silent downgrade (B)**: not implemented. OpenRouter maps an effort a model lacks to the nearest level and answers 200 (docs, reasoning-tokens page); no response field is documented to echo the applied effort (body, usage, `reasoning_details` items: `type/text/signature/id/format/index`). A low `reasoning_tokens` count is not evidence. Candidates: OpenRouter `/api/v1/models` `reasoning.supported_efforts` (declared, not response), OpenAI Responses API `reasoning.effort` echo (we speak Chat Completions). Needed first: an `AGENTKIT_WIRE_DUMP` of one OpenRouter reply at an effort the model lacks, showing an explicit field.
 
 ## Translation (what the record changes on the wire)
 

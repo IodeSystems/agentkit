@@ -133,6 +133,19 @@ plan/     living plan. plan.md = current state + active work + decisions;
   OpenRouter's `reasoning.effort`) → `reasoning.efforts.refused` += max → one
   resend, clamped to xhigh (then high); a 200 → accepted. The probe ladder
   (`effortLadder`) includes max. Do not add a dialect row for a per-model gap.
+- **The capability record is keyed endpoint+model+PROVIDER** (capabilities_provider.go).
+  Route = `providerOf`: `X-Corrallm-Served` (late SSE `: x-corrallm-served:` comment
+  wins) + OpenRouter body `provider` (else `error.metadata.provider_name`), joined
+  `served/provider`; "" = direct endpoint and the endpoint-wide record (declared,
+  probed). `capRecord.facts` is provider → key → Fact; traffic writes the route's
+  record (`apply(provider, …)`), so an accepted effort is learned AFTER the body
+  (ChatWithOpts) or at stream end (observeStream), not at the 200. A request uses
+  `capsFor(pin)`: `ChatOpts.Provider` pinning routes with no fallback → "" + those;
+  else every record, merged narrowest (`mergeNarrowest`). `Capabilities()` is that
+  unpinned view; hosts STORE via `OnLearn` (`Learned.Provider`) or
+  `ProviderCapabilities()` and seed each with `SetCapabilities` (replaces only
+  `in.Provider`). Silent effort downgrades are NOT learned: no response field
+  states the applied effort (plan/capabilities-design.md).
 - **Mid-turn user words render AFTER the round's tool results.** A host saves a
   pending `KindUser` while a tool runs; `ClaimPending` picks it up next
   iteration. It sorts before the result (`CreatedAt`), so `groupMessages` holds
