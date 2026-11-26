@@ -50,10 +50,10 @@ func TestEffortForStaticTable(t *testing.T) {
 	}
 	rows := []row{
 		{DialectOpenAI, false, "m", EffortNone, EffortNone, true, ""},
-		{DialectOpenAI, false, "m", EffortMax, EffortXHigh, true, "no max"},
+		{DialectOpenAI, false, "m", EffortMax, EffortMax, true, ""},
 		{DialectOpenRouter, false, "m", EffortNone, EffortNone, true, ""},
 		{DialectOpenRouter, false, "m", EffortLow, EffortLow, true, ""},
-		{DialectOpenRouter, false, "m", EffortMax, EffortXHigh, true, "no max"},
+		{DialectOpenRouter, false, "m", EffortMax, EffortMax, true, ""},
 		{DialectLlamaCpp, false, "m", EffortNone, EffortNone, true, ""},
 		{DialectLlamaCpp, false, "m", EffortMinimal, EffortMinimal, false, ""},
 		{DialectLlamaCpp, false, "m", EffortMedium, EffortMedium, false, ""},
@@ -114,14 +114,14 @@ func TestEffortForClampsRefusedLevelLowerFirst(t *testing.T) {
 	}
 }
 
-// TestEffortForClampOnlyLandsOnLevelsTheDialectExpresses: llama.cpp has no
-// xhigh, so a refused high must not clamp UP to a level that maps back to high.
-// The same holds on openai, which has no max: with everything below max refused,
-// max is not a landing place for xhigh's clamp.
+// TestEffortForClampOnlyLandsOnLevelsTheDialectExpresses: the Messages API has
+// no minimal (it maps to low), so a refused low must not clamp DOWN to a level
+// that maps back to low. openai expresses max, so with everything below max
+// refused, max IS a landing place for xhigh's clamp.
 func TestEffortForClampOnlyLandsOnLevelsTheDialectExpresses(t *testing.T) {
-	ch := EffortFor(DialectOpenAI, false, "m", effortCaps(CapReasoningEffortsRefused, "minimal,low,medium,high,xhigh"), EffortMax)
-	if ch.Effective != EffortUnset {
-		t.Errorf("%+v, want unset", ch)
+	ch := EffortFor(DialectOpenAI, false, "m", effortCaps(CapReasoningEffortsRefused, "minimal,low,medium,high,xhigh"), EffortXHigh)
+	if ch.Effective != EffortMax {
+		t.Errorf("%+v, want max", ch)
 	}
 	ch = EffortFor(DialectAnthropic, true, "claude-opus-4-6", effortCaps(CapReasoningEffortsRefused, "low"), EffortNone)
 	if ch.Effective != EffortMedium {
@@ -169,17 +169,17 @@ func TestEffortSupportListsEveryLevelWithReasonWhenUnavailable(t *testing.T) {
 		t.Errorf("none row: %+v", list[0])
 	}
 	c := openaiClient("http://x/v1")
-	if c.Effective(EffortMax).Effective != EffortXHigh || len(c.EffortSupport()) != len(Efforts) {
+	if c.Effective(EffortMax).Effective != EffortMax || len(c.EffortSupport()) != len(Efforts) {
 		t.Error("client wrappers disagree with the pure function")
 	}
 }
 
 // TestEffortTranslationIsReportedPerRequestWhenLevelChanges: a static change
-// (max to xhigh on openai) is reported too; an exact level is not.
+// (max to high on llama.cpp) is reported too; an exact level is not.
 func TestEffortTranslationIsReportedPerRequestWhenLevelChanges(t *testing.T) {
-	c := openaiClient("http://x/v1")
+	c := llamaClient()
 	_, trs := c.chatBody(t.Context(), nil, nil, &ChatOpts{Effort: EffortMax}, false)
-	if len(trs) != 1 || trs[0].Key != "effort" || trs[0].Sent != "xhigh" || trs[0].Wanted != "max" || trs[0].Reason == "" {
+	if len(trs) != 1 || trs[0].Key != "effort" || trs[0].Sent != "high" || trs[0].Wanted != "max" || trs[0].Reason == "" {
 		t.Fatalf("%+v", trs)
 	}
 	if _, trs := c.chatBody(t.Context(), nil, nil, &ChatOpts{Effort: EffortHigh}, false); len(trs) != 0 {

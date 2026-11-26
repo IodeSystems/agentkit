@@ -47,9 +47,11 @@ type Translation struct {
 	Reason string
 }
 
-// effortLadder is the OpenAI Chat Completions reasoning_effort values, lowest
-// first. "Nearest above" and "lowest not refused" are positions on it.
-var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+// effortLadder is every effort level, lowest first: the OpenAI Chat Completions
+// reasoning_effort values plus max, which some endpoints take and others
+// refuse (the record learns which). "Nearest above" and "lowest not refused"
+// are positions on it, and ProbeCapabilities sends each rung.
+var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 func effortRank(e string) int {
 	for i, l := range effortLadder {
@@ -314,9 +316,10 @@ func (c *Client) apply(u factUpdate, src Source) bool {
 // sentRequest is what a chat request asked for that the response can confirm
 // or deny. Read off the body as sent (after translation), not off opts.
 type sentRequest struct {
-	effort string // reasoning_effort on the wire; "" when none was sent
-	forced string // tool_choice when it forces a call: "required" or "function:<name>"
-	raw    bool   // a probe request: observe nothing (see withRawProbe)
+	effort      string // the effort on the wire (sentEffort); "" when none was sent
+	effortField string // the field it went in: reasoning_effort or reasoning.effort
+	forced      string // tool_choice when it forces a call: "required" or "function:<name>"
+	raw         bool   // a probe request: observe nothing (see withRawProbe)
 }
 
 // rawProbeKey marks a request made by ProbeCapabilities. A probe must see the
@@ -336,9 +339,25 @@ func isRawProbe(ctx context.Context) bool {
 	return v
 }
 
+// sentEffort is the effort level a chat body carries, and the field it is in:
+// reasoning_effort (openai, the Messages API, a raw body) or OpenRouter's
+// reasoning.effort. ("", "") when neither is set. Both are the same fact about
+// the endpoint: which values of the effort field it takes.
+func sentEffort(body map[string]any) (effort, field string) {
+	if e, ok := body["reasoning_effort"].(string); ok {
+		return e, "reasoning_effort"
+	}
+	if r, ok := body["reasoning"].(map[string]any); ok {
+		if e, ok := r["effort"].(string); ok {
+			return e, "reasoning.effort"
+		}
+	}
+	return "", ""
+}
+
 func sentFrom(body map[string]any) sentRequest {
 	var s sentRequest
-	s.effort, _ = body["reasoning_effort"].(string)
+	s.effort, s.effortField = sentEffort(body)
 	if _, ok := body["tools"]; !ok {
 		return s
 	}
@@ -376,7 +395,7 @@ func (c *Client) observeAccepted(s sentRequest) {
 	}
 	c.apply(factUpdate{
 		Key: CapReasoningEffortsAccepted, Value: s.effort, List: true, Opposite: CapReasoningEffortsRefused,
-		Evidence: "sent reasoning_effort=" + s.effort + " → 200",
+		Evidence: "sent " + s.effortField + "=" + s.effort + " → 200",
 	}, SourceObserved)
 }
 
@@ -474,9 +493,18 @@ func (c *Client) chatRefusal(resp *http.Response, sent map[string]any) (taught b
 
 // refusalCtx is what a pattern sees besides its match.
 type refusalCtx struct {
-	status int
-	sent   map[string]any
-	effort string // reasoning_effort as sent, "" when none was
+	status      int
+	sent        map[string]any
+	effort      string // the effort as sent (sentEffort), "" when none was
+	effortField string // reasoning_effort or reasoning.effort
+	text        string // the whole body, unescaped (for a pattern that needs a second anchor)
+}
+
+// namesEffortField: the refusal names an effort field. An upstream behind
+// OpenRouter names reasoning_effort when OpenRouter sent reasoning.effort, so
+// either name counts for either field.
+func namesEffortField(s string) bool {
+	return strings.Contains(s, "reasoning_effort") || strings.Contains(s, "reasoning.effort")
 }
 
 func (r refusalCtx) evidence(what, match string) string {
@@ -486,7 +514,7 @@ func (r refusalCtx) evidence(what, match string) string {
 func (r refusalCtx) effortRefused(match string) factUpdate {
 	return factUpdate{
 		Key: CapReasoningEffortsRefused, Value: r.effort, List: true, Opposite: CapReasoningEffortsAccepted,
-		Evidence: r.evidence("reasoning_effort="+r.effort, match),
+		Evidence: r.evidence(r.effortField+"="+r.effort, match),
 	}
 }
 
@@ -521,7 +549,18 @@ var refusalPatterns = []refusalPattern{
 	// OpenAI: "Unsupported value: 'reasoning_effort' does not support 'none'
 	// with this model. Supported values are: 'low', 'medium', and 'high'."
 	{regexp.MustCompile(`Unsupported value: '([\w.]+)' does not support '([^']*)'`), func(m []string, r refusalCtx) []factUpdate {
-		if m[1] == "reasoning_effort" && r.effort != "" && m[2] == r.effort {
+		if namesEffortField(m[1]) && r.effort != "" && m[2] == r.effort {
+			return []factUpdate{r.effortRefused(m[0])}
+		}
+		return nil
+	}},
+	// OpenAI: {"error":{"message":"Invalid value: 'max'. Supported values are:
+	// 'low', 'medium', and 'high'.","type":"invalid_request_error",
+	// "param":"reasoning_effort","code":"unsupported_value"}}. The message does
+	// not name the field, so two anchors: the value is the effort sent, and the
+	// body (its param) names an effort field.
+	{regexp.MustCompile(`Invalid value: '([^']*)'\.? Supported values are`), func(m []string, r refusalCtx) []factUpdate {
+		if r.effort != "" && m[1] == r.effort && namesEffortField(r.text) {
 			return []factUpdate{r.effortRefused(m[0])}
 		}
 		return nil
@@ -628,10 +667,11 @@ func refusalFacts(status int, body string, sent map[string]any) []factUpdate {
 		return nil
 	}
 	r := refusalCtx{status: status, sent: sent}
-	r.effort, _ = sent["reasoning_effort"].(string)
+	r.effort, r.effortField = sentEffort(sent)
 	// A message carried as a JSON string inside a JSON body has its quotes
 	// escaped; the patterns are written against the plain text.
 	text := strings.ReplaceAll(body, `\"`, `"`)
+	r.text = text
 
 	var out []factUpdate
 	seen := map[string]bool{}

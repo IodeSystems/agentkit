@@ -317,7 +317,7 @@ func TestEffortGoldenBodies(t *testing.T) {
 		{"openrouter medium", orr, EffortMedium, `{"reasoning":{"effort":"medium"}}`},
 		{"openrouter high", orr, EffortHigh, `{"reasoning":{"effort":"high"}}`},
 		{"openrouter xhigh", orr, EffortXHigh, `{"reasoning":{"effort":"xhigh"}}`},
-		{"openrouter max", orr, EffortMax, `{"reasoning":{"effort":"xhigh"}}`},
+		{"openrouter max", orr, EffortMax, `{"reasoning":{"effort":"max"}}`},
 
 		{"openai unset", oai, EffortUnset, `{}`},
 		{"openai none", oai, EffortNone, `{"reasoning_effort":"none"}`},
@@ -326,7 +326,7 @@ func TestEffortGoldenBodies(t *testing.T) {
 		{"openai medium", oai, EffortMedium, `{"reasoning_effort":"medium"}`},
 		{"openai high", oai, EffortHigh, `{"reasoning_effort":"high"}`},
 		{"openai xhigh", oai, EffortXHigh, `{"reasoning_effort":"xhigh"}`},
-		{"openai max", oai, EffortMax, `{"reasoning_effort":"xhigh"}`},
+		{"openai max", oai, EffortMax, `{"reasoning_effort":"max"}`},
 
 		{"messages unset", msg, EffortUnset, `{}`},
 		{"messages none", msg, EffortNone, `{"reasoning_effort":"low"}`},

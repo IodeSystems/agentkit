@@ -109,7 +109,7 @@ func TestProbeCapabilitiesRefusedNoneMakesMinimalTheOffEffort(t *testing.T) {
 	if got := factValue(caps, CapReasoningEffortsRefused); got != "none" {
 		t.Errorf("refused = %q", got)
 	}
-	if got := factValue(caps, CapReasoningEffortsAccepted); got != "minimal,low,medium,high,xhigh" {
+	if got := factValue(caps, CapReasoningEffortsAccepted); got != "minimal,low,medium,high,xhigh,max" {
 		t.Errorf("accepted = %q", got)
 	}
 	if got := factValue(caps, CapReasoningOff); got != "minimal" {
@@ -134,7 +134,7 @@ func TestProbeCapabilitiesRefusedNoneMakesMinimalTheOffEffort(t *testing.T) {
 func TestProbeCapabilitiesOffIsTheEffortThatReasonsLeastNotTheLowestRung(t *testing.T) {
 	p := &probeServer{
 		refuse: map[string]int{"none": 400}, refuseBody: `bad`,
-		reasonChars: map[string]int{"minimal": 220, "low": 107, "medium": 500, "high": 900, "xhigh": 1500},
+		reasonChars: map[string]int{"minimal": 220, "low": 107, "medium": 500, "high": 900, "xhigh": 1500, "max": 2000},
 	}
 	caps, err := ProbeCapabilities(context.Background(), p.client(t), ProbeOpts{})
 	if err != nil {

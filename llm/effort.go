@@ -130,16 +130,11 @@ func rowFor(dialect string, messagesAPI bool, model string, e Effort) effortRow 
 		return same
 	}
 	switch dialect {
-	case DialectOpenAI:
-		if e == EffortMax {
-			return to(EffortXHigh, "the openai dialect has no max")
-		}
-		return same
-	case DialectOpenRouter:
-		// xhigh is unverified against OpenRouter's own docs: sent as given.
-		if e == EffortMax {
-			return to(EffortXHigh, "openrouter has no max")
-		}
+	case DialectOpenAI, DialectOpenRouter:
+		// Every level is sent as asked, max included. Whether this endpoint and
+		// model take max (or xhigh) is a fact the record learns from the 400
+		// that names it (reasoning.efforts.refused), not a row here: a static
+		// row rewrote max for every model, including the ones that take it.
 		return same
 	case DialectLlamaCpp:
 		switch e {
@@ -254,8 +249,10 @@ func factDetail(caps Capabilities, key string) string {
 // EffortFor resolves a wanted level for a dialect, API shape, model and
 // capability record. The clamp, in order:
 //
-//   - The dialect's row maps the level to one it expresses (max to xhigh on
-//     openai); nothing expressible (an old Claude model) is unset.
+//   - The dialect's row maps the level to one it expresses (max to high on
+//     llama.cpp); nothing expressible (an old Claude model) is unset. openai
+//     and openrouter express every level: max is sent there, and a refusal of
+//     it is learned into the record and clamped by the steps below.
 //   - A level the record does not refuse is used as is.
 //   - A refused level (not none) goes to the nearest LOWER level not refused,
 //     then the nearest higher: the caller asked for that much thinking or less
