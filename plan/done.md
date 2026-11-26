@@ -1121,6 +1121,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-25: agentkit v0.42.0: tool-result media (5d7ac62, 26f7fd5, df8fd93), read_file media + scalers (bb169a6, 697cb5d), e2e test (bfac4cc), media stubs + `media:` recall, stub as string. dun-2a asked (Carl, from the dun session); Carl approved here.
 - 2026-11-25: agentkit v0.41.2: cost currency from body `usage.cost_currency`, corrallm `cost_source` stopgap, OpenRouter USD, `CurrencyCredits` removed (0780de0). dun-2a asked (Air shows no price unless USD); Carl approved.
 - 2026-11-25: agentkit v0.41.1: malformed-call repair + same-reason resend stop (5eb3abf); wire dump `AGENTKIT_WIRE_DUMP` (6c02b08); OnUsage final finish reason (e650832). Carl saw MALFORMED_FUNCTION_CALL repeat on resend (via dun-2a); Carl approved.
 - 2026-11-25: agentkit v0.41.0: provider-failure resend, `MaxProviderFailRetries`/`OnProviderFailRetry` (f4ac2c2, dun-2a relayed Carl; rule from pi 9b911b4); stream error status decides retry for a string code (eaadc44, dun-2a found, corrallm-72 confirmed); no-prefill tests (0dbfca5, another session). Carl approved.
