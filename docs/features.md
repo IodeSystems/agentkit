@@ -522,6 +522,43 @@ pins and the markers stay verbatim, and every call keeps its result. The fold
 sizes its kept band with the same render, so `FoldKeepPct` keeps more entries,
 and `TokensAfter` is that render. Off, the render is the old one.
 
+**Old media stops riding every request (`ShaperPolicy.StubMediaOlderThan`, opt-in).**
+LOD stubs an entry by the length of its text, and a read's text is a one-line
+label, so a screenshot read once was resent whole on every later request. Set
+`StubMediaOlderThan: N` and a tool result or user entry that N model rounds
+have followed renders with each media part replaced by a label; its text is
+unchanged and the Store keeps the parts:
+
+```
+[image/png media:3f9a0c2e7b1d4458 from file_read "shots/home.png", not resent; call file_read with path "media:3f9a0c2e7b1d4458" to see it again]
+[image/jpeg media:… from an earlier message, not resent; call file_read with path "media:…" to see it again]
+```
+
+The reference is `llm.MediaRef`: `media:` + the first 16 hex characters of the
+sha256 of the part's decoded bytes (a URL or file id part: of that string), so
+the same bytes have one name wherever they occur. The boundary is stepped by
+`LODStep`, as `FoldMidLOD`'s is, so the prefix changes once per step; the
+pristine tail and the pins keep their media. `MediaReadTool` is the tool the
+label names ("" → "the read file tool"). To make the label work, wire the files
+toolset's resolver to the session:
+
+```go
+var s *agent.Session
+ts, _ := files.New(files.Config{Root: root,
+    MediaRef: func(ctx context.Context, ref string) (llm.ContentPart, bool) { return s.MediaRef(ctx, ref) }})
+sh := &agent.Shaper{Store: store, Policy: agent.ShaperPolicy{StubMediaOlderThan: 2, MediaReadTool: ts.Name(files.Read)}}
+s = &agent.Session{Store: store, Build: sh.Build, Tools: ts.Defs(), Dispatch: ts.Wrap(inner) /* … */}
+```
+
+read on `media:<hex>` returns the stored part as it was, under the current
+`MediaPolicy` (a kind that is off → a label; over a cap lowered since → scaled
+the same way as a file, from a private temp copy), and `OnMedia` fires as for a
+file. `Session.MediaRef` looks in what `Store.Context` returns now: once a fold
+has summarized the entry away, the read says "media:… is no longer in this
+session". Without `Config.MediaRef` it says "media references are not available
+in this session". A `media:` path never reaches the filesystem; a real file of
+that name is read as `./media:…`.
+
 **A fold can reuse the session's cache (`Shaper.SessionPrefix`, opt-in).** Set
 `SessionPrefix{System, Tools}` to the session's EFFECTIVE system prompt and the
 exact tool defs it sends. The fold's FIRST request is then sent as the session's

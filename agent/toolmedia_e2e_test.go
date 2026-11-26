@@ -353,3 +353,62 @@ func TestE2E_ToolMediaMessagesAPIAndModelSwitch(t *testing.T) {
 	}
 	assertTwoPhase(t, msgsOf(oai.body(0)))
 }
+
+// The whole recovery loop: a read returns an image, rounds pass, the Shaper
+// stops resending it and leaves a label naming it, the model reads the
+// "media:" path from the label, and the same image comes back from the Store.
+func TestE2E_StubbedMediaIsReadBackByRef(t *testing.T) {
+	root := makePNG(t)
+	raw, err := os.ReadFile(filepath.Join(root, "pic.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := llm.MediaRef(llm.ImageData("image/png", raw))
+	srv := newE2EServer(t, []string{
+		oaiCall("c1", "file_read", `{"path":"pic.png"}`),
+		oaiText("a gradient"),
+		oaiCall("c2", "file_read", fmt.Sprintf(`{"path":%q}`, ref)),
+		oaiText("still a gradient"),
+	})
+	c := llm.NewClient(srv.URL+"/v1", "k", "gpt-test")
+	store := &e2eStore{}
+	var s *agent.Session
+	ts, err := files.New(files.Config{Root: root,
+		MediaRef: func(ctx context.Context, r string) (llm.ContentPart, bool) { return s.MediaRef(ctx, r) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := &agent.Shaper{Store: store, Policy: agent.ShaperPolicy{StubMediaOlderThan: 1, LODStep: 1,
+		MediaReadTool: ts.Name(files.Read)}}
+	s = &agent.Session{SessionID: "s1", System: "sys", Store: store, Runner: c, Build: sh.Build,
+		Tools:    ts.Defs(),
+		Dispatch: ts.Wrap(func(context.Context, llm.ToolCall) (llm.ToolResult, error) { return llm.TextResult("unknown"), nil }),
+	}
+
+	store.queueUser("u1", "look at pic.png", 1)
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertTwoPhase(t, msgsOf(srv.body(1))) // seen once, whole
+
+	store.queueUser("u2", "look again", time.Now().UnixNano())
+	if _, err := s.Turn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r3, _ := json.Marshal(srv.body(2))
+	if strings.Contains(string(r3), "data:image/png") {
+		t.Fatalf("request 3 still sends the image a round later: %.400s", r3)
+	}
+	label := fmt.Sprintf(`[image/png %s from file_read \"pic.png\", not resent; call file_read with path \"%s\" to see it again]`, ref, ref)
+	if !strings.Contains(string(r3), label) {
+		t.Fatalf("request 3 lacks the label %s:\n%s", label, r3)
+	}
+	// The model read the ref: request 4 has the image again, byte for byte.
+	r4 := msgsOf(srv.body(3))
+	assertTwoPhase(t, r4[len(r4)-2:])
+	es, _ := store.Context(context.Background(), "s1")
+	last := es[len(es)-2] // the second read's result, before the final reply
+	if last.Kind != agent.KindToolResult || len(last.Parts) != 1 || llm.MediaRef(last.Parts[0]) != ref {
+		t.Fatalf("second read did not return the stored image: %+v", last)
+	}
+}

@@ -184,6 +184,18 @@ plan/     living plan. plan.md = current state + active work + decisions;
   verbatim; call/result pairs stay intact. With stubs the band's size drops at
   each step (not monotone in k), so `foldKeep` searches the last step whose
   first k fits, then within it. AlwaysLOD wins over it.
+- **Old media is stubbed, and recoverable by ref (`ShaperPolicy.StubMediaOlderThan`,
+  0 = old render).** LOD keys on TEXT length, so a short-text read with a big
+  image rode every request. `render` passes a COPY of the entries through
+  `stubMedia` (mediastub.go): KindToolResult/KindUser entries before
+  `mediaBoundary` (the start of the N-th newest model round, capped at the
+  pristine tail, rounded down by `lodBoundary`) get each media part replaced by
+  a text label naming `llm.MediaRef` (`media:` + 16 hex of sha256 of the
+  decoded bytes; a URL/file id hashes its string). Text unchanged, Store
+  untouched, pins keep media. Recovery is read, not a new tool:
+  `files.Config.MediaRef = Session.MediaRef` (looks in `Store.Context` now; a
+  folded-away entry → not found). A `media:` read path never reaches `resolve`;
+  `./media:x` is the file. `MediaReadTool` names the tool in the label.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different
