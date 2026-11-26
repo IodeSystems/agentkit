@@ -109,11 +109,11 @@ func TestReadCaps(t *testing.T) {
 
 func TestReadBinary(t *testing.T) {
 	root := tree(t, map[string]string{
-		"img.png": "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
-		"blob":    "abc\x00def",
+		"prog": "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+		"blob": "abc\x00def",
 	})
 	ts := mount(t, Config{Root: root})
-	mustErr(t, call(t, ts, Read, map[string]any{"path": "img.png"}), "binary file", "image/png", "16 bytes")
+	mustErr(t, call(t, ts, Read, map[string]any{"path": "prog"}), "binary file", "application/octet-stream", "16 bytes")
 	mustErr(t, call(t, ts, Read, map[string]any{"path": "blob"}), "binary file", "7 bytes", "offset 3")
 }
 

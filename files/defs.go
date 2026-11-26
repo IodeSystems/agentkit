@@ -32,7 +32,8 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 		td.Function.Description = fmt.Sprintf("Read a file or a range of its lines, list a directory, or with grep search a file or "+
 			"a directory tree. Search a large file or a log with grep before you read it. Lines come back as number, TAB, "+
 			"text; leave the number and tab out of edit anchors. With no offset/limit you get the first %s, or only the "+
-			"first %s of a file of %s or more; a ranged read returns up to %s.",
+			"first %s of a file of %s or more; a ranged read returns up to %s. An image, audio, video or PDF file "+
+			"comes back as media you can see or hear, scaled to the session's limits.",
 			sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(min(t.cfg.UnrangedMax, largeHead))), sizeOf(largeFile),
 			sizeOf(int64(t.cfg.ReadMax)))
 		td.Function.Parameters = obj(map[string]any{

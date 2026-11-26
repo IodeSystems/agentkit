@@ -127,6 +127,15 @@ type Config struct {
 	// AfterWrite runs after edit/write/delete/move with the root-relative
 	// paths changed (both sides of a move).
 	AfterWrite func(paths []string)
+
+	// Media is the starting media policy for read (see media.go); nil is the
+	// default: images, audio, video and PDFs sent, each capped at 5 MiB.
+	// SetMediaPolicy changes it while the toolset runs.
+	Media *MediaPolicy
+	// OnMedia runs when a media limit applied to a read: a file over a cap or
+	// the edge, scaled, converted, refused, or of a kind that is off. It runs
+	// on the read's goroutine, before the result returns.
+	OnMedia func(MediaEvent)
 }
 
 // Toolset is a mounted Config. One per agent session: it tracks which files
@@ -140,9 +149,11 @@ type Toolset struct {
 	rg      string            // rg binary path, "" = Go engine
 	// rgFailed counts rg runs that failed and fell back to the Go engine.
 	rgFailed atomic.Int64
+	media    atomic.Pointer[MediaPolicy]
 
-	mu   sync.Mutex
-	seen map[string]bool // real paths read or written by this toolset
+	mu       sync.Mutex
+	seen     map[string]bool   // real paths read or written by this toolset
+	toolPath map[string]string // media tool name → PATH lookup, "" = absent
 }
 
 var toolNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -178,7 +189,11 @@ func New(cfg Config) (*Toolset, error) {
 	if tools == nil {
 		tools = DefaultTools
 	}
-	t := &Toolset{cfg: cfg, root: root, enabled: map[string]bool{}, byName: map[string]string{}, seen: map[string]bool{}}
+	t := &Toolset{cfg: cfg, root: root, enabled: map[string]bool{}, byName: map[string]string{}, seen: map[string]bool{},
+		toolPath: map[string]string{}}
+	if cfg.Media != nil {
+		t.SetMediaPolicy(*cfg.Media)
+	}
 	for _, n := range tools {
 		if !known(n) {
 			return nil, fmt.Errorf("files: unknown tool %q (have %s)", n, strings.Join(allTools, ", "))
@@ -277,27 +292,27 @@ func (t *Toolset) Dispatch(ctx context.Context, name, argsJSON string) llm.ToolR
 	if err != nil {
 		return llm.TextResult("ERROR: " + err.Error())
 	}
-	return llm.TextResult(out)
+	return out
 }
 
-func (t *Toolset) run(ctx context.Context, bare string, a args) (string, error) {
+func (t *Toolset) run(ctx context.Context, bare string, a args) (llm.ToolResult, error) {
 	switch bare {
 	case Read:
 		return t.read(ctx, a)
 	case Edit:
-		return t.edit(a)
+		return text(t.edit(a))
 	case Write:
-		return t.write(a)
+		return text(t.write(a))
 	case Grep:
-		return t.grep(ctx, a)
+		return text(t.grep(ctx, a))
 	case List:
-		return t.list(ctx, a)
+		return text(t.list(ctx, a))
 	case Delete:
-		return t.delete(a)
+		return text(t.delete(a))
 	case Move:
-		return t.move(a)
+		return text(t.move(a))
 	}
-	return "", fmt.Errorf("tool %q is not enabled", bare)
+	return llm.ToolResult{}, fmt.Errorf("tool %q is not enabled", bare)
 }
 
 // args is every tool's arguments in one struct; each tool reads its own.

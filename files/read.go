@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/iodesystems/agentkit/llm"
 )
 
 // The read caps (Config.ReadMax, Config.UnrangedMax) bound what one read
@@ -54,65 +56,72 @@ const largeHead = 2 << 10
 // is grep, on a file or a tree. One tool for the three, because a model that
 // has read in hand reaches for it, and a search that needs a second tool is a
 // search it does not make.
-func (t *Toolset) read(ctx context.Context, a args) (string, error) {
+func (t *Toolset) read(ctx context.Context, a args) (llm.ToolResult, error) {
 	if a.Grep == "" && a.Pattern != "" {
 		a.Grep = a.Pattern // the grep tool's name for it
 	}
 	if a.Grep != "" {
 		a.Pattern = a.Grep
-		return t.grep(ctx, a)
+		return text(t.grep(ctx, a))
 	}
 	if strings.TrimSpace(a.Path) == "" {
-		return "", errors.New("read needs a path")
+		return llm.ToolResult{}, errors.New("read needs a path")
 	}
 	abs, display, err := t.resolve(a.Path)
 	if err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 	st, err := os.Stat(abs)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return "", t.notFound(abs, display)
+		return llm.ToolResult{}, t.notFound(abs, display)
 	case err != nil:
-		return "", err
+		return llm.ToolResult{}, err
 	case st.IsDir():
-		return t.list(ctx, a)
+		return text(t.list(ctx, a))
 	}
 	offset, limit := int(a.Offset), int(a.Limit)
 	paged := slicesContains(a.keys, "at")
 	if paged && (offset != 0 || limit != 0) {
-		return "", errors.New("at is a byte offset and pages the file by bytes; offset/limit count lines. Give one or the other")
+		return llm.ToolResult{}, errors.New("at is a byte offset and pages the file by bytes; offset/limit count lines. Give one or the other")
 	}
 	if limit < 0 {
-		return "", fmt.Errorf("limit counts lines and cannot be negative (got %d). To read the END of a file, "+
+		return llm.ToolResult{}, fmt.Errorf("limit counts lines and cannot be negative (got %d). To read the END of a file, "+
 			"give a negative offset: offset=-50 is its last 50 lines", limit)
 	}
 	f, err := os.Open(abs)
 	if err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 	defer func() { _ = f.Close() }()
 
 	head := make([]byte, binaryScan)
 	n, _ := io.ReadFull(f, head)
 	head = head[:n]
+	if m, ok := sniffMedia(head); ok {
+		res, err := t.readMedia(ctx, abs, display, st.Size(), head, m)
+		if err == nil {
+			t.markSeen(abs)
+		}
+		return res, err
+	}
 	if i := bytes.IndexByte(head, 0); i >= 0 {
-		return "", fmt.Errorf("%s is a binary file (%s, %s; a zero byte at offset %d), so there is no text "+
+		return llm.ToolResult{}, fmt.Errorf("%s is a binary file (%s, %s; a zero byte at offset %d), so there is no text "+
 			"to show. Use a tool that understands the format", display, sizeOf(st.Size()), http.DetectContentType(head), i)
 	}
 	if st.Size() == 0 {
 		t.markSeen(abs)
-		return display + ": empty (0 bytes)", nil
+		return llm.TextResult(display + ": empty (0 bytes)"), nil
 	}
 	if paged {
 		out, err := t.page(f, display, int64(a.At), st.Size())
 		if err == nil {
 			t.markSeen(abs)
 		}
-		return out, err
+		return text(out, err)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 
 	ranged := offset != 0 || limit != 0
@@ -129,14 +138,14 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 	// paging hint, so the file is counted first; it is streamed, never held.
 	total, err := countLines(f)
 	if err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 	start := 1
 	switch {
 	case offset < 0:
 		start = max(1, total+offset+1)
 	case offset > total:
-		return "", fmt.Errorf("offset %d is past the end of %s, which has %d lines. Lines are numbered from 1, "+
+		return llm.ToolResult{}, fmt.Errorf("offset %d is past the end of %s, which has %d lines. Lines are numbered from 1, "+
 			"the numbers a grep reports", offset, display, total)
 	case offset > 0:
 		start = offset
@@ -146,11 +155,11 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 		end = min(total, start+limit-1)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 	body, last, err := numbered(f, start, end, capBytes)
 	if err != nil {
-		return "", err
+		return llm.ToolResult{}, err
 	}
 	t.markSeen(abs)
 
@@ -183,7 +192,7 @@ func (t *Toolset) read(ctx context.Context, a args) (string, error) {
 		out += fmt.Sprintf("\n[%s is %s, %d lines: search it with grep (e.g. grep:\"ERROR|FAIL\" for a log), or read a range]",
 			display, sizeOf(st.Size()), total)
 	}
-	return out, nil
+	return llm.TextResult(out), nil
 }
 
 // page returns the bytes of f from at, up to ReadMax, and where the next page
@@ -223,6 +232,9 @@ func (t *Toolset) page(f *os.File, display string, at, size int64) (string, erro
 	b.WriteString(text)
 	return b.String(), nil
 }
+
+// text lifts a text-only tool's return into a ToolResult.
+func text(s string, err error) (llm.ToolResult, error) { return llm.TextResult(s), err }
 
 func slicesContains(ss []string, s string) bool {
 	for _, x := range ss {
