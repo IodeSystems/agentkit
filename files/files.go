@@ -136,6 +136,10 @@ type Config struct {
 	// the edge, scaled, converted, refused, or of a kind that is off. It runs
 	// on the read's goroutine, before the result returns.
 	OnMedia func(MediaEvent)
+	// MediaRef resolves a "media:<hex>" read path (llm.MediaRef) to media
+	// stored earlier in the session: agent's Session.MediaRef. nil → such a
+	// read says media references are not available. See mediaref.go.
+	MediaRef func(ctx context.Context, ref string) (llm.ContentPart, bool)
 }
 
 // Toolset is a mounted Config. One per agent session: it tracks which files

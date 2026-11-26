@@ -57,6 +57,13 @@ const largeHead = 2 << 10
 // has read in hand reaches for it, and a search that needs a second tool is a
 // search it does not make.
 func (t *Toolset) read(ctx context.Context, a args) (llm.ToolResult, error) {
+	if isMediaPath(a.Path) {
+		// Before grep and resolve: a media reference never reaches the disk.
+		if a.Grep != "" || a.Pattern != "" {
+			return llm.ToolResult{}, errors.New("grep searches files; a media: path names stored media and has no text to search")
+		}
+		return t.readMediaRef(ctx, a.Path)
+	}
 	if a.Grep == "" && a.Pattern != "" {
 		a.Grep = a.Pattern // the grep tool's name for it
 	}

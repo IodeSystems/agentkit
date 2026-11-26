@@ -36,6 +36,11 @@ func (t *Toolset) def(bare string) llm.ToolDef {
 			"comes back as media you can see or hear, scaled to the session's limits.",
 			sizeOf(int64(t.cfg.UnrangedMax)), sizeOf(int64(min(t.cfg.UnrangedMax, largeHead))), sizeOf(largeFile),
 			sizeOf(int64(t.cfg.ReadMax)))
+		// Only when a resolver is wired: a sentence for a path that always
+		// fails would cost tokens on every request and invite dead calls.
+		if t.cfg.MediaRef != nil {
+			td.Function.Description += " A \"media:<hex>\" path returns stored media from earlier in the session."
+		}
 		td.Function.Parameters = obj(map[string]any{
 			"path":    str("File or directory, relative to the working tree."),
 			"offset":  num("First line, from 1. Negative counts from the end: -50 is the last 50 lines."),
