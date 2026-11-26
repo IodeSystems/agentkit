@@ -128,6 +128,11 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `ReasoningBudgetTokens` is a cap: min(level budget, explicit); with no Effort it is sent as before. Refusals (`reasoning.efforts.refused`, `reasoning.off`) bind only dialects that send an effort field; `thinking_only` binds all. Anthropic-compat budgets stay below max_tokens.
   The change is reported via `OnTranslate` with `Key` "effort" and a `Reason`.
   `ReasoningEffort`/`EnableThinking` no longer exist.
+  openai and openrouter have NO static max row: max is sent as asked and sensed
+  per endpoint+model. A 400 naming it (`sentEffort` reads `reasoning_effort` or
+  OpenRouter's `reasoning.effort`) → `reasoning.efforts.refused` += max → one
+  resend, clamped to xhigh (then high); a 200 → accepted. The probe ladder
+  (`effortLadder`) includes max. Do not add a dialect row for a per-model gap.
 - **Mid-turn user words render AFTER the round's tool results.** A host saves a
   pending `KindUser` while a tool runs; `ClaimPending` picks it up next
   iteration. It sorts before the result (`CreatedAt`), so `groupMessages` holds

@@ -162,7 +162,12 @@ The client maps the level to the endpoint's fields. In brief:
 | low, medium | as is | as is | budget 1024, 4096 | budget 1024, 4096 | as is |
 | high | `high` | `high` | thinking on, no budget | budget 16k | `high` |
 | xhigh | `xhigh` | `xhigh` | `high` | budget 32k | `xhigh` |
-| max | `xhigh` | `xhigh` | `high` | budget 64k | `max` |
+| max | `max`* | `max`* | `high` | budget 64k | `max` |
+
+\* Sent as asked, with no static rewrite. An endpoint and model that refuse `max`
+with a 400 that names it get it recorded in `reasoning.efforts.refused`; the request is
+resent once at `xhigh` (then `high` if `xhigh` is refused too), and later requests go
+there directly. A 200 records `max` as accepted. `ProbeCapabilities` tries `max` too.
 
 A Messages API model that predates the effort field gets nothing. `ReasoningBudgetTokens`
 is an explicit cap: with a level it sends min(level budget, explicit); with no level, the explicit budget alone; at `none`, nothing. Anthropic-compat keeps the budget below `max_tokens` (or sends no thinking block if under 1024). The record's refusals and `reasoning.off` bind only openai, openrouter and the Messages API; llama.cpp and anthropic-compat ignore them, while `thinking_only` binds all.

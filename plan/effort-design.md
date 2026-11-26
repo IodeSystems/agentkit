@@ -35,7 +35,7 @@ dun keeps the saved level and shows saved vs effective.
 | low/medium | as is | effort (decision 2) | true + 1024/4096 | 1024/4096 | as is |
 | high | high | high | true, no budget | B_high (fixes dun bug) | high |
 | xhigh | xhigh | xhigh (unverified) | → high | B_xh | xhigh (unverified) |
-| max | → xhigh | → xhigh | → high | B_max | max |
+| max | max (learned: a refusal → xhigh) | max (learned) | → high | B_max | max |
 Old Claude models on Messages API: effective unset, reported "model predates effort".
 
 ## Clamp
