@@ -81,9 +81,10 @@ func TestStubMedia_OldResultLosesImageToALabelTextKept(t *testing.T) {
 	}
 	ref := llm.MediaRef(first)
 	want := fmt.Sprintf(`[image/png %s from file_read "shots/0.png", not resent; call file_read with path "%s" to see it again]`, ref, ref)
-	if len(m.Parts) != 2 || m.Parts[0].Text != "shots/0.png: image/png, 12 bytes" || m.Parts[1].Text != want {
+	// All text after the stub: a plain string body, not an array of text parts.
+	if len(m.Parts) != 0 || m.Content != "shots/0.png: image/png, 12 bytes\n"+want {
 		raw, _ := json.Marshal(m.Parts)
-		t.Fatalf("stubbed tool message parts:\n%s\nwant label %s", raw, want)
+		t.Fatalf("stubbed tool message content %q parts %s\nwant text + label %s", m.Content, raw, want)
 	}
 	// The Store keeps the bytes.
 	if e := st.entries[1]; len(e.Parts) != 1 || e.Parts[0].ImageURL == nil || e.Parts[0].ImageURL.URL != first.ImageURL.URL {

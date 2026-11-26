@@ -32,6 +32,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/iodesystems/agentkit/llm"
 )
@@ -101,6 +102,25 @@ func (sh *Shaper) stubMedia(entries []Entry, olderEnd int, pinned pinSet) []Entr
 		if !copied {
 			out = append([]Entry(nil), entries...)
 			copied = true
+		}
+		if e.Kind == KindToolResult {
+			// Every part is text now: send a plain string body. Chat templates
+			// (llama.cpp, vLLM) are written for a string tool content; an array
+			// of text parts is valid OpenAI but untested there. Content is the
+			// result's text (agent.go), so the labels follow it.
+			labels := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if p.Text != "" {
+					labels = append(labels, p.Text)
+				}
+			}
+			if e.Content != "" {
+				labels = append([]string{e.Content}, labels...)
+			}
+			e.Content = strings.Join(labels, "\n")
+			e.Parts = nil
+			out[i] = e
+			continue
 		}
 		e.Parts = parts
 		out[i] = e
