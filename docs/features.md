@@ -83,6 +83,53 @@ error from it is recorded as an `ERROR: ...` result. A returned Go error
 is recorded as an `ERROR: ...` result and the loop continues. A terminal tool returns `agent.ErrSessionClosed` to stop the
 loop after its result is persisted (used with `tool_choice=required` roles).
 
+### Media from the file toolset's read
+
+`files`' read returns an image, a recording, a video or a PDF as a media part of
+its result, with a one-line label (`shot.png: image/png, 1920×1080, 402.3KB`).
+Detection is by content (`http.DetectContentType` plus magic bytes for webp,
+heic/avif, tiff, wav, mp3, flac, ogg, m4a, mp4/mov, webm/mkv), never by
+extension. Parts: image → `image_url` data URI; audio → `input_audio` (bare
+base64 + format); video → `video_url` data URI; PDF → `file`. Any other binary
+is refused as before.
+
+A media part stays in the history and rides every later request, so each kind
+has a policy (`files.MediaPolicy`; `Config.Media` to start, `Toolset.SetMediaPolicy`
+to change it while the session runs; takes effect on the next read):
+
+| field | default | effect |
+|---|---|---|
+| `Image/Audio/Video/PDF.Mode` | `send` | `off` → a text label "… media is off for this session" |
+| `….MaxBytes` | 5 MiB each | over it → shrunk, else refused ("… the user can raise the limit") |
+| `MaxLongEdge` | 1568 px | an image over it is scaled down (Claude scales to this anyway) |
+| `ScaleAlways` | false | re-encode every image, not only one over a limit |
+| `Tools` | PATH | pin a tool's path; `None` looks nothing up |
+| `Scaler` | — | a host func that replaces the built-in tools |
+| `Timeout` | 30s | one tool run; a hung tool is killed and the file refused |
+
+A file over a limit is shrunk by the first tool found: ImageMagick `magick`,
+else `convert` (not on Windows), then `ffmpeg`, then `vipsthumbnail`, then the
+stdlib (png/jpeg/gif only: box filter, jpeg q85, png when the source has
+alpha). Audio and video need `ffmpeg`: audio → mono mp3 64 kbit/s, video →
+H.264/AAC mp4 at most 720p. A pass still over the cap is retried once harder
+(70% edge, q60, 32 kbit/s, 480p), then refused. webp with no tool is sent as is
+when under the cap; heic/avif/tiff/bmp/mkv are always converted, and refused
+with no tool. A PDF over its cap is refused, never shrunk.
+
+The tools parse whatever file the model names, so every run is exec with an
+argument list (no shell), under the timeout, with an absolute input path.
+ImageMagick gets an explicit coder from the sniffed type (`png:/abs/x.png[0]`,
+never a coder chosen from content), `-limit memory 256MiB -limit map 512MiB
+-limit time 30 -limit disk 1GiB`, and is never run on a non-image. ffmpeg gets
+`-nostdin -protocol_whitelist file -i file:/abs/path`. Output is stdout or a
+0600 file in a fresh temp dir that is removed; what is read back is capped.
+
+`Config.OnMedia(files.MediaEvent)` fires whenever a limit applied (over a cap
+or the edge, scaled, converted, refused, off): path, MIME, kind, bytes and
+pixels before/after, `Scaled`, `Tool` (`magick`, `convert`, `ffmpeg`,
+`vipsthumbnail`, `stdlib`, `host`, `none`), `Refused`, `Reason`. A file sent
+unchanged fires none.
+
 ### Claude Messages API
 
 A client pointed at `api.anthropic.com` (or with `MessagesAPI: true`) talks to

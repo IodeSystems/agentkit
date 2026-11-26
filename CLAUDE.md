@@ -24,7 +24,8 @@ mcpmgr/   MCP server manager (spawn/discover/call, thread scoping, secrets).
 agent/    the tablestakes engine: Session.Turn loop + Shaper + primitives. imports llm + stdlib only.
 files/    mountable file toolset (read/edit/write/grep/list, opt-in delete/move) for a
           host's tool list: Defs() + Wrap(dispatcher). imports llm + stdlib only;
-          shells out to rg/git when on PATH, works without either.
+          shells out to rg/git when on PATH, works without either. read returns
+          media files as parts under a MediaPolicy (media.go, scale.go, stdscale.go).
 loopdetector/  opt-in loop detection from session + stream: a count and a tolerance.
           imports llm + stdlib only. Hosts install it; agent does not import it.
 taskgraph/  opt-in model-kept plan: DAG of nodes, the four `plan_*` tools (`taskgraph.New`: Defs/Wrap/Dispatch), and Diff/Apply
@@ -261,6 +262,19 @@ plan/     living plan. plan.md = current state + active work + decisions;
   (`USD estimate`) > `usage.cost_currency` > `usage.cost_source` present (corrallm
   stopgap, USD) > LiteLLM header (USD) > `openrouter.ai` URL (USD: credits are
   dollars, openrouter.ai/docs/faq) > "". `CurrencyCredits` no longer exists.
+- **`files` read sends media under a policy; scaling tools are held down.**
+  Sniffed by content (media.go `sniffMedia`; ftyp FIRST, since
+  DetectContentType calls an m4a video/mp4). Over a cap (5 MiB per kind) or the
+  1568 px edge → the first of magick, convert (not Windows), ffmpeg,
+  vipsthumbnail, stdlib (png/jpeg/gif); one harder retry; else refused with
+  "the user can raise the limit". `Config.OnMedia` fires on every limit hit;
+  `SetMediaPolicy` is an atomic swap, read per call. Every tool run: no shell,
+  `runTool` timeout + WaitDelay, absolute input path, ImageMagick coder prefix
+  from the SNIFFED type (never let it pick a coder from content: MVG/MSL/URL
+  read other files) and `-limit`s, ffmpeg `-protocol_whitelist file` +
+  `file:` URL, output to stdout or a 0600 temp file in a removed MkdirTemp,
+  capped read-back. `scale_test.go` re-execs the test binary as the tool to
+  assert the argv; real magick/ffmpeg tests skip when absent.
 - **Every retry sleep is jittered, additively.** `jittered()` adds a random
   `[0, retryJitterFraction)` of the sleep — never subtracts. corrallm hands
   every caller rejected in the same moment the IDENTICAL `Retry-After`, and an

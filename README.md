@@ -38,7 +38,7 @@ Requires Go 1.26+.
 | `llm`    | the streaming OpenAI-compatible chat client (tools, tool_choice, grammar, response_format, 429 retry) | stdlib + `openai-claude-api-shim` (ours, stdlib only) for the Claude Messages API |
 | `mcpmgr` | MCP server manager — spawn stdio MCP servers, discover tools, call them, per-thread scoping, secret files | stdlib only |
 | `agent`  | the tablestakes: `Session.Turn` loop, `Shaper`, injection, lifting, validation, notification lifecycle | `llm` only |
-| `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move; read alone also lists a directory and, with grep, searches a file or a tree) rooted at one directory, with capped reads (paged by line, or by byte offset `at` for text with no usable lines), exact-once edits and .gitignore-aware search (`rg` when on PATH) | `llm` only |
+| `files`  | a mountable file toolset — read, edit, write, grep, list (+ opt-in delete, move; read alone also lists a directory and, with grep, searches a file or a tree) rooted at one directory, with capped reads (paged by line, or by byte offset `at` for text with no usable lines), exact-once edits, .gitignore-aware search (`rg` when on PATH), and images/audio/video/PDFs read as media parts under a per-session size policy (scaled with magick/ffmpeg/vipsthumbnail when on PATH, stdlib for png/jpeg/gif) | `llm` only |
 | `taskgraph` | a plan the model keeps: a DAG of tasks with `done_when`, the `plan_add`/`plan_update`/`plan_close`/`plan_show` tools, and per-write changes naming which owners (sub-agents sharing the plan) to notify. Storage, permission and delivery are the host's | `llm` only |
 
 **agentkit has no third-party dependencies.** `go.mod` declares a module
