@@ -164,6 +164,24 @@ type ShaperPolicy struct {
 	// kept band with the same render (FoldKeepPct keeps more entries), and
 	// CompactionInfo.TokensAfter is that render.
 	FoldMidLOD bool
+	// StubMediaOlderThan stops resending media parts (images, audio, video,
+	// files) of tool results and user entries that at least this many model
+	// rounds have followed. 0 → off, and off is the old render exactly.
+	//
+	// LOD stubs an entry only when its TEXT is long, and a read's text is a
+	// one-line label, so a screenshot read once rode every later request
+	// whole. With this set, such an entry renders with each media part
+	// replaced by a text label that names it by llm.MediaRef ("media:<hex>")
+	// and says how to see it again: read with that path (MediaReadTool). The
+	// text is unchanged, the Store keeps the parts, pins and the pristine tail
+	// keep their media. The boundary is stepped by LODStep like FoldMidLOD's,
+	// so the prefix changes once per step, not every round. See mediastub.go.
+	StubMediaOlderThan int
+	// MediaReadTool is the tool name a media stub label tells the model to
+	// call with a "media:<hex>" path: a files toolset's read tool
+	// (Toolset.Name(files.Read)), wired to Session.MediaRef through
+	// files.Config.MediaRef. "" → the label says "the read file tool".
+	MediaReadTool string
 }
 
 // defaultLODHeadroom is the runway kept below budget when LODHeadroomTokens is
@@ -954,6 +972,7 @@ func (sh *Shaper) render(entries []Entry, pristineCount int, system string, lod 
 			askedBy[e.ToolCallID] = e.Content
 		}
 	}
+	entries = sh.stubMedia(entries, olderEnd, pinned)
 	return groupMessages(system, entries, func(i int, e Entry) string {
 		content := e.Content
 		if pinned.has(i) {
