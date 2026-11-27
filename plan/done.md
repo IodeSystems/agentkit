@@ -1121,6 +1121,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-27: agentkit v0.44.0 + shim v0.7.0: reasoning replay (c82e9ec, 47bba77, c4628db; shim 66adce2), taskgraph Effort/Meta/Markdown/Validate (ca3fdbf, f5d8c5b). dun-2a asked (4.6x pi's cost on DeepSeek; plan as a Markdown file); Carl approved here.
 - 2026-11-27: agentkit v0.43.1: MCP cancellation both directions + `RequestID` (6f52d0d). dun-2a asked for mcpshell host callbacks; Carl approved here.
 - 2026-11-26: agentkit v0.43.0: effort max sensed (bffdc2b, eb91e1c), provider-keyed capability record (4162336, 89bc8d2). dun-2a asked (frontier-harness-eval forces max); Carl confirmed here, picked provider/model keying, pin-else-narrowest, one release.
 - 2026-11-25: agentkit v0.42.0: tool-result media (5d7ac62, 26f7fd5, df8fd93), read_file media + scalers (bb169a6, 697cb5d), e2e test (bfac4cc), media stubs + `media:` recall, stub as string. dun-2a asked (Carl, from the dun session); Carl approved here.
