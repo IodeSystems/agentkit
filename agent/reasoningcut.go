@@ -12,7 +12,8 @@ package agent
 // The repair is the same shape as the repetition re-prompt: tell the model what
 // happened with a notification, and run one more round. Two things differ.
 // The notification carries the tail of the reasoning, because the reasoning
-// itself is not replayed (Entry.Reasoning is stored, never sent) and the model
+// of a cut round is on no entry (nothing is persisted for it, so even
+// ShaperPolicy.ReplayReasoning cannot send it) and the model
 // would otherwise start from zero. And the repair round runs with reasoning
 // OFF, because a model that is allowed to think again walks into the same wall.
 //

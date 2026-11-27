@@ -79,6 +79,10 @@ type Session struct {
 	// at the start of every round; Turn copies them onto TurnResult right after
 	// the call, so a failed round still reports what the provider said.
 	roundFinish, roundNative string
+	// roundOpaque is the provider's reasoning record (llm.StreamChunk.
+	// ReasoningOpaque) for the round streamChat last ran; reset per round, and
+	// nil for a round cut for repetition.
+	roundOpaque json.RawMessage
 
 	// UnrunResult, if set, writes the tool result for a call the Turn never
 	// ran because ctx was canceled first. It gets the Turn's CANCELED ctx, so
@@ -634,8 +638,11 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 				ID:      NewID(),
 				Kind:    KindAssistant,
 				Content: resp,
-				// Stored, never replayed: see Entry.Reasoning.
-				Reasoning: reasoning,
+				// Replayed only under ShaperPolicy.ReplayReasoning: see
+				// Entry.Reasoning. A round cut for repetition stores none: the
+				// loop may be in the reasoning, and a replay would prime it.
+				Reasoning:       roundReasoningOf(reasoning, rep),
+				ReasoningOpaque: s.roundOpaque,
 				// What this round-trip cost, recorded WITH the reply it produced.
 				// The session log is the durable record, so a replay can answer
 				// "how long, and how much" per turn without a trace sidecar.
@@ -865,9 +872,9 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 		// A round that wrote no prose persisted no assistant entry above, so its
 		// reasoning and its cost ride on the FIRST call it made instead. Without
 		// this a tool-only round — most rounds of an agent — records neither.
-		roundReasoning, roundUsage := "", (*EntryUsage)(nil)
+		roundReasoning, roundOpaque, roundUsage := "", json.RawMessage(nil), (*EntryUsage)(nil)
 		if resp == "" {
-			roundReasoning, roundUsage = reasoning, eu
+			roundReasoning, roundOpaque, roundUsage = reasoning, s.roundOpaque, eu
 		}
 		for _, tc := range toolCalls {
 			// Arguments that are not valid JSON must never be persisted VERBATIM.
@@ -896,18 +903,19 @@ func (s *Session) Turn(ctx context.Context) (result TurnResult, err error) {
 			// answered below even on a cancel. A canceled ctx here would write
 			// some calls and not others, or none, and lose the round.
 			if e := s.Store.Append(context.WithoutCancel(ctx), s.SessionID, Entry{
-				ID:         NewID(),
-				Kind:       KindToolCall,
-				Content:    args,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Function.Name,
-				Reasoning:  roundReasoning,
-				Usage:      roundUsage,
-				CreatedAt:  now(),
+				ID:              NewID(),
+				Kind:            KindToolCall,
+				Content:         args,
+				ToolCallID:      tc.ID,
+				ToolName:        tc.Function.Name,
+				Reasoning:       roundReasoning,
+				ReasoningOpaque: roundOpaque,
+				Usage:           roundUsage,
+				CreatedAt:       now(),
 			}); e != nil {
 				return result, fmt.Errorf("agent: persist tool call: %w", e)
 			}
-			roundReasoning, roundUsage = "", nil
+			roundReasoning, roundOpaque, roundUsage = "", nil, nil
 		}
 
 		var sessionClosed bool
@@ -1268,7 +1276,7 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		// call forever; that cause was the unbounded pair list, since bounded, and
 		// the grammar now terminates on its own.
 	}
-	s.roundFinish, s.roundNative = "", ""
+	s.roundFinish, s.roundNative, s.roundOpaque = "", "", nil
 	ch, err := s.Runner.ChatStream(ctx, messages, tools, &opts)
 	if err != nil {
 		return "", "", nil, nil, nil, nil, "", err
@@ -1281,6 +1289,9 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 			return content.String(), "", toolCalls, usage, nil, nil, finish, chunk.Err()
 		}
 		think.WriteString(chunk.Reasoning)
+		if len(chunk.ReasoningOpaque) > 0 {
+			s.roundOpaque = chunk.ReasoningOpaque
+		}
 		if chunk.FinishReason != "" {
 			s.roundFinish = chunk.FinishReason
 		}
@@ -1329,6 +1340,7 @@ func (s *Session) streamChat(ctx context.Context, messages []llm.Message) (out, 
 		// incomplete BY CONSTRUCTION — a heredoc block here would fail to parse
 		// and abort the Turn with a message about truncation, blaming the wrong
 		// cause. Hand back the prose and the finding; the caller answers it.
+		s.roundOpaque = nil
 		return content.String(), "", nil, usage, rep, cut, finish, nil
 	}
 	if !heredoc {

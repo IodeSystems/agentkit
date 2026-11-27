@@ -97,7 +97,11 @@ const ImageTokenEstimate = 1600
 // every estimate of a tool-heavy window was low, and low is the wrong
 // direction (see TokenEstimator).
 func messageTokens(est TokenEstimator, m llm.Message) int {
-	t := est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name)
+	// Reasoning is "" unless the render replays it (ReplayReasoning), so the
+	// estimate is unchanged by default. The opaque record is not counted: its
+	// text is the same text, or encrypted bytes the provider does not bill as
+	// prompt text at their length.
+	t := est.Estimate(m.Content) + est.Estimate(m.Role) + est.Estimate(m.Name) + est.Estimate(m.Reasoning)
 	for _, p := range m.Parts {
 		t += partTokens(est, p)
 	}

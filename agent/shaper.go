@@ -80,6 +80,15 @@ type ShaperPolicy struct {
 	// words and would drop the attachment.
 	FoldUserIntoToolResult bool
 
+	// ReplayReasoning sends assistant entries' stored reasoning back to the
+	// model (replay.go): ReplayNone (default, requests byte-identical to
+	// before), ReplayTurn (entries after the newest KindUser: the current tool
+	// loop), ReplayAll. Applied in render; the token estimate counts the text.
+	// Under ReplayTurn a new user message drops the earlier reasoning once:
+	// one prompt-cache break per user turn, at the first assistant message
+	// that carried reasoning.
+	ReplayReasoning ReasoningReplay
+
 	LODTruncateAboveChars int
 	// MaxToolResultChars bounds a single tool result REGARDLESS of age.
 	//
@@ -554,9 +563,16 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 	var subsumed []Entry
 	var foldable []Entry // what the summarizer reads: the older entries but the pinned one
 	var fresh []Entry    // the subsumed entries that are not markers
+	// replayAt: the session's reasoning-replay boundary, as an index into
+	// foldable (see summarizeFrom).
+	rf := replayFrom(entries, sh.Policy.ReplayReasoning)
+	replayAt := -1
 	for i := 0; i < olderEnd; i++ {
 		if pinned.has(i) {
 			continue // the subject and the latest ask stay verbatim
+		}
+		if i >= rf && replayAt < 0 {
+			replayAt = len(foldable)
 		}
 		foldable = append(foldable, entries[i])
 		subsumed = append(subsumed, entries[i])
@@ -608,7 +624,10 @@ func (sh *Shaper) compactOldest(ctx context.Context, sessionID string, tokensBef
 			break
 		}
 	}
-	summary, err := sh.summarize(ctx, foldable, task, budget, window, promptCacheKey(sessionID, newest))
+	if replayAt < 0 {
+		replayAt = len(foldable)
+	}
+	summary, err := sh.summarizeFrom(ctx, foldable, replayAt, task, budget, window, promptCacheKey(sessionID, newest))
 	if err != nil {
 		return CompactionInfo{}, false, fmt.Errorf("agent/shaper: summarize: %w", err)
 	}
@@ -1027,7 +1046,7 @@ func hasMarker(entries []Entry) bool {
 // renderOptions is the policy's share of the rendering knobs.
 func (p ShaperPolicy) renderOptions() RenderOptions {
 	return RenderOptions{ToolFormat: p.ToolFormat, VerbatimToolResults: p.VerbatimToolResults,
-		FoldUserIntoToolResult: p.FoldUserIntoToolResult}
+		FoldUserIntoToolResult: p.FoldUserIntoToolResult, ReplayReasoning: p.ReplayReasoning}
 }
 
 // stub truncates one entry, keeping the end of it this tool's answers live at.
@@ -1197,6 +1216,14 @@ func DefaultSummaryPrompt(task string, budget int) string {
 // sends it: a staged request is not the session's prefix, and naming the
 // session's slot for it would route it there for nothing.
 func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, budget, window int, cacheKey string) (string, error) {
+	return sh.summarizeFrom(ctx, entries, replayFrom(entries, sh.Policy.ReplayReasoning), task, budget, window, cacheKey)
+}
+
+// summarizeFrom is summarize with the reasoning-replay boundary given as an
+// index into entries, taken from the whole context: the prefix request must
+// render the history as the session's rounds do, and the boundary of a turn is
+// the newest user entry of the session, not of the folded part.
+func (sh *Shaper) summarizeFrom(ctx context.Context, entries []Entry, replayAt int, task string, budget, window int, cacheKey string) (string, error) {
 	prompt, system := sh.SummaryPrompt, sh.SummarySystem
 	if prompt == nil {
 		prompt = DefaultSummaryPrompt
@@ -1242,9 +1269,9 @@ func (sh *Shaper) summarize(ctx context.Context, entries []Entry, task string, b
 	start := 0
 	if sh.SessionPrefix.System != "" {
 		if cut := sh.prefixCut(entries, lines, header, budget, window); cut > 0 {
-			msgs := groupMessages(sh.SessionPrefix.System, entries[:cut],
+			msgs := groupMessagesFrom(sh.SessionPrefix.System, entries[:cut],
 				func(_ int, e Entry) string { return e.Content },
-				sh.Policy.renderOptions())
+				sh.Policy.renderOptions(), replayAt)
 			msgs = append(msgs, llm.Message{Role: "user", Content: header})
 			out, err := sh.summaryCallWithPrefix(ctx, msgs, budget, cacheKey)
 			var tooLarge *llm.InputTooLargeError

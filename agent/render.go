@@ -125,6 +125,8 @@ type RenderOptions struct {
 	VerbatimToolResults bool
 	// FoldUserIntoToolResult: see ShaperPolicy.FoldUserIntoToolResult.
 	FoldUserIntoToolResult bool
+	// ReplayReasoning: see ShaperPolicy.ReplayReasoning.
+	ReplayReasoning ReasoningReplay
 }
 
 // userFrame prefixes a user's words folded into a tool result
@@ -165,6 +167,13 @@ func foldIntoTool(m *llm.Message, s string) {
 // order depends only on the entries, so round N's messages stay a prefix of
 // round N+1's and the provider's prompt cache keeps hitting.
 func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry) string, ro RenderOptions) []llm.Message {
+	return groupMessagesFrom(system, entries, contentOf, ro, replayFrom(entries, ro.ReplayReasoning))
+}
+
+// groupMessagesFrom is groupMessages with the reasoning boundary given:
+// assistant entries at index >= from render their reasoning (replay.go). A
+// render of a prefix of the context passes the whole context's boundary.
+func groupMessagesFrom(system string, entries []Entry, contentOf func(i int, e Entry) string, ro RenderOptions, from int) []llm.Message {
 	out := make([]llm.Message, 0, len(entries)+1)
 	if system != "" {
 		out = append(out, llm.Message{Role: "system", Content: system})
@@ -207,12 +216,19 @@ func groupMessages(system string, entries []Entry, contentOf func(i int, e Entry
 			flush()
 			release()
 			open = 0
-			m := llm.Message{Role: "assistant", Content: contentOf(i, e)}
+			content := contentOf(i, e)
+			m := llm.Message{Role: "assistant", Content: content}
+			if i >= from {
+				withReasoning(&m, e, content)
+			}
 			pending = &m
 		case KindToolCall:
 			if pending == nil {
 				m := llm.Message{Role: "assistant"}
 				pending = &m
+			}
+			if i >= from {
+				withReasoning(pending, e, contentOf(i, e))
 			}
 			open++
 			if ro.ToolFormat == ToolFormatHeredoc {

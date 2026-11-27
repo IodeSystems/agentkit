@@ -22,6 +22,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -87,11 +88,18 @@ type Entry struct {
 	// the round's Usage: the KindAssistant reply, or — for a round with no
 	// prose — its first KindToolCall.
 	//
-	// RECORD ONLY. It is never rendered into an llm.Message: replaying reasoning
-	// would spend context on thought the model already acted on. A Store that
-	// does not persist it loses nothing the loop needs.
+	// Rendered into the llm.Message (Message.Reasoning) only under
+	// ShaperPolicy.ReplayReasoning (RenderOptions.ReplayReasoning); the default
+	// never sends it. A Store that does not persist it loses only that replay.
 	Reasoning string `json:"Reasoning,omitempty"`
-	ToolName  string // the tool for KindToolCall / KindToolResult
+	// ReasoningOpaque is the provider's own record of the same reasoning
+	// (llm.StreamChunk.ReasoningOpaque: Anthropic thinking blocks with their
+	// signatures, redacted_thinking, OpenRouter reasoning_details), stamped
+	// where Reasoning is. Round-tripped VERBATIM like Tag and Origin: agent never
+	// reads inside it, and a Store must hand back the same bytes (a re-encoded
+	// signature block is refused). Nil on a record that predates it.
+	ReasoningOpaque json.RawMessage `json:"ReasoningOpaque,omitempty"`
+	ToolName        string          // the tool for KindToolCall / KindToolResult
 	// Tag is an opaque display label used only when rendering a
 	// KindNotification (e.g. the host's raw event-type "nudge"). Empty →
 	// the Kind string is used.
