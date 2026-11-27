@@ -159,3 +159,9 @@ Carl: "io listen events that have stt stream input audio that feeds a model", "C
 - **risks:** `Heard` is an estimate for every provider but ElevenLabs; too high and the model believes it said something unheard. Echo of our own TTS read as user speech triggers false barge-in (host). Split phrases break mid-number or abbreviation ("e.g.", "3.5").
 - **blocking decisions (Carl):** (a) where "io" lives (aw4 events, `/para io`, new), which names the first host; (b) the marker for a cut reply: a new `Entry` field (e.g. `Interrupted bool`, the model sees nothing) vs. a following `KindNotification` "user interrupted after: …" the model sees; (c) splitter location: new package `speech/` vs. `llm`; (d) `Heard` in bytes of text (proposed) vs. runes vs. a string prefix.
 - **optional extensions:** speculative turn; a reasoning-delta hook beside `OnAssistantToken`; stdlib WebSocket client in agentkit (icebox unless two hosts need it).
+
+### ⏸ mcpmgr outbound request-id hook (2026-11-27)
+- **what:** `mcpmgr.WithRequestIDFunc(ctx, func(id json.RawMessage))`, called once a tools/call id is allocated (stdio + http), so dun can route mcpshell's `host/call` `evalRequestId` to the session whose eval it belongs to.
+- **status:** Carl approved (2026-11-27). dun-2a then said hold: its pilot (exec moved into eval) showed no gain on Qwen.
+- **resume condition:** dun-2a (or Carl) says the exec-in-eval line continues. Capacity: a decision (Carl, via dun).
+- **evidence:** dun-2a message 2026-11-27; outbound ids already tracked for cancel in `mcpmgr/jsonrpc.go` `call()` and `mcpmgr/http.go` (6f52d0d).
