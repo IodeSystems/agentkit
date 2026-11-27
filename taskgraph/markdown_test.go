@@ -98,7 +98,7 @@ func TestValidateRulesEachReportAProblemWithLine(t *testing.T) {
 		{"dropped no reason", "## 1 [-] a\ndone when: x\n", "1", "reason"},
 		{"bad replaces", "## 1 [ ] a\ndone when: x\nreplaces: 7\n", "1", "replaces 7"},
 		{"bad effort", "## 1 [ ] a\ndone when: x\neffort: huge\n", "1", "effort"},
-		{"bad box", "## 1 [?] a\ndone when: x\n", "1", "box"},
+		{"bad box is no section", "## 1 [?] a\ndone when: x\n", "", "outside a node section"},
 		{"not a field", "## 1 [ ] a\ndone when: x\nwhat is this\n", "1", "not a field"},
 	}
 	for _, c := range cases {
@@ -183,5 +183,67 @@ func TestToolRejectsBadEffortAndKeepsGoodOne(t *testing.T) {
 	call(st, "", ToolUpdate, map[string]any{"id": "1", "effort": "low"})
 	if viewp(t, st).Get("1").Effort != "low" {
 		t.Error("effort not updated")
+	}
+}
+
+func TestMarkdownOwnerRoundTripsInCanonicalOrder(t *testing.T) {
+	in := "## 1 [ ] a\neffort: low\nowner: team/alpha 2\ndone when: x\n"
+	g, probs := ParseMarkdown(in)
+	if len(probs) > 0 || g.Get("1").Owner != "team/alpha 2" {
+		t.Fatalf("%v %+v", probs, g.Nodes)
+	}
+	if got := g.Markdown(); got != in {
+		t.Errorf("round trip changed the text:\n%s\n--- want\n%s", got, in)
+	}
+}
+
+func TestMarkdownOwnerInSharedLineParses(t *testing.T) {
+	g, probs := ParseMarkdown("## 1 [ ] a\nowner: bob · effort: low · done when: x\n")
+	if len(probs) > 0 {
+		t.Fatal(probs)
+	}
+	if n := g.Get("1"); n.Owner != "bob" || n.Effort != "low" || n.DoneWhen != "x" {
+		t.Errorf("node: %+v", n)
+	}
+	if want := "## 1 [ ] a\neffort: low\nowner: bob\ndone when: x\n"; g.Markdown() != want {
+		t.Errorf("canonical: %q", g.Markdown())
+	}
+}
+
+func TestMarkdownNotesHeadingIsBodyNotSection(t *testing.T) {
+	in := "## 1 [ ] a\ndone when: x\n\nintro\n\n## Notes\nmore\n"
+	g, probs := ParseMarkdown(in)
+	if len(probs) > 0 || len(g.Nodes) != 1 {
+		t.Fatalf("%v %+v", probs, g.Nodes)
+	}
+	if want := "intro\n\n## Notes\nmore"; g.Nodes[0].Details != want {
+		t.Errorf("details: %q", g.Nodes[0].Details)
+	}
+	if g.Markdown() != in {
+		t.Errorf("round trip: %q", g.Markdown())
+	}
+}
+
+// The one ambiguous case: a body line outside a fence that looks like a
+// section is a section.
+func TestMarkdownSectionShapedBodyLineOutsideFenceStartsSection(t *testing.T) {
+	g, _ := ParseMarkdown("## 1 [ ] a\ndone when: x\n\n## 3 [x] title\n")
+	if len(g.Nodes) != 2 || g.Nodes[1].ID != "3" || g.Nodes[1].Status != Done {
+		t.Errorf("%+v", g.Nodes)
+	}
+}
+
+func TestMarkdownMistypedBoxIsAProblemNotSilentBody(t *testing.T) {
+	for _, h := range []string{"## 7 [?] new step", "## 7 [] new step", "## 7 [xx] new step", "## 7 [x]new step"} {
+		g, probs := ParseMarkdown("## 1 [ ] a\ndone when: x\n\nbody\n\n" + h + "\n")
+		if len(probs) != 1 || probs[0].Line != 6 || !strings.Contains(probs[0].Msg, "box") && !strings.Contains(probs[0].Msg, "heading") {
+			t.Errorf("%q: %v", h, probs)
+		}
+		if strings.Contains(g.Nodes[0].Details, "## 7") {
+			t.Errorf("%q became body: %q", h, g.Nodes[0].Details)
+		}
+	}
+	if _, probs := ParseMarkdown("## 1 [ ] a\ndone when: x\n\n## 1 a\n"); len(probs) != 0 {
+		t.Errorf("no bracket is body: %v", probs)
 	}
 }

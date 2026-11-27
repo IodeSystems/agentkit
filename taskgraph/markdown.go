@@ -7,13 +7,20 @@
 //
 //	## <id> [<box>] <title>              one section per node
 //	effort: high
+//	owner: any non-empty text, not checked here
 //	needs: 1, 2
 //	done when: what has to be true
 //	account: how it was met
 //	reason: why blocked or dropped
 //	replaces: 3
 //
-//	Free Markdown: Node.Details. Any length; "## " inside a code fence is text.
+//	Free Markdown: Node.Details. Any length.
+//
+// Section rule: a line starts a section ONLY when it matches
+// "## <id> [<box>] <title>": an id with no space, then a box below. Any other
+// "## ..." line (say "## Notes") is Details, and so is every line inside a code
+// fence. The one ambiguous case: a Details line outside a fence that does match,
+// such as "## 3 [x] title", reads back as a new section; fence it.
 //
 // Box: " " todo, ">" doing, "x" done, "!" blocked, "-" dropped. Field lines run
 // to the first blank line. The writer puts one field per line, in the order
@@ -21,11 +28,10 @@
 // one line joined by " · ". Nodes come out topologically, ties by id, so the
 // same plan is the same text and a diff of two texts is a diff of the plan.
 //
-// Not in the text, so a round trip does not keep them: Owner, ClosedAt,
-// ClosedBy, Meta, Seq (the reader sets Seq to the largest numeric id). Status
-// changes are not checked against the transition table: the text says where a
-// node is, not how it got there. A Details line that starts with "## " outside
-// a fence reads back as a new section.
+// Not in the text, so a round trip does not keep them: ClosedAt, ClosedBy,
+// Meta, Seq (the reader sets Seq to the largest numeric id). Status changes are
+// not checked against the transition table: the text says where a node is, not
+// how it got there.
 //
 // Why the reader reports every problem instead of the first: the text is
 // edited by a person or a cheap model, and one round of "fix these" beats five.
@@ -65,7 +71,7 @@ var boxOf = map[Status]string{Todo: " ", Doing: ">", Done: "x", Blocked: "!", Dr
 var statusOfBox = map[string]Status{" ": Todo, ">": Doing, "x": Done, "!": Blocked, "-": Dropped}
 
 // fieldKeys is the field order of the canonical form.
-var fieldKeys = []string{"effort", "needs", "done when", "account", "reason", "replaces"}
+var fieldKeys = []string{"effort", "owner", "needs", "done when", "account", "reason", "replaces"}
 
 // idLess orders ids: numbers by value and before words, words by text.
 func idLess(a, b string) bool {
@@ -148,7 +154,7 @@ func (g *Graph) Markdown() string {
 		}
 		fmt.Fprintf(&b, "## %s [%s] %s\n", n.ID, box, n.Title)
 		vals := map[string]string{
-			"effort": n.Effort, "needs": strings.Join(n.Needs, ", "), "done when": n.DoneWhen,
+			"effort": n.Effort, "owner": n.Owner, "needs": strings.Join(n.Needs, ", "), "done when": n.DoneWhen,
 			"account": n.Account, "reason": n.Why, "replaces": n.Replaces,
 		}
 		for _, k := range fieldKeys {
@@ -241,11 +247,22 @@ func ParseMarkdown(text string) (*Graph, []Problem) {
 	}
 	for i, line := range lines {
 		no := i + 1
-		if fenced == "" && strings.HasPrefix(line, "## ") {
-			flush()
-			cur = parseHeading(g, line, no, &probs)
-			inFields = true
-			continue
+		if fenced == "" {
+			if id, box, title, ok := sectionHeading(line); ok {
+				flush()
+				cur = &Node{ID: id, Status: statusOfBox[box], Title: clean(title), line: no}
+				g.Nodes = append(g.Nodes, cur)
+				inFields = true
+				continue
+			}
+			if msg := brokenHeading(line); msg != "" {
+				id := ""
+				if cur != nil {
+					id = cur.ID
+				}
+				probs = append(probs, Problem{Line: no, ID: id, Msg: msg})
+				continue
+			}
 		}
 		if cur == nil {
 			if t := strings.TrimSpace(line); t == "" {
@@ -253,7 +270,7 @@ func ParseMarkdown(text string) (*Graph, []Problem) {
 			} else if goal, ok := strings.CutPrefix(line, "# Plan:"); ok && len(g.Nodes) == 0 && g.Goal == "" {
 				g.Goal = strings.TrimSpace(goal)
 			} else {
-				probs = append(probs, Problem{Line: no, Msg: "text outside a node section; a node starts with \"## <id> [<box>] <title>\""})
+				probs = append(probs, Problem{Line: no, Msg: "text outside a node section; a node starts with \"## <id> [<box>] <title>\", box one of \" \", \">\", \"x\", \"!\", \"-\""})
 			}
 			continue
 		}
@@ -288,6 +305,8 @@ func setField(n *Node, k, v string) {
 	switch k {
 	case "effort":
 		n.Effort = v
+	case "owner":
+		n.Owner = v
 	case "needs":
 		n.Needs = cleanList(strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }))
 	case "done when":
@@ -301,27 +320,46 @@ func setField(n *Node, k, v string) {
 	}
 }
 
-// parseHeading reads "## id [box] title" and appends the node to g. A heading
-// it cannot read still makes a node when it has an id, so the later checks
-// speak of it by id.
-func parseHeading(g *Graph, line string, no int, probs *[]Problem) *Node {
-	rest := strings.TrimSpace(strings.TrimPrefix(line, "## "))
-	id, rest, _ := strings.Cut(rest, " ")
-	n := &Node{ID: id, Status: Todo, line: no}
-	g.Nodes = append(g.Nodes, n)
-	rest = strings.TrimSpace(rest)
-	if len(rest) >= 3 && rest[0] == '[' && rest[2] == ']' {
-		if st, ok := statusOfBox[rest[1:2]]; ok {
-			n.Status = st
-		} else {
-			*probs = append(*probs, Problem{Line: no, ID: id, Msg: fmt.Sprintf("box %q is not known (\" \" todo, \">\" doing, \"x\" done, \"!\" blocked, \"-\" dropped)", rest[1:2])})
-		}
-		n.Title = clean(rest[3:])
-	} else {
-		*probs = append(*probs, Problem{Line: no, ID: id, Msg: "the heading needs a box: \"## <id> [<box>] <title>\""})
-		n.Title = clean(rest)
+// sectionHeading reads "## <id> [<box>] <title>": an id with no space and a
+// known box. Anything else is not a section.
+func sectionHeading(line string) (id, box, title string, ok bool) {
+	rest, found := strings.CutPrefix(line, "## ")
+	if !found {
+		return
 	}
-	return n
+	id, rest, _ = strings.Cut(rest, " ")
+	if id == "" || len(rest) < 3 || rest[0] != '[' || rest[2] != ']' {
+		return "", "", "", false
+	}
+	box = rest[1:2]
+	if _, known := statusOfBox[box]; !known {
+		return "", "", "", false
+	}
+	rest = rest[3:]
+	if rest != "" && rest[0] != ' ' {
+		return "", "", "", false
+	}
+	return id, box, strings.TrimSpace(rest), true
+}
+
+// brokenHeading is the problem text for a line that tries to be a heading,
+// "## <id> [<anything up to ]>] ...", and is not one: read as body text it
+// would drop a step with no word. "## Notes" and "## 1 a" have no bracket and
+// are body.
+func brokenHeading(line string) string {
+	rest, ok := strings.CutPrefix(line, "## ")
+	if !ok {
+		return ""
+	}
+	id, rest, _ := strings.Cut(rest, " ")
+	end := strings.Index(rest, "]")
+	if id == "" || !strings.HasPrefix(rest, "[") || end < 0 {
+		return ""
+	}
+	if _, known := statusOfBox[rest[1:end]]; !known {
+		return fmt.Sprintf("box not known: use one of \" \" todo, \">\" doing, \"x\" done, \"!\" blocked, \"-\" dropped; got %q", rest[1:end])
+	}
+	return "the heading needs a space after the box: \"## <id> [<box>] <title>\""
 }
 
 // Validate is every rule a plan must keep, for a host to run on an edit before
