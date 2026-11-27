@@ -218,6 +218,19 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `files.Config.MediaRef = Session.MediaRef` (looks in `Store.Context` now; a
   folded-away entry → not found). A `media:` read path never reaches `resolve`;
   `./media:x` is the file. `MediaReadTool` names the tool in the label.
+- **Reasoning replay is opt-in and per dialect (`llm/replay.go`, `agent/replay.go`).**
+  `Message.Reasoning`/`ReasoningOpaque` are `json:"-"`; `chatBody` sets an
+  unexported wire field on a COPY of assistant messages only: llamacpp/openai →
+  `reasoning_content`, openrouter → `reasoning_details` (opaque) else `reasoning`,
+  Messages API → `reasoning_details`, which the shim turns into signed thinking /
+  redacted_thinking blocks first in the turn (unsigned dropped), anthropic-compat →
+  nothing. Opaque = OpenRouter `reasoning_details` array, merged by index in the
+  stream, on the Done chunk; the shim emits one complete item per thinking block at
+  `content_block_stop`, so details text is read only while no plain reasoning field
+  was seen. A 400 naming the sent field (not "missing") teaches
+  `reasoning.replay=refused` → one resend without it. `ShaperPolicy.ReplayReasoning`
+  none (default: byte-identical) / turn (after the newest KindUser of the WHOLE
+  context; the prefix fold passes that boundary in) / all; a stubbed entry drops it.
 - **Constrained decoding is server-side + separate.** `ChatOpts.Grammar`
   (GBNF) and `ChatOpts.ResponseFormat` are forwarded raw to the server (hard
   guarantee). The Validator is the client-side (soft) counterpart. Different

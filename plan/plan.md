@@ -25,6 +25,13 @@ Shipped (slices 1–5, passthrough, corrallm publishing, LoadDeclared reader): `
 
 ### ✅ Effort selector rooted in agentkit → `done.md` (2026-11-18, not tagged)
 
+### ◐ Reasoning replay (2026-11-27, Carl approved incl. Anthropic)
+Built, not released: `llm/replay.go`, `agent/replay.go`, shim branch `reasoning-replay` (66adce2, not tagged). `Message.Reasoning`/`ReasoningOpaque`, per-dialect wire field, `reasoning.replay=refused` learning + one resend, `Entry.ReasoningOpaque`, `ShaperPolicy.ReplayReasoning` none/turn/all. Docs: `docs/features.md` §1, §8; CLAUDE.md key mechanic.
+- **next:** Carl tags the shim (v0.7.0) and bumps the require; `TestReplayAnthropicSignatureRoundTripsThroughTheShim` skips until then (verified passing via GOWORK).
+- **risks:** not checked live on any endpoint. Refusal wordings are from docs/memory, none captured (DeepSeek "remove the reasoning_content", Anthropic bad signature). llama.cpp accepting `reasoning_content` on input is from memory of `common/chat.cpp`, not measured. OpenRouter fragment merge by `index` is an assumption (docs say only "concatenate chunks in order"). The shim merges two consecutive assistant turns, which can put a thinking block after text.
+- **blocking decisions:** none.
+- **optional extensions:** reverse direction (corrallm's /v1/messages) passing real signatures through; dun/aw4 turning on `ReplayTurn` and measuring the token cut.
+
 ### ◐ Reasoning-cut repair (2026-11-16)
 Proposed by corrallm-a3; Carl approved 2026-11-16 (on by default, `NoReasoningCutRepair` off switch). Released in v0.31.0: `agent/reasoningcut.go`. aw4 sends `reasoning_budget_tokens=2500`; empties come mostly from max_tokens running out right after llama-server's forced `</think>`. aw4 said it retries length-cut empties itself (unverified; aw4 007de172a is a daemon rebuild-quiet fix, not that retry, aw4-91 2026-11-20).
 - **found (2026-11-16, code trace):** an empty reply (no text, no tool call) persists nothing and drops its reasoning (`agent/session.go:508`, `:517`); ends `TurnReply`. finish `length` → `*Overflow` → `OnOverflow`, whose Retry is a plain resend. No prefill anywhere; the shim turns a trailing assistant message into a user "Continue." (shim.go:733). `Usage.CompletionTokensDetails.ReasoningTokens` already parsed.

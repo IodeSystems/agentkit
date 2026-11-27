@@ -25,7 +25,9 @@ safety ceiling.
 
 **Finish reasons.** `finish_reason` and OpenRouter's `native_finish_reason` (e.g. `MALFORMED_FUNCTION_CALL`) are kept verbatim: `StreamChunk.FinishReason`/`NativeFinishReason` on the Done chunk, the same names on `llm.Usage` (streaming and non-streaming), and `agent.TurnResult.FinishReason`/`NativeFinishReason` for the Turn's last round.
 
-**OpenRouter `reasoning_details`.** Its `reasoning.text` and `reasoning.summary` entries stream as `StreamChunk.Reasoning`, only when `delta.reasoning` and `delta.reasoning_content` are empty (OpenRouter often sends both; the text is never doubled). `reasoning.encrypted` is ignored. The capability record's `stream.reasoning_field` can read `reasoning_details`.
+**OpenRouter `reasoning_details`.** Its `reasoning.text` and `reasoning.summary` entries stream as `StreamChunk.Reasoning` only while no delta of the stream has carried `delta.reasoning` or `delta.reasoning_content` (OpenRouter often sends both, and the shim repeats a thinking block's text with its signature; the text is never doubled). Every item, `reasoning.encrypted` included, is kept verbatim and merged by `index` (text and summary concatenate, the signature joins its item) into `StreamChunk.ReasoningOpaque` on the Done chunk; `ChatResult` has `Reasoning` and `ReasoningOpaque`. The capability record's `stream.reasoning_field` can read `reasoning_details`.
+
+**Reasoning replay.** `Message.Reasoning` (text) and `Message.ReasoningOpaque` (the provider's record, an array in the `reasoning_details` shape) on an assistant message are sent back in the endpoint's own field, only when set: llama.cpp and openai dialects (DeepSeek, vLLM) get `reasoning_content`; OpenRouter gets `reasoning_details` when the opaque record is there, else `reasoning`; the Claude Messages API gets the opaque record, which the shim turns into thinking and `redacted_thinking` blocks ahead of the text and `tool_use` (text with no signature is never sent: Anthropic refuses it); Anthropic's OpenAI-compatible endpoint gets nothing. A 400/422 that names the field it was sent (or, on the Messages API, a bad signature) teaches `reasoning.replay=refused` for that endpoint+model+provider; the request is resent once without it, and later requests skip it, reported through `OnTranslate` as key `messages.reasoning`. A body asking for MORE reasoning ("Missing `reasoning_content`") teaches nothing. `agent` stores both on the round's entry and sends them under `ShaperPolicy.ReplayReasoning` (section 8). Thinking models re-derive their plan each request without it (dun: 4.6x pi's cost on DeepSeek; replaying cut reasoning tokens ~40%). The Anthropic round trip needs the shim's reasoning-replay release.
 
 A provider can also fail with HTTP 200 and then an `{"error":{...}}` SSE event. The client keeps the whole object as `*llm.StreamError` (message, code as number or string, type, param, raw `metadata`, `retry_after`), on `StreamChunk.StreamErr` and as the Turn's error (`errors.As`). If such an error arrives before any content, reasoning, tool call or usage was forwarded and looks transient (code 429 or 5xx, or "overloaded", "rate limit", "unavailable" in code, type or message), the request is re-sent inside the same `RetryBudget`, jittered, honoring the error's `retry_after`; the caller sees one stream. An event with `"reason":"queue-timeout"` (corrallm, after it queued the request; `StreamError.Reason`, and `Status` counts when `code` is absent) retries immediately like a queue-timeout 429, at most `maxQueueTimeoutStreak` (5) times in a row, then backs off. After the first forwarded chunk it is not retried.
 
@@ -491,6 +493,21 @@ tokens, and the same turn continues to the reply. Every Turn also reports
 `TurnResult.Usage` — **Total** billed vs **Active** window. The `compact` demo
 shows a compaction folding `1150→28` tokens, the summary emitted as a hidden
 field, and the `total`/`active` tally.
+
+**Reasoning replay (`ShaperPolicy.ReplayReasoning`, opt-in).** A round's reasoning
+is stored on the entry that carries its usage (the reply, or the first call of a
+round with no prose): `Entry.Reasoning` and `Entry.ReasoningOpaque`, the latter
+round-tripped verbatim like `Tag`/`Origin` (a re-encoded signature is refused). A
+round cut for repetition stores none. `agent.ReplayNone` (default) renders none,
+so the requests are byte-identical to before; `ReplayTurn` renders the reasoning
+of assistant entries after the newest `KindUser` (the current tool loop: what
+DeepSeek and Anthropic ask for); `ReplayAll` renders every one. Without a Shaper,
+`RenderOptions.ReplayReasoning` with `DefaultContextBuilderWith`. An entry's
+rendering depends only on the entries, so the cached prefix holds within a turn;
+under `ReplayTurn` a new user message drops the earlier reasoning once (one cache
+break per user turn), and an entry LOD stubs loses its reasoning with its content.
+The token estimate counts the replayed text; the prefix fold uses the session's
+turn boundary, not the folded part's.
 
 **A fold can keep more than the pristine tail (`ShaperPolicy.FoldKeepPct`, opt-in).**
 By default a fold keeps only the `PreserveLast*` tail, so the window is nearly
