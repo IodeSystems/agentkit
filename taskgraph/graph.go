@@ -90,6 +90,12 @@ type Node struct {
 	// level; the host maps it to thinking for the step. "" is not said. Old
 	// stores have none.
 	Effort string `json:"effort,omitempty"`
+	// Report is what the step's final report must contain: the brief for a
+	// sub-agent's reply. "" is not said. Old stores have none.
+	Report string `json:"report,omitempty"`
+	// Result is where the received report is (a host writes a file path) or a
+	// short result. "" until there is one. Old stores have none.
+	Result string `json:"result,omitempty"`
 	// Meta is host hints, kept as they are. API only: not in the tool schema.
 	Meta map[string]string `json:"meta,omitempty"`
 
@@ -157,7 +163,7 @@ func cleanList(in []string) []string {
 }
 
 // Add makes a node from n's Title, Details, Needs, Owner, DoneWhen,
-// Effort, Meta and Replaces. It starts as todo.
+// Effort, Report, Meta and Replaces. It starts as todo.
 func (g *Graph) Add(n Node) (*Node, error) {
 	n.Title, n.DoneWhen, n.Details = clean(n.Title), clean(n.DoneWhen), strings.TrimSpace(n.Details)
 	if n.Title == "" {
@@ -169,6 +175,8 @@ func (g *Graph) Add(n Node) (*Node, error) {
 	if err := checkEffort(n.Effort); err != nil {
 		return nil, err
 	}
+	n.Report = clean(n.Report)
+	n.Result = ""
 	n.Needs = cleanList(n.Needs)
 	if err := g.checkNeeds("", n.Needs); err != nil {
 		return nil, err
@@ -240,9 +248,9 @@ func (g *Graph) path(from, to string) []string {
 // Status is todo or doing only: done, blocked and dropped carry what they need
 // (an account, a reason) through SetStatus.
 type Patch struct {
-	Title, Details, DoneWhen, Effort *string
-	Needs                            *[]string
-	Status                           *Status
+	Title, Details, DoneWhen, Effort, Report, Result *string
+	Needs                                            *[]string
+	Status                                           *Status
 }
 
 // Update applies p to node id. A change of Needs is the re-pointing of an edge.
@@ -270,6 +278,12 @@ func (g *Graph) Update(id string, p Patch) error {
 			return err
 		}
 		c.Effort = *p.Effort
+	}
+	if p.Report != nil {
+		c.Report = clean(*p.Report)
+	}
+	if p.Result != nil {
+		c.Result = clean(*p.Result)
 	}
 	if p.Needs != nil {
 		c.Needs = cleanList(*p.Needs)

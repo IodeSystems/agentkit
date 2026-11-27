@@ -262,8 +262,8 @@ func TestDefs(t *testing.T) {
 		props    []string
 		note     bool
 	}{
-		{ToolAdd, []string{"title", "done_when"}, []string{"title", "details", "done_when", "needs", "replaces", "effort"}, true},
-		{ToolUpdate, []string{"id"}, []string{"id", "title", "details", "done_when", "needs", "status", "effort"}, false},
+		{ToolAdd, []string{"title", "done_when"}, []string{"title", "details", "done_when", "needs", "replaces", "effort", "report"}, true},
+		{ToolUpdate, []string{"id"}, []string{"id", "title", "details", "done_when", "needs", "status", "effort", "report", "result"}, false},
 		{ToolClose, []string{"id", "outcome"}, []string{"id", "outcome", "account", "reason"}, false},
 		{ToolShow, []string{}, []string{"id"}, true},
 	}

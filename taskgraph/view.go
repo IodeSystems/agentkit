@@ -125,6 +125,8 @@ func (g *Graph) Detail(n *Node) string {
 	}
 	add("details", n.Details)
 	add("done when", n.DoneWhen)
+	add("report", n.Report)
+	add("result", n.Result)
 	if len(n.Needs) > 0 {
 		add("needs", strings.Join(n.Needs, ", "))
 	}

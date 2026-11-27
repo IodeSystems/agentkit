@@ -10,6 +10,8 @@
 //	owner: any non-empty text, not checked here
 //	needs: 1, 2
 //	done when: what has to be true
+//	report: what the report back must contain
+//	result: where the report is, or a short result
 //	account: how it was met
 //	reason: why blocked or dropped
 //	replaces: 3
@@ -71,7 +73,7 @@ var boxOf = map[Status]string{Todo: " ", Doing: ">", Done: "x", Blocked: "!", Dr
 var statusOfBox = map[string]Status{" ": Todo, ">": Doing, "x": Done, "!": Blocked, "-": Dropped}
 
 // fieldKeys is the field order of the canonical form.
-var fieldKeys = []string{"effort", "owner", "needs", "done when", "account", "reason", "replaces"}
+var fieldKeys = []string{"effort", "owner", "needs", "done when", "report", "result", "account", "reason", "replaces"}
 
 // idLess orders ids: numbers by value and before words, words by text.
 func idLess(a, b string) bool {
@@ -155,6 +157,7 @@ func (g *Graph) Markdown() string {
 		fmt.Fprintf(&b, "## %s [%s] %s\n", n.ID, box, n.Title)
 		vals := map[string]string{
 			"effort": n.Effort, "owner": n.Owner, "needs": strings.Join(n.Needs, ", "), "done when": n.DoneWhen,
+			"report": n.Report, "result": n.Result,
 			"account": n.Account, "reason": n.Why, "replaces": n.Replaces,
 		}
 		for _, k := range fieldKeys {
@@ -311,6 +314,10 @@ func setField(n *Node, k, v string) {
 		n.Needs = cleanList(strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }))
 	case "done when":
 		n.DoneWhen = v
+	case "report":
+		n.Report = v
+	case "result":
+		n.Result = v
 	case "account":
 		n.Account = v
 	case "reason":

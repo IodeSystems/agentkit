@@ -124,6 +124,8 @@ func mkdef(name, desc string, props map[string]any, required ...string) llm.Tool
 
 var effortProp = prop("string", "how hard the step is: low (mechanical), medium, high (design or debugging); sets thinking for the step")
 
+var reportProp = prop("string", "what the report back must contain")
+
 func defs(note string) []llm.ToolDef {
 	if note != "" {
 		note = " " + note
@@ -144,6 +146,7 @@ func defs(note string) []llm.ToolDef {
 				"needs":     strs("ids this node waits on"),
 				"replaces":  prop("string", "the id of a dropped node this one stands in for"),
 				"effort":    effortProp,
+				"report":    reportProp,
 			}, "title", "done_when"),
 		mkdef(ToolUpdate, "Change a node: its text, what it needs, or its status (doing when you begin it).",
 			map[string]any{
@@ -153,6 +156,8 @@ func defs(note string) []llm.ToolDef {
 				"done_when": prop("string", "what has to be true for it to be done"),
 				"needs":     strs("ids this node waits on; replaces the list (the way to re-point an edge)"),
 				"effort":    effortProp,
+				"report":    reportProp,
+				"result":    prop("string", "where the report is, or a short result"),
 				"status": map[string]any{"type": "string", "enum": []string{"todo", "doing"},
 					"description": "doing when you begin; todo to take a block back"},
 			}, "id"),
@@ -176,6 +181,8 @@ type args struct {
 	Needs    *[]string `json:"needs"`
 	Replaces string    `json:"replaces"`
 	Effort   *string   `json:"effort"`
+	Report   *string   `json:"report"`
+	Result   *string   `json:"result"`
 	Status   *Status   `json:"status"`
 	Outcome  string    `json:"outcome"`
 	Account  string    `json:"account"`
@@ -330,7 +337,7 @@ func (t *Tools) Dispatch(ctx context.Context, name, raw string) string {
 		}
 		switch name {
 		case ToolAdd:
-			nn := Node{Title: str(a.Title), Details: str(a.Details), DoneWhen: str(a.DoneWhen), Replaces: a.Replaces, Owner: actor, Effort: str(a.Effort)}
+			nn := Node{Title: str(a.Title), Details: str(a.Details), DoneWhen: str(a.DoneWhen), Replaces: a.Replaces, Owner: actor, Effort: str(a.Effort), Report: str(a.Report)}
 			if a.Needs != nil {
 				nn.Needs = *a.Needs
 			}
@@ -346,7 +353,7 @@ func (t *Tools) Dispatch(ctx context.Context, name, raw string) string {
 			}
 		case ToolUpdate:
 			if err := g.Update(a.ID, Patch{Title: a.Title, Details: a.Details, DoneWhen: a.DoneWhen,
-				Needs: a.Needs, Effort: a.Effort, Status: a.Status}); err != nil {
+				Needs: a.Needs, Effort: a.Effort, Report: a.Report, Result: a.Result, Status: a.Status}); err != nil {
 				return err
 			}
 			n = g.Get(a.ID)

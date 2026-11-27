@@ -32,7 +32,8 @@ taskgraph/  opt-in model-kept plan: DAG of nodes, the four `plan_*` tools (`task
           (what a write changed, which owners to tell). Shared by a main agent and
           its sub-agents through ONE host-provided Store (no impl shipped). Owner is
           opaque; permission, approval, delegation and delivery are host hooks.
-          `Node.Effort` (low/medium/high, step difficulty; opaque, not a provider level) and
+          `Node.Effort` (low/medium/high, step difficulty; opaque, not a provider level),
+          `Node.Report` (brief for the step's report back; plan_add/update) and `Node.Result` (where it is; plan_update) and
           `Node.Meta` (host hints, no tool field). `Graph.Markdown`/`ParseMarkdown`/`Validate`
           (markdown.go): plan as editable text + the checks a host runs on an edit.
           imports llm + stdlib only; agent does not import it. Ported from dun.
