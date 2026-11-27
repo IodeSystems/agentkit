@@ -18,6 +18,7 @@ package taskgraph
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,6 +85,27 @@ type Node struct {
 	// host closed the node through Graph.SetStatus. A reopen clears it. It is
 	// for host statistics: plan_show does not print it.
 	ClosedBy string `json:"closed_by,omitempty"`
+	// Effort is how hard the step is: "low" (mechanical), "medium" or "high"
+	// (design or debugging). Opaque to agentkit: it is not a provider effort
+	// level; the host maps it to thinking for the step. "" is not said. Old
+	// stores have none.
+	Effort string `json:"effort,omitempty"`
+	// Meta is host hints, kept as they are. API only: not in the tool schema.
+	Meta map[string]string `json:"meta,omitempty"`
+
+	// line is the heading's line when the node came from ParseMarkdown, so
+	// Validate can point at it. Never stored.
+	line int
+}
+
+// Efforts are the values Node.Effort may take, besides "".
+var Efforts = []string{"low", "medium", "high"}
+
+func checkEffort(e string) error {
+	if e == "" || slices.Contains(Efforts, e) {
+		return nil
+	}
+	return fmt.Errorf("effort: %q is not known (low, medium or high)", e)
 }
 
 // now is the clock for ClosedAt; a test replaces it.
@@ -91,6 +113,9 @@ var now = time.Now
 
 // Graph is the whole plan.
 type Graph struct {
+	// Goal is what the plan is for, one line. It is the "# Plan: <goal>"
+	// heading of the Markdown form; "" when none.
+	Goal  string  `json:"goal,omitempty"`
 	Nodes []*Node `json:"nodes"`
 	// Seq numbers the next node; ids are never reused.
 	Seq int `json:"seq,omitempty"`
@@ -103,6 +128,7 @@ func (g *Graph) Clone() Graph {
 	for i, n := range g.Nodes {
 		cn := *n
 		cn.Needs = slices.Clone(n.Needs)
+		cn.Meta = maps.Clone(n.Meta)
 		c.Nodes[i] = &cn
 	}
 	return c
@@ -130,8 +156,8 @@ func cleanList(in []string) []string {
 	return out
 }
 
-// Add makes a node from n's Title, Details, Needs, Owner, DoneWhen
-// and Replaces. It starts as todo.
+// Add makes a node from n's Title, Details, Needs, Owner, DoneWhen,
+// Effort, Meta and Replaces. It starts as todo.
 func (g *Graph) Add(n Node) (*Node, error) {
 	n.Title, n.DoneWhen, n.Details = clean(n.Title), clean(n.DoneWhen), strings.TrimSpace(n.Details)
 	if n.Title == "" {
@@ -139,6 +165,9 @@ func (g *Graph) Add(n Node) (*Node, error) {
 	}
 	if n.DoneWhen == "" {
 		return nil, fmt.Errorf("a node needs done_when: what has to be true for it to be done")
+	}
+	if err := checkEffort(n.Effort); err != nil {
+		return nil, err
 	}
 	n.Needs = cleanList(n.Needs)
 	if err := g.checkNeeds("", n.Needs); err != nil {
@@ -211,9 +240,9 @@ func (g *Graph) path(from, to string) []string {
 // Status is todo or doing only: done, blocked and dropped carry what they need
 // (an account, a reason) through SetStatus.
 type Patch struct {
-	Title, Details, DoneWhen *string
-	Needs                    *[]string
-	Status                   *Status
+	Title, Details, DoneWhen, Effort *string
+	Needs                            *[]string
+	Status                           *Status
 }
 
 // Update applies p to node id. A change of Needs is the re-pointing of an edge.
@@ -235,6 +264,12 @@ func (g *Graph) Update(id string, p Patch) error {
 		if c.DoneWhen = clean(*p.DoneWhen); c.DoneWhen == "" {
 			return fmt.Errorf("a node needs done_when")
 		}
+	}
+	if p.Effort != nil {
+		if err := checkEffort(*p.Effort); err != nil {
+			return err
+		}
+		c.Effort = *p.Effort
 	}
 	if p.Needs != nil {
 		c.Needs = cleanList(*p.Needs)
