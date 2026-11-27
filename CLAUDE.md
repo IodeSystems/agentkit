@@ -111,6 +111,7 @@ plan/     living plan. plan.md = current state + active work + decisions;
   `Scanner` — one frame is one line and a tool result is routinely megabytes;
   (3) `close()`'s cleanup runs under `cleanupOnce` regardless of who closed
   `done` first, or a server that died on its own leaks FDs and a zombie.
+- **MCP cancellation is both ways, on stdio and HTTP.** A server's `notifications/cancelled` cancels the ctx of that server→client request's handler (own ctx per request, from `inflight` in request.go; `mcpmgr.RequestID(ctx)` names it) and no reply is written. A caller's ctx done before a response sends `notifications/cancelled {requestId, reason}` from a goroutine, write errors ignored, never for `initialize`.
 - **Tool `inputSchema` is round-tripped VERBATIM** as `map[string]any`.
   `normalizeSchema` only fills nil `type`/`properties`/`required` (a null
   `required` makes llama.cpp reject the whole chat request) and copies

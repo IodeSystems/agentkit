@@ -100,6 +100,7 @@ type stdioClient struct {
 	notifyMu  sync.RWMutex
 	onNotify  func(method string, params map[string]any)
 	onRequest connRequestHandler
+	inbound   inflight
 
 	// life is canceled when the connection closes; it is the ctx every
 	// request handler gets.
@@ -234,7 +235,13 @@ func (c *stdioClient) readLoop() {
 				Params json.RawMessage `json:"params"`
 			}
 			_ = json.Unmarshal([]byte(line), &req)
-			go func() { c.reply(head.ID, answer(c.life, h, head.Method, req.Params)) }()
+			ctx, end := c.inbound.begin(c.life, head.ID)
+			go func() {
+				defer end()
+				if body := serveInflight(ctx, h, head.Method, req.Params); body != nil {
+					c.reply(head.ID, body)
+				}
+			}()
 		default:
 			c.deliverResponse(line)
 		}
@@ -242,17 +249,18 @@ func (c *stdioClient) readLoop() {
 }
 
 func (c *stdioClient) dispatchNotification(line string) {
-	c.notifyMu.RLock()
-	fn := c.onNotify
-	c.notifyMu.RUnlock()
-	if fn == nil {
-		return
-	}
 	var n struct {
 		Method string         `json:"method"`
 		Params map[string]any `json:"params"`
 	}
 	if err := json.Unmarshal([]byte(line), &n); err != nil {
+		return
+	}
+	c.inbound.cancel(n.Method, n.Params)
+	c.notifyMu.RLock()
+	fn := c.onNotify
+	c.notifyMu.RUnlock()
+	if fn == nil {
 		return
 	}
 	fn(n.Method, n.Params)
@@ -362,6 +370,11 @@ func (c *stdioClient) call(ctx context.Context, method string, params, out any) 
 	case resp = <-ch:
 	case <-ctx.Done():
 		abandon()
+		if method != "initialize" { // spec: MUST NOT cancel initialize
+			// Off this goroutine: a server that stopped reading must not
+			// hold the caller. A write error means it is gone; ignore it.
+			go func() { _ = c.notify(context.Background(), "notifications/cancelled", cancelParams(id, ctx.Err())) }()
+		}
 		return ctx.Err()
 	case <-c.done:
 		// Drain first: a valid response can land in the same instant the read
@@ -461,4 +474,9 @@ func waitExit(waitCh <-chan error, timeout time.Duration) (error, bool) {
 	case <-timer.C:
 		return nil, false
 	}
+}
+
+// cancelParams is the body of notifications/cancelled for our request id.
+func cancelParams(id any, cause error) map[string]any {
+	return map[string]any{"requestId": id, "reason": cause.Error()}
 }

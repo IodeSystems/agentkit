@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -53,6 +54,7 @@ type httpClient struct {
 	notifyMu  sync.RWMutex
 	onNotify  func(method string, params map[string]any)
 	onRequest connRequestHandler
+	inbound   inflight
 
 	// life is canceled by close(); it is the ctx request handlers get.
 	life       context.Context
@@ -183,8 +185,18 @@ func (c *httpClient) checkStatus(resp *http.Response) (*http.Response, error) {
 	return resp, nil
 }
 
-func (c *httpClient) call(ctx context.Context, method string, params, out any) error {
+func (c *httpClient) call(ctx context.Context, method string, params, out any) (retErr error) {
 	id := c.nextID.Add(1)
+	defer func() {
+		if method != "initialize" && ctx.Err() != nil &&
+			(errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded)) {
+			go func() {
+				cctx, cancel := context.WithTimeout(c.life, httpCloseTimeout)
+				defer cancel()
+				_ = c.notify(cctx, "notifications/cancelled", cancelParams(id, ctx.Err()))
+			}()
+		}
+	}()
 	resp, err := c.post(ctx, map[string]any{"jsonrpc": jsonrpcVersion, "id": id, "method": method, "params": params})
 	if err != nil {
 		return err
@@ -282,6 +294,7 @@ func (c *httpClient) handleEvent(ctx context.Context, data, id string) *rpcRespo
 		return nil
 	}
 	if len(msg.ID) == 0 {
+		c.inbound.cancel(msg.Method, msg.Params)
 		c.notifyMu.RLock()
 		fn := c.onNotify
 		c.notifyMu.RUnlock()
@@ -304,7 +317,13 @@ func (c *httpClient) handleEvent(ctx context.Context, data, id string) *rpcRespo
 		return nil
 	}
 	params, _ := json.Marshal(msg.Params)
-	go func() { c.reply(c.life, msg.ID, answer(c.life, h, msg.Method, params)) }()
+	rctx, end := c.inbound.begin(c.life, msg.ID)
+	go func() {
+		defer end()
+		if body := serveInflight(rctx, h, msg.Method, params); body != nil {
+			c.reply(c.life, msg.ID, body)
+		}
+	}()
 	return nil
 }
 

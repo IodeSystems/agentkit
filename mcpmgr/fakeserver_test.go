@@ -159,7 +159,7 @@ func fakeServerMain(scenario string) {
 		// The "roots" scenario: a response from the client (no method, an id)
 		// to the roots/list request below. Echo it as a notification so the
 		// host-side test can read exactly what came back.
-		if msg.Method == "" && len(msg.ID) > 0 && scenario == "roots" {
+		if msg.Method == "" && len(msg.ID) > 0 && (scenario == "roots" || scenario == "cancel-in") {
 			var resp struct {
 				Result json.RawMessage `json:"result"`
 				Error  json.RawMessage `json:"error"`
@@ -173,6 +173,15 @@ func fakeServerMain(scenario string) {
 		if len(msg.ID) == 0 || string(msg.ID) == "null" {
 			if msg.Method == "notifications/initialized" && scenario == "roots" {
 				conn.send(map[string]any{"jsonrpc": "2.0", "id": "r1", "method": "roots/list"})
+			}
+			if msg.Method == "notifications/initialized" && scenario == "cancel-in" {
+				// A request, then its cancellation: the client must stop the
+				// handler and write no reply.
+				conn.send(map[string]any{"jsonrpc": "2.0", "id": "c1", "method": "roots/list"})
+				conn.notify("notifications/cancelled", map[string]any{"requestId": "c1", "reason": "test"})
+			}
+			if msg.Method == "notifications/cancelled" {
+				conn.notify("test/got", map[string]any{"method": msg.Method, "params": string(msg.Params)})
 			}
 			if msg.Method == "notifications/roots/list_changed" {
 				conn.notify("test/got", map[string]any{"method": msg.Method})
@@ -228,6 +237,9 @@ func fakeServerMain(scenario string) {
 				Arguments map[string]any `json:"arguments"`
 			}
 			json.Unmarshal(msg.Params, &p)
+			if scenario == "cancel-out" && p.Name == "hold" {
+				continue // never answers: the client has to give up
+			}
 			conn.result(id, fakeCallResult(p.Name, p.Arguments))
 
 		default:
