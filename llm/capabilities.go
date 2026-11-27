@@ -56,6 +56,7 @@ const (
 	CapReasoningSupported       = "reasoning.supported"        // bool: the endpoint declares a reasoning control (OpenRouter supported_parameters)
 	CapReasoningBudgetField     = "reasoning.budget_field"     // field name
 	CapReasoningBudgetMin       = "reasoning.budget_min"       // int tokens
+	CapReasoningReplay          = "reasoning.replay"           // refused: the endpoint 400s on an assistant message's reasoning field (replay.go)
 	CapLimitsContext            = "limits.context"             // int tokens
 	CapLimitsOutput             = "limits.output"              // int tokens
 	CapStreamUsage              = "stream.usage"               // bool

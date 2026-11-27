@@ -52,6 +52,25 @@ type Message struct {
 	// ToolCallID links a role="tool" result back to the assistant tool call
 	// that produced it (OpenAI requires this correlation).
 	ToolCallID string `json:"tool_call_id,omitempty"`
+
+	// Reasoning and ReasoningOpaque are an ASSISTANT message's reasoning, sent
+	// back so a thinking model does not re-derive its plan every request (see
+	// replay.go). Reasoning is the text; ReasoningOpaque is the provider's own
+	// record of it, kept verbatim: a JSON array in OpenRouter's
+	// reasoning_details shape, which is also how the Claude Messages API's
+	// thinking blocks (with their signatures) and redacted_thinking blocks
+	// cross the shim. A reply read through this client carries both
+	// (StreamChunk.ReasoningOpaque on the Done chunk, ChatResult).
+	//
+	// Tagged "-": the field and shape on the wire depend on the endpoint, so the
+	// client writes them per dialect when it sends, and only on assistant
+	// messages. Unset (the default), the request is byte-identical to one built
+	// before these fields existed.
+	Reasoning       string          `json:"-"`
+	ReasoningOpaque json.RawMessage `json:"-"`
+	// replay is what the client puts on the wire for the two fields above; set
+	// by replayReasoning on a copy, never on a caller's message.
+	replay *replayWire
 }
 
 // ContentPart is one element of a multimodal content array, in OpenAI's chat
@@ -190,13 +209,21 @@ func PDFData(filename string, raw []byte) ContentPart {
 func (m Message) MarshalJSON() ([]byte, error) {
 	type alias Message // strip the custom marshaler to avoid recursion
 	if len(m.Parts) == 0 {
-		return json.Marshal(alias(m))
+		if m.replay == nil {
+			return json.Marshal(alias(m))
+		}
+		return json.Marshal(struct {
+			alias
+			*replayWire
+		}{alias(m), m.replay})
 	}
 	// Outer Content (array, depth 0) shadows alias.Content (string, depth 1).
+	// A nil *replayWire marshals nothing.
 	return json.Marshal(struct {
 		alias
+		*replayWire
 		Content []ContentPart `json:"content"`
-	}{alias: alias(m), Content: m.Parts})
+	}{alias: alias(m), replayWire: m.replay, Content: m.Parts})
 }
 
 // Citation is one citation the model attached to its reply, as the provider
@@ -218,6 +245,11 @@ type ChatResult struct {
 	Content   string
 	ToolCalls []ToolCall
 	Citations []Citation
+	// Reasoning and ReasoningOpaque are the reply's reasoning, as
+	// Message.Reasoning and Message.ReasoningOpaque take them: set both on the
+	// assistant message to send them back.
+	Reasoning       string
+	ReasoningOpaque json.RawMessage
 }
 
 // ToolCall represents a tool call request from the LLM.
@@ -330,8 +362,14 @@ type StreamChunk struct {
 	// evidence that no reasoning happened. Never part of Content, so a consumer
 	// that ignores it sees exactly what it saw before.
 	Reasoning string
-	ToolCall  *ToolCall
-	Done      bool
+	// ReasoningOpaque is the round's reasoning in the provider's own form,
+	// merged from every delta.reasoning_details the stream carried (a JSON
+	// array; see Message.ReasoningOpaque and mergeReasoningDetails). Set on
+	// Done chunks only; nil when the stream carried none. Put it on the
+	// assistant message to replay it.
+	ReasoningOpaque json.RawMessage
+	ToolCall        *ToolCall
+	Done            bool
 	// FinishReason is the choice's finish_reason, verbatim, on the Done chunk
 	// of a round that sent one. NativeFinishReason is OpenRouter's
 	// native_finish_reason (e.g. "MALFORMED_FUNCTION_CALL"). Both empty
@@ -1873,10 +1911,12 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 		}
 		caps = c.capsFor(pin)
 	}
+	// Tool-message media goes where this endpoint takes it (toolmedia.go), and
+	// an assistant message's reasoning into this endpoint's field (replay.go).
+	wire, replayTr := c.replayReasoning(c.wireMessageList(messages, caps), caps)
 	body := map[string]any{
-		"model": c.wireModel(ctx),
-		// Tool-message media goes where this endpoint takes it (toolmedia.go).
-		"messages": c.wireMessageList(messages, caps),
+		"model":    c.wireModel(ctx),
+		"messages": wire,
 		"stream":   stream,
 	}
 	if stream {
@@ -1924,6 +1964,9 @@ func (c *Client) chatBody(ctx context.Context, messages []Message, tools []ToolD
 		return body, nil
 	}
 	var trs []Translation
+	if replayTr != nil {
+		trs = append(trs, *replayTr)
+	}
 	if opts != nil && opts.Effort != EffortUnset {
 		// Reported on every request that did not get the level it asked for,
 		// after the record's last lesson: the resend after a refusal rebuilds
@@ -2266,8 +2309,11 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 	var result struct {
 		Choices []struct {
 			Message struct {
-				Content   string     `json:"content"`
-				ToolCalls []ToolCall `json:"tool_calls"`
+				Content          string          `json:"content"`
+				ToolCalls        []ToolCall      `json:"tool_calls"`
+				ReasoningContent string          `json:"reasoning_content"`
+				Reasoning        string          `json:"reasoning"`
+				ReasoningDetails json.RawMessage `json:"reasoning_details"`
 			} `json:"message"`
 			FinishReason       string `json:"finish_reason"`
 			NativeFinishReason string `json:"native_finish_reason"`
@@ -2310,10 +2356,18 @@ func (c *Client) ChatWithOpts(ctx context.Context, messages []Message, tools []T
 		return &ChatResult{Citations: citations}, nil
 	}
 	c.observeToolChoice(sent, result.Choices[0].FinishReason, len(result.Choices[0].Message.ToolCalls))
+	msg := result.Choices[0].Message
+	ds := parseReasoningDetails(msg.ReasoningDetails)
+	reasoning := msg.ReasoningContent + msg.Reasoning
+	if reasoning == "" {
+		reasoning = reasoningFromDetails(ds)
+	}
 	return &ChatResult{
-		Content:   result.Choices[0].Message.Content,
-		ToolCalls: result.Choices[0].Message.ToolCalls,
-		Citations: citations,
+		Content:         msg.Content,
+		ToolCalls:       msg.ToolCalls,
+		Citations:       citations,
+		Reasoning:       reasoning,
+		ReasoningOpaque: marshalReasoningDetails(mergeReasoningDetails(nil, ds)),
 	}, nil
 }
 
@@ -2431,6 +2485,14 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 	// "the provider truncated us" and "we mishandled a normal stream".
 	var sawDone, sawFinish bool
 	var events, contentChars int
+	// details is the round's reasoning_details, merged (replay.go); it rides
+	// on the Done chunks. plainReasoning: a delta carried reasoning_content or
+	// reasoning, so details text is never read as reasoning text again (the
+	// shim sends a thinking block's whole text once more, with its signature,
+	// at the block's end).
+	var details []reasoningItem
+	plainReasoning := false
+	opaque := func() json.RawMessage { return marshalReasoningDetails(details) }
 
 	// The degenerate-loop watcher for this stream. Nil only when the guard is
 	// off and the host installed none.
@@ -2530,7 +2592,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			sawDone = true
 			obs.done = true
 			_ = flushTools("")
-			send(StreamChunk{Done: true})
+			send(StreamChunk{Done: true, ReasoningOpaque: opaque()})
 			return
 		}
 
@@ -2547,7 +2609,8 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 					Reasoning        string `json:"reasoning"`
 					// OpenRouter's structured form of the same reasoning. Read
 					// only when both fields above are empty. See reasoningFromDetails.
-					ReasoningDetails []reasoningDetail `json:"reasoning_details"`
+					// Raw: merged verbatim into the replay record (replay.go).
+					ReasoningDetails json.RawMessage `json:"reasoning_details"`
 					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id,omitempty"`
@@ -2625,11 +2688,17 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 		}
 
 		// Reasoning is forwarded as it arrives, like content, and kept apart
-		// from it: it is not part of the reply and must not be replayed as one.
+		// from it: it is not part of the reply and is never replayed as reply
+		// text (replay.go sends it back in its own field, when asked).
 		r := choice.Delta.ReasoningContent + choice.Delta.Reasoning
+		if r != "" {
+			plainReasoning = true
+		}
+		ds := parseReasoningDetails(choice.Delta.ReasoningDetails)
+		details = mergeReasoningDetails(details, ds)
 		fromDetails := false
-		if r == "" {
-			r = reasoningFromDetails(choice.Delta.ReasoningDetails)
+		if r == "" && !plainReasoning {
+			r = reasoningFromDetails(ds)
 			fromDetails = r != ""
 		}
 		if r != "" {
@@ -2731,7 +2800,7 @@ func (c *Client) streamAttempt(ctx context.Context, body io.ReadCloser, rawCh ch
 			}
 			truncated := flushTools(choice.FinishReason)
 			obs.finish = choice.FinishReason
-			done := StreamChunk{Done: true, FinishReason: lastFinish, NativeFinishReason: lastNative}
+			done := StreamChunk{Done: true, FinishReason: lastFinish, NativeFinishReason: lastNative, ReasoningOpaque: opaque()}
 			// "length" is the provider saying it ran out of room. Reported on
 			// the Done chunk rather than swallowed, because the caller is the
 			// only party that knows which ceiling was hit — the max_tokens it
@@ -3025,30 +3094,4 @@ func bodyIsTruncatedToolCall(body string) bool {
 			strings.Contains(b, "missing closing quote") ||
 			strings.Contains(b, "parse_error") ||
 			strings.Contains(b, "invalid string"))
-}
-
-// reasoningDetail is one element of OpenRouter's delta.reasoning_details.
-type reasoningDetail struct {
-	Type    string `json:"type"`
-	Text    string `json:"text"`    // reasoning.text
-	Summary string `json:"summary"` // reasoning.summary
-	// reasoning.encrypted carries an opaque "data" blob. It is ignored: sending
-	// it back on the next request is out of scope here.
-}
-
-// reasoningFromDetails joins the text and summary entries of a delta's
-// reasoning_details. The caller uses it ONLY when delta.reasoning and
-// delta.reasoning_content are empty: OpenRouter often sends the same text in
-// both, and reading both would double it.
-func reasoningFromDetails(ds []reasoningDetail) string {
-	var b strings.Builder
-	for _, d := range ds {
-		switch d.Type {
-		case "reasoning.text":
-			b.WriteString(d.Text)
-		case "reasoning.summary":
-			b.WriteString(d.Summary)
-		}
-	}
-	return b.String()
 }

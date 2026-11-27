@@ -699,6 +699,7 @@ func refusalFacts(status int, body string, sent map[string]any) []factUpdate {
 		}
 	}
 	add(pydanticFacts(text, r))
+	add(replayRefusal(r))
 	return out
 }
 
