@@ -1121,6 +1121,7 @@ corrallm committed the bump as `a18fe07` (go.mod/go.sum only, no code changes), 
 - **optional extensions:** `count_tokens` in corrallm (see icebox: shim `EstimateTokens` counts base64).
 
 ### Releases
+- 2026-11-27: agentkit v0.44.3: llama.cpp template effort refusal + listed-level learning (90a41ce). dun-2a asked (L2 eval on local Qwen blocked); Carl approved here.
 - 2026-11-27: agentkit v0.44.2: taskgraph Report/Result (c826b4b). dun-2a asked; Carl confirmed here.
 - 2026-11-27: agentkit v0.44.1: taskgraph Markdown owner line + section rule (c109353). dun-2a asked; Carl approved here.
 - 2026-11-27: agentkit v0.44.0 + shim v0.7.0: reasoning replay (c82e9ec, 47bba77, c4628db; shim 66adce2), taskgraph Effort/Meta/Markdown/Validate (ca3fdbf, f5d8c5b). dun-2a asked (4.6x pi's cost on DeepSeek; plan as a Markdown file); Carl approved here.
