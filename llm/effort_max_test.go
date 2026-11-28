@@ -35,9 +35,21 @@ func sentEffortOf(b map[string]any) string { e, _ := sentEffort(b); return e }
 // refuseEfforts answers 400 (OpenAI's shape, naming the value) to each listed
 // effort and 200 to anything else.
 func refuseEfforts(levels ...string) func(int, map[string]any) (int, string) {
+	return refuseEffortsWith(openaiMaxRefusal, levels...)
+}
+
+// bareRefusal names the value and lists nothing, so only the sent level is
+// learned and the ladder's one-step-at-a-time clamp is what the tests see.
+const bareRefusal = `{"error":{"message":"'max' is not one of ['low', 'medium', 'high']"}}`
+
+func refuseEffortsBare(levels ...string) func(int, map[string]any) (int, string) {
+	return refuseEffortsWith(bareRefusal, levels...)
+}
+
+func refuseEffortsWith(body string, levels ...string) func(int, map[string]any) (int, string) {
 	return func(_ int, b map[string]any) (int, string) {
 		if e := sentEffortOf(b); slices.Contains(levels, e) {
-			return 400, strings.ReplaceAll(openaiMaxRefusal, "'max'", "'"+e+"'")
+			return 400, strings.ReplaceAll(body, "'max'", "'"+e+"'")
 		}
 		return 200, okReply
 	}
@@ -72,7 +84,7 @@ func TestFreshRecordSendsMaxNotAStaticXHighRewrite(t *testing.T) {
 func TestRefusedMaxIsLearnedAndResentOnceAtXHighWithAReason(t *testing.T) {
 	for _, d := range effortDialects {
 		t.Run(d.name, func(t *testing.T) {
-			srv := newCapServer(t, refuseEfforts("max"))
+			srv := newCapServer(t, refuseEffortsBare("max"))
 			c := d.client(srv.URL)
 			var trs []Translation
 			c.OnTranslate = func(tr Translation) { trs = append(trs, tr) }
@@ -97,7 +109,7 @@ func TestRefusedMaxIsLearnedAndResentOnceAtXHighWithAReason(t *testing.T) {
 func TestAfterMaxRefusalALaterRequestGoesStraightToXHigh(t *testing.T) {
 	for _, d := range effortDialects {
 		t.Run(d.name, func(t *testing.T) {
-			srv := newCapServer(t, refuseEfforts("max"))
+			srv := newCapServer(t, refuseEffortsBare("max"))
 			c := d.client(srv.URL)
 			if err := chatMax(t, c); err != nil {
 				t.Fatal(err)
@@ -118,7 +130,7 @@ func TestAfterMaxRefusalALaterRequestGoesStraightToXHigh(t *testing.T) {
 func TestRefusedXHighAfterMaxStepsOnToHigh(t *testing.T) {
 	for _, d := range effortDialects {
 		t.Run(d.name, func(t *testing.T) {
-			srv := newCapServer(t, refuseEfforts("max", "xhigh"))
+			srv := newCapServer(t, refuseEffortsBare("max", "xhigh"))
 			c := d.client(srv.URL)
 			if err := chatMax(t, c); err == nil {
 				t.Fatal("want the resend's 400 (one resend only)")
@@ -153,10 +165,10 @@ func TestAcceptedMaxIsRecordedAsAccepted(t *testing.T) {
 }
 
 func TestRefusalFactsReadsOpenAIInvalidValueShapeOnlyForTheSentEffort(t *testing.T) {
-	if f := factsOf(refusalFacts(400, openaiMaxRefusal, map[string]any{"reasoning_effort": "max"})); f[CapReasoningEffortsRefused] != "max" {
+	if f := factsOf(refusalFacts(400, bareRefusal, map[string]any{"reasoning_effort": "max"})); f[CapReasoningEffortsRefused] != "max" {
 		t.Fatalf("openai field: %v", f)
 	}
-	if f := factsOf(refusalFacts(400, openaiMaxRefusal, map[string]any{"reasoning": map[string]any{"effort": "max"}})); f[CapReasoningEffortsRefused] != "max" {
+	if f := levelsOf(refusalFacts(400, openaiMaxRefusal, map[string]any{"reasoning": map[string]any{"effort": "max"}})); !slices.Contains(f[CapReasoningEffortsRefused], "max") {
 		t.Fatalf("openrouter field: %v", f)
 	}
 	// A different value was sent: the refusal is not about it.

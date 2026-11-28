@@ -528,6 +528,49 @@ func (r refusalCtx) effortRefused(match string) factUpdate {
 	}
 }
 
+// supportedLevelsRe finds the levels a refusal says the endpoint takes:
+// llama.cpp "supported levels: low, medium, xhigh" and OpenAI "Supported values
+// are: 'low', 'medium', and 'high'." Only words on the effort ladder count.
+var supportedLevelsRe = regexp.MustCompile(`(?i)supported levels: ([\w, ]+)|supported values are: ((?:'\w+'|,|\s|and)+)`)
+
+var wordRe = regexp.MustCompile(`\w+`)
+
+// effortRefusedListed is effortRefused plus, when the body lists the levels the
+// endpoint takes, the whole ladder in one pass: each listed level is accepted,
+// each unlisted one refused. none is left alone: a list of effort levels says
+// nothing about turning thinking off (reasoning.off and thinking_only own
+// that), and refusing it would rewrite none to the lowest level. Call it only
+// when the refusal is anchored to the effort sent; the list is that endpoint's
+// own statement about the field, so it is as trustworthy as the anchor.
+func (r refusalCtx) effortRefusedListed(match string) []factUpdate {
+	out := []factUpdate{r.effortRefused(match)}
+	m := supportedLevelsRe.FindStringSubmatch(r.text)
+	if m == nil {
+		return out
+	}
+	listed := map[string]bool{}
+	for _, w := range wordRe.FindAllString(m[1]+m[2], -1) {
+		if w = strings.ToLower(w); effortRank(w) < len(effortLadder) {
+			listed[w] = true
+		}
+	}
+	if len(listed) == 0 {
+		return out
+	}
+	ev := r.evidence(r.effortField+"="+r.effort, "lists "+clip(strings.TrimSpace(m[0]), 100))
+	for _, l := range effortLadder {
+		if l == "none" || l == r.effort {
+			continue
+		}
+		key, opp := CapReasoningEffortsRefused, CapReasoningEffortsAccepted
+		if listed[l] {
+			key, opp = opp, key
+		}
+		out = append(out, factUpdate{Key: key, Value: l, List: true, Opposite: opp, Evidence: ev})
+	}
+	return out
+}
+
 // paramRefused is the fact for "the endpoint does not take field X". Only for a
 // field that was sent: on the Messages API the shim writes fields of its own,
 // and a refusal of one of those says nothing about the OpenAI-shaped request.
@@ -560,7 +603,7 @@ var refusalPatterns = []refusalPattern{
 	// with this model. Supported values are: 'low', 'medium', and 'high'."
 	{regexp.MustCompile(`Unsupported value: '([\w.]+)' does not support '([^']*)'`), func(m []string, r refusalCtx) []factUpdate {
 		if namesEffortField(m[1]) && r.effort != "" && m[2] == r.effort {
-			return []factUpdate{r.effortRefused(m[0])}
+			return r.effortRefusedListed(m[0])
 		}
 		return nil
 	}},
@@ -571,7 +614,17 @@ var refusalPatterns = []refusalPattern{
 	// body (its param) names an effort field.
 	{regexp.MustCompile(`Invalid value: '([^']*)'\.? Supported values are`), func(m []string, r refusalCtx) []factUpdate {
 		if r.effort != "" && m[1] == r.effort && namesEffortField(r.text) {
-			return []factUpdate{r.effortRefused(m[0])}
+			return r.effortRefusedListed(m[0])
+		}
+		return nil
+	}},
+	// llama.cpp (through corrallm), HTTP 400: {"error":{"code":400,"message":
+	// "reasoning_effort \"max\" is not supported by the chat template, supported
+	// levels: low, medium, xhigh","type":"invalid_request_error"}}. The message
+	// names the field and the value; anchored to the value sent.
+	{regexp.MustCompile(`reasoning_effort "(\w+)" is not supported by the chat template`), func(m []string, r refusalCtx) []factUpdate {
+		if r.effort != "" && m[1] == r.effort {
+			return r.effortRefusedListed(m[0])
 		}
 		return nil
 	}},

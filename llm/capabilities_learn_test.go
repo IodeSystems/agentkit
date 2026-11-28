@@ -91,7 +91,7 @@ func TestRefusalPatternsTeachOnlyWhatTheBodyNames(t *testing.T) {
 			none, map[string]string{}},
 		{"openai unsupported effort value", 400,
 			`{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low', 'medium', and 'high'."}}`,
-			none, map[string]string{CapReasoningEffortsRefused: "none"}},
+			none, map[string]string{CapReasoningEffortsRefused: "max", CapReasoningEffortsAccepted: "high"}},
 		{"azure unrecognized argument", 400,
 			`{"error":{"message":"Unrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`,
 			none, map[string]string{"sampling.reasoning_effort": "refused"}},
